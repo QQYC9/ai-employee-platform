@@ -28,6 +28,9 @@ from apps.agent.api.v1.action_policies import (
 from apps.agent.api.v1.decision import (
     router as decision_router,
 )
+from apps.agent.api.v1.audit import (
+    router as audit_router,
+)
 
 from packages.auth.context import get_tenant_context
 from packages.models.domain import User
@@ -53,6 +56,7 @@ app.include_router(permissions_router, prefix=API_PREFIX)
 app.include_router(approvals_router, prefix=API_PREFIX)
 app.include_router(action_policies_router, prefix=API_PREFIX)
 app.include_router(decision_router, prefix=API_PREFIX)
+app.include_router(audit_router, prefix=API_PREFIX)
 
 
 @app.get("/")
