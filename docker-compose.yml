@@ -1,0 +1,41 @@
+﻿services:
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_employee_agent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: ai_employee_postgres
+    environment:
+      POSTGRES_DB: ai_employee
+      POSTGRES_USER: ai_employee
+      POSTGRES_PASSWORD: change_me_local
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai_employee_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
