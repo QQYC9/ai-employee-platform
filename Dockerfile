@@ -1,4 +1,4 @@
-﻿FROM python:3.13-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1
 COPY pyproject.toml .
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir fastapi uvicorn[standard] pydantic pydantic-settings
+    && pip install --no-cache-dir .
 
 COPY apps ./apps
 COPY packages ./packages
