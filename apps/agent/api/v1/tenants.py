@@ -65,7 +65,15 @@ def update_my_tenant(
 ):
     """
     Update the authenticated user's tenant.
+    Only tenant owners or administrators are permitted.
     """
+    user_role = (current_user.role or "").strip().lower()
+    if user_role not in ("owner", "tenant_owner", "admin", "tenant_admin", "superadmin", "platform_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only tenant owners or administrators can update tenant details",
+        )
+
     with tenant_context(current_user.tenant_id):
         service = TenantService(db)
 

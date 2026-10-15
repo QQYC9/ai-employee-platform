@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from packages.models.domain import Approval
+from packages.models.domain import Approval, User
 
 
 class ApprovalService:
@@ -115,12 +115,26 @@ class ApprovalService:
 
         return approval
 
+    @staticmethod
+    def is_role_authorized(role: str | None, requested_for: str) -> bool:
+        norm_role = (role or "").strip().lower()
+        norm_req = (requested_for or "").strip().lower()
+
+        if norm_role in ("owner", "tenant_owner", "superadmin", "platform_admin"):
+            return True
+        if norm_req in ("tenant_admin", "admin"):
+            return norm_role in ("admin", "tenant_admin")
+        if norm_req in ("tenant_user", "user", "member", ""):
+            return True
+        return False
+
     def approve(
         self,
         tenant_id: UUID,
         approval_id: UUID,
         decision_by_user_id: UUID,
         reason: str | None = None,
+        user_role: str | None = None,
     ) -> Approval:
         approval = self.get_approval(
             tenant_id,
@@ -128,6 +142,18 @@ class ApprovalService:
         )
 
         if approval is None:
+            # Check for cross-tenant access attempt
+            try:
+                cross_tenant = self.db.scalar(
+                    select(Approval).where(Approval.id == approval_id)
+                )
+                if cross_tenant is not None:
+                    raise PermissionError(
+                        "Cross-tenant access prohibited: approval belongs to another tenant"
+                    )
+            except Exception as e:
+                if isinstance(e, PermissionError):
+                    raise
             raise ValueError(
                 "Approval not found"
             )
@@ -137,13 +163,27 @@ class ApprovalService:
                 "Only pending approvals can be approved"
             )
 
+        # Enforce role authorization
+        if user_role is None:
+            try:
+                user = self.db.scalar(
+                    select(User).where(User.id == decision_by_user_id)
+                )
+                if user is not None:
+                    user_role = user.role
+            except Exception:
+                pass
+
+        if user_role is not None and not self.is_role_authorized(user_role, approval.requested_for):
+            raise PermissionError(
+                f"User role '{user_role}' is not authorized to approve requests for '{approval.requested_for}'"
+            )
+
         approval.status = "approved"
         approval.decision_by_user_id = decision_by_user_id
-        approval.reason = (
-            reason.strip()
-            if reason is not None
-            else None
-        )
+        clean_reason = reason.strip() if reason is not None else None
+        approval.decision_reason = clean_reason
+        approval.reason = clean_reason
 
         self.db.flush()
 
@@ -155,6 +195,7 @@ class ApprovalService:
         approval_id: UUID,
         decision_by_user_id: UUID,
         reason: str | None = None,
+        user_role: str | None = None,
     ) -> Approval:
         approval = self.get_approval(
             tenant_id,
@@ -162,6 +203,17 @@ class ApprovalService:
         )
 
         if approval is None:
+            try:
+                cross_tenant = self.db.scalar(
+                    select(Approval).where(Approval.id == approval_id)
+                )
+                if cross_tenant is not None:
+                    raise PermissionError(
+                        "Cross-tenant access prohibited: approval belongs to another tenant"
+                    )
+            except Exception as e:
+                if isinstance(e, PermissionError):
+                    raise
             raise ValueError(
                 "Approval not found"
             )
@@ -171,13 +223,27 @@ class ApprovalService:
                 "Only pending approvals can be rejected"
             )
 
+        # Enforce role authorization
+        if user_role is None:
+            try:
+                user = self.db.scalar(
+                    select(User).where(User.id == decision_by_user_id)
+                )
+                if user is not None:
+                    user_role = user.role
+            except Exception:
+                pass
+
+        if user_role is not None and not self.is_role_authorized(user_role, approval.requested_for):
+            raise PermissionError(
+                f"User role '{user_role}' is not authorized to reject requests for '{approval.requested_for}'"
+            )
+
         approval.status = "rejected"
         approval.decision_by_user_id = decision_by_user_id
-        approval.reason = (
-            reason.strip()
-            if reason is not None
-            else None
-        )
+        clean_reason = reason.strip() if reason is not None else None
+        approval.decision_reason = clean_reason
+        approval.reason = clean_reason
 
         self.db.flush()
 
@@ -187,6 +253,8 @@ class ApprovalService:
         self,
         tenant_id: UUID,
         approval_id: UUID,
+        user_id: UUID | None = None,
+        user_role: str | None = None,
     ) -> Approval:
         approval = self.get_approval(
             tenant_id,
@@ -194,6 +262,17 @@ class ApprovalService:
         )
 
         if approval is None:
+            try:
+                cross_tenant = self.db.scalar(
+                    select(Approval).where(Approval.id == approval_id)
+                )
+                if cross_tenant is not None:
+                    raise PermissionError(
+                        "Cross-tenant access prohibited: approval belongs to another tenant"
+                    )
+            except Exception as e:
+                if isinstance(e, PermissionError):
+                    raise
             raise ValueError(
                 "Approval not found"
             )
@@ -203,8 +282,24 @@ class ApprovalService:
                 "Only pending approvals can be cancelled"
             )
 
+        if user_role is None and user_id is not None:
+            try:
+                user = self.db.scalar(
+                    select(User).where(User.id == user_id)
+                )
+                if user is not None:
+                    user_role = user.role
+            except Exception:
+                pass
+
+        if user_role is not None and user_role not in (
+            "owner", "tenant_owner", "admin", "tenant_admin", "superadmin"
+        ):
+            raise PermissionError("Only administrators or owners can cancel approvals")
+
         approval.status = "cancelled"
 
         self.db.flush()
 
         return approval
+

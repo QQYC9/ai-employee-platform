@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from packages.auth.dependencies import get_db
@@ -53,9 +54,9 @@ def approval_response(approval: Approval) -> dict:
             if approval.decision_by_user_id is not None
             else None
         ),
-        "reason": approval.reason,
+        "reason": getattr(approval, "decision_reason", getattr(approval, "reason", None)),
         "created_at": approval.created_at,
-        "updated_at": approval.updated_at,
+        "updated_at": getattr(approval, "decided_at", getattr(approval, "updated_at", approval.created_at)),
     }
 
 
@@ -102,6 +103,14 @@ def get_approval(
     )
 
     if approval is None:
+        cross_tenant = db.scalar(
+            select(Approval).where(Approval.id == approval_id)
+        )
+        if cross_tenant is not None:
+            raise HTTPException(
+                status_code=403,
+                detail="Cross-tenant access prohibited",
+            )
         raise HTTPException(
             status_code=404,
             detail="Approval not found",
@@ -157,11 +166,18 @@ def approve_approval(
             approval_id=approval_id,
             decision_by_user_id=current_user.id,
             reason=payload.reason,
+            user_role=current_user.role,
         )
 
         db.commit()
         db.refresh(approval)
 
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        )
     except ValueError as exc:
         db.rollback()
 
@@ -194,11 +210,18 @@ def reject_approval(
             approval_id=approval_id,
             decision_by_user_id=current_user.id,
             reason=payload.reason,
+            user_role=current_user.role,
         )
 
         db.commit()
         db.refresh(approval)
 
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        )
     except ValueError as exc:
         db.rollback()
 
@@ -228,11 +251,19 @@ def cancel_approval(
         approval = service.cancel(
             tenant_id=current_user.tenant_id,
             approval_id=approval_id,
+            user_id=current_user.id,
+            user_role=current_user.role,
         )
 
         db.commit()
         db.refresh(approval)
 
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        )
     except ValueError as exc:
         db.rollback()
 
@@ -248,3 +279,4 @@ def cancel_approval(
         )
 
     return approval_response(approval)
+

@@ -1,4 +1,4 @@
-﻿from packages.models.tenant import Tenant
+from packages.models.tenant import Tenant
 from packages.models.domain import (
     User,
     Agent,
@@ -12,6 +12,7 @@ from packages.models.domain import (
     DevelopmentRequest,
     AuditEvent,
     Provenance,
+    IdempotencyRecord,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "DevelopmentRequest",
     "AuditEvent",
     "Provenance",
+    "IdempotencyRecord",
 ]

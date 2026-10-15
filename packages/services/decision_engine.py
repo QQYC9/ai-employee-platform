@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
+from typing import Any
 from uuid import UUID
 
 from packages.services.approval_service import ApprovalService
@@ -39,6 +42,9 @@ class DecisionEngine:
         action: str,
         resource: str | None = None,
         agent_id: UUID | None = None,
+        task_id: UUID | None = None,
+        tool_id: UUID | None = None,
+        parameters: dict[str, Any] | None = None,
     ) -> DecisionResult:
         allowed = self.permission_service.is_allowed(
             tenant_id=tenant_id,
@@ -70,6 +76,46 @@ class DecisionEngine:
                 decision="ALLOW",
                 reason="Action is permitted and approval is not required.",
             )
+
+        if task_id is not None:
+            approvals = self.approval_service.list_approvals(
+                tenant_id=tenant_id,
+                task_id=task_id,
+            )
+            matching_approvals = []
+            for a in approvals:
+                if a.action != action:
+                    continue
+                # If approval contains structured execution context, verify integrity
+                if "[context:" in a.description:
+                    try:
+                        ctx_str = a.description.split("[context:", 1)[1].rsplit("]", 1)[0]
+                        ctx = json.loads(ctx_str)
+                        if tool_id and ctx.get("tool_id") and ctx.get("tool_id") != str(tool_id):
+                            continue
+                        if resource and ctx.get("resource") and ctx.get("resource") != resource:
+                            continue
+                        if ctx.get("parameters_hash"):
+                            curr_hash = hashlib.sha256(
+                                json.dumps(parameters or {}, sort_keys=True).encode()
+                            ).hexdigest()
+                            if ctx.get("parameters_hash") != curr_hash:
+                                continue
+                    except Exception:
+                        pass
+                matching_approvals.append(a)
+
+            if matching_approvals:
+                if any(a.status == "approved" for a in matching_approvals):
+                    return DecisionResult(
+                        decision="ALLOW",
+                        reason="Action is permitted and approval has been approved.",
+                    )
+                if matching_approvals[0].status == "rejected":
+                    return DecisionResult(
+                        decision="DENY",
+                        reason=f"Approval for action '{action}' was rejected.",
+                    )
 
         return DecisionResult(
             decision="APPROVAL_REQUIRED",

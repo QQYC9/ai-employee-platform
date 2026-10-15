@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
@@ -24,6 +24,11 @@ class User(Base):
         nullable=False,
         default="tenant_user",
         server_default="tenant_user",
+    )
+    password_hash: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        default=None,
     )
     status: Mapped[str] = mapped_column(
         String(50),
@@ -379,6 +384,82 @@ class ActionPolicy(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+    tool_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tools.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(
+        String(150),
+        nullable=False,
+    )
+    resource: Mapped[str | None] = mapped_column(
+        String(150),
+        nullable=True,
+    )
+    parameters_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="in_progress",
+        server_default="in_progress",
+        index=True,
+    )
+    result: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+    error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    locked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "idempotency_key",
+            name="uq_tenant_idempotency_key",
+        ),
+    )
+
 class Learning(Base):
     __tablename__ = "learnings"
 

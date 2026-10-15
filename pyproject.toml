@@ -13,9 +13,11 @@ dependencies = [
     "uvicorn[standard]>=0.52,<1.0",
     "pydantic>=2.13,<3.0",
     "pydantic-settings>=2.15,<3.0",
+    "google-genai>=1.75,<2.0",
     "SQLAlchemy>=2.0,<3.0",
     "alembic>=1.16,<2.0",
     "psycopg[binary]>=3.2,<4.0",
+    "pyjwt>=2.8,<3.0",
 ]
 
 [tool.setuptools]
@@ -23,3 +25,5 @@ py-modules = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
+

@@ -1,18 +1,39 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from packages.models.domain import Task
+from packages.models.domain import Task, User
+from packages.services.agent_capability_service import AgentCapabilityService
 from packages.services.approval_service import ApprovalService
+from packages.services.audit_service import AuditService
+from packages.services.capability_tool_service import CapabilityToolService
 from packages.tools.executor import ToolExecutor
 
 
 class TaskExecutionService:
-    def __init__(self, db: Session):
+    def __init__(
+        self,
+        db: Session,
+        approval_service: ApprovalService | None = None,
+        audit_service: AuditService | None = None,
+        agent_capability_service: AgentCapabilityService | None = None,
+        capability_tool_service: CapabilityToolService | None = None,
+    ):
         self.db = db
-        self.approval_service = ApprovalService(db)
+        self.approval_service = approval_service or ApprovalService(db)
+        self.audit_service = audit_service or AuditService(db)
+        self.agent_capability_service = (
+            agent_capability_service or AgentCapabilityService(db)
+        )
+        self.capability_tool_service = (
+            capability_tool_service or CapabilityToolService(db)
+        )
 
     def _get_task(
         self,
@@ -68,6 +89,18 @@ class TaskExecutionService:
         task.error = None
         self.db.flush()
 
+        self.audit_service.record_event(
+            tenant_id=tenant_id,
+            agent_id=task.agent_id,
+            event_type="task_completed",
+            action="complete_task",
+            description=f"Task '{task.title}' completed successfully",
+            event_metadata={
+                "task_id": str(task.id),
+                "status": "completed",
+            },
+        )
+
         return task
 
     def fail_task(
@@ -75,6 +108,7 @@ class TaskExecutionService:
         tenant_id: UUID,
         task_id: UUID,
         error: str,
+        record_audit: bool = True,
     ) -> Task:
         task = self._get_task(tenant_id, task_id)
 
@@ -89,6 +123,20 @@ class TaskExecutionService:
         task.status = "failed"
         task.error = error
         self.db.flush()
+
+        if record_audit:
+            self.audit_service.record_event(
+                tenant_id=tenant_id,
+                agent_id=task.agent_id,
+                event_type="task_failed",
+                action="fail_task",
+                description=error,
+                event_metadata={
+                    "task_id": str(task.id),
+                    "status": "failed",
+                    "error": error,
+                },
+            )
 
         return task
 
@@ -107,7 +155,7 @@ class TaskExecutionService:
                 f"Task cannot request approval from status: {task.status}"
             )
 
-        self.approval_service.create_approval(
+        approval = self.approval_service.create_approval(
             tenant_id=tenant_id,
             requested_for=requested_for,
             action=action,
@@ -118,6 +166,20 @@ class TaskExecutionService:
 
         task.status = "waiting_approval"
         self.db.flush()
+
+        self.audit_service.record_event(
+            tenant_id=tenant_id,
+            agent_id=task.agent_id,
+            event_type="approval_requested",
+            action=action,
+            description=description,
+            event_metadata={
+                "task_id": str(task.id),
+                "approval_id": str(approval.id),
+                "requested_for": requested_for,
+                "status": "waiting_approval",
+            },
+        )
 
         return task
 
@@ -150,10 +212,65 @@ class TaskExecutionService:
                 f"Task approval is not approved: {approval.status}"
             )
 
+        # Verify approver authority
+        if getattr(approval, "decision_by_user_id", None) is not None:
+            try:
+                approver = self.db.scalar(
+                    select(User).where(User.id == approval.decision_by_user_id)
+                )
+                if approver is not None and not ApprovalService.is_role_authorized(
+                    getattr(approver, "role", None), approval.requested_for
+                ):
+                    raise ValueError(
+                        f"Approval was granted by unauthorized user role: '{getattr(approver, 'role', None)}'"
+                    )
+            except Exception as exc:
+                if isinstance(exc, ValueError):
+                    raise
+
         task.status = "running"
         self.db.flush()
 
+        self.audit_service.record_event(
+            tenant_id=tenant_id,
+            agent_id=task.agent_id,
+            event_type="task_resumed",
+            action="resume_approved_task",
+            description=f"Task '{task.title}' resumed after approval",
+            event_metadata={
+                "task_id": str(task.id),
+                "approval_id": str(approval.id),
+                "status": "running",
+            },
+        )
+
         return task
+
+    def _ensure_tool_assigned_to_agent(
+        self,
+        tenant_id: UUID,
+        agent_id: UUID | None,
+        tool_id: UUID,
+    ) -> None:
+        if agent_id is None:
+            return
+
+        capabilities = self.agent_capability_service.list_capabilities(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+        )
+
+        for capability in capabilities:
+            tools = self.capability_tool_service.list_tools(
+                tenant_id=tenant_id,
+                capability_id=capability.id,
+            )
+            if any(tool.id == tool_id for tool in tools):
+                return
+
+        raise ValueError(
+            "Tool is not assigned to a capability of this agent"
+        )
 
     def execute_tool(
         self,
@@ -164,42 +281,86 @@ class TaskExecutionService:
         resource: str,
         parameters: dict | None = None,
         executor: ToolExecutor | None = None,
+        task_already_running: bool = False,
+        idempotency_key: str | None = None,
     ) -> Task:
         if executor is None:
             executor = ToolExecutor(self.db)
 
-        task = self._get_task(tenant_id, task_id)
-
-        if task.status != "pending":
-            raise ValueError(
-                f"Task cannot be executed from status: {task.status}"
-            )
-
-        self.start_task(
+        task = self._get_task(
             tenant_id=tenant_id,
             task_id=task_id,
         )
 
-        try:
-            execution = executor.execute(
+        if task_already_running:
+            if task.status != "running":
+                raise ValueError(
+                    "Task must be running when task_already_running is true"
+                )
+        else:
+            if task.status != "pending":
+                raise ValueError(
+                    f"Task cannot be executed from status: {task.status}"
+                )
+
+            self.start_task(
                 tenant_id=tenant_id,
-                tool_id=tool_id,
-                action=action,
-                resource=resource,
-                parameters=parameters,
-                agent_id=task.agent_id,
+                task_id=task_id,
             )
+
+        try:
+            self._ensure_tool_assigned_to_agent(
+                tenant_id=tenant_id,
+                agent_id=task.agent_id,
+                tool_id=tool_id,
+            )
+
+            execute_kwargs = {
+                "tenant_id": tenant_id,
+                "tool_id": tool_id,
+                "action": action,
+                "resource": resource,
+                "parameters": parameters,
+                "agent_id": task.agent_id,
+            }
+            try:
+                sig = inspect.signature(executor.execute)
+                if "task_id" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                ):
+                    execute_kwargs["task_id"] = task_id
+                if "idempotency_key" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                ):
+                    execute_kwargs["idempotency_key"] = idempotency_key
+            except (ValueError, TypeError):
+                execute_kwargs["task_id"] = task_id
+                execute_kwargs["idempotency_key"] = idempotency_key
+
+            execution = executor.execute(**execute_kwargs)
 
             if execution.status == "blocked":
                 if execution.decision == "APPROVAL_REQUIRED":
+                    params_hash = hashlib.sha256(
+                        json.dumps(parameters or {}, sort_keys=True).encode()
+                    ).hexdigest()
+                    context_payload = {
+                        "tool_id": str(tool_id),
+                        "tool_slug": execution.tool_slug,
+                        "resource": resource or "",
+                        "parameters_hash": params_hash,
+                    }
+                    approval_desc = (
+                        f"Approval required to execute tool: {execution.tool_slug}\n"
+                        f"[context:{json.dumps(context_payload, sort_keys=True)}]"
+                    )
                     self.request_approval(
                         tenant_id=tenant_id,
                         task_id=task_id,
                         action=action,
-                        description=(
-                            f"Approval required to execute tool: "
-                            f"{execution.tool_slug}"
-                        ),
+                        description=approval_desc,
                     )
                     return task
 
@@ -218,6 +379,12 @@ class TaskExecutionService:
                 )
                 return task
 
+            if task_already_running:
+                task.result = execution.output
+                task.error = None
+                self.db.flush()
+                return task
+
             return self.complete_task(
                 tenant_id=tenant_id,
                 task_id=task_id,
@@ -225,9 +392,33 @@ class TaskExecutionService:
             )
 
         except Exception as exc:
-            self.fail_task(
+            current_task = self._get_task(
                 tenant_id=tenant_id,
                 task_id=task_id,
-                error=str(exc),
             )
+
+            if current_task.status == "running":
+                self.fail_task(
+                    tenant_id=tenant_id,
+                    task_id=task_id,
+                    error=str(exc),
+                    record_audit=not isinstance(exc, ValueError),
+                )
+
+            if isinstance(exc, ValueError):
+                self.audit_service.record_event(
+                    tenant_id=tenant_id,
+                    agent_id=task.agent_id,
+                    event_type="tool_execution_blocked",
+                    action=action,
+                    description=str(exc),
+                    event_metadata={
+                        "tool_id": str(tool_id),
+                        "task_id": str(task_id),
+                        "resource": resource,
+                        "decision": "DENY",
+                        "status": "blocked",
+                    },
+                )
+
             raise

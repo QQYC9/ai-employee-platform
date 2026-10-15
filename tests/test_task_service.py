@@ -155,3 +155,26 @@ def test_agent_runtime_rejects_empty_request(db, tenant):
         )
 
 
+
+def test_agent_runtime_process_request(db, tenant):
+    runtime = AgentRuntime(db)
+
+    task = runtime.process_request(
+        tenant_id=tenant.id,
+        request="Prepare a basic competitor research task",
+        priority="high",
+    )
+
+    assert task.status == "completed"
+    assert task.priority == "high"
+    assert task.objective == "Prepare a basic competitor research task"
+    assert task.plan["objective"] == "Prepare a basic competitor research task"
+    assert len(task.plan["steps"]) == 3
+    assert task.plan["steps"][0]["step_type"] == "analysis"
+    assert task.plan["steps"][1]["step_type"] == "execution"
+    assert task.plan["steps"][2]["step_type"] == "verification"
+
+    assert task.result["steps"]
+    assert task.result["steps"][0]["step_type"] == "analysis"
+    assert task.result["steps"][1]["step_type"] == "execution"
+    assert task.result["steps"][2]["step_type"] == "verification"

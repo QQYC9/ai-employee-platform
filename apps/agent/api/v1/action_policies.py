@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from uuid import UUID
 
@@ -113,6 +113,13 @@ def create_action_policy(
     current_user: User = Depends(get_tenant_context),
     db: Session = Depends(get_db),
 ):
+    user_role = (current_user.role or "").strip().lower()
+    if user_role not in ("owner", "tenant_owner", "admin", "tenant_admin", "superadmin", "platform_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only tenant owners or administrators can manage action policies",
+        )
+
     service = ActionPolicyService(db)
 
     try:
@@ -146,6 +153,13 @@ def update_action_policy(
     current_user: User = Depends(get_tenant_context),
     db: Session = Depends(get_db),
 ):
+    user_role = (current_user.role or "").strip().lower()
+    if user_role not in ("owner", "tenant_owner", "admin", "tenant_admin", "superadmin", "platform_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only tenant owners or administrators can manage action policies",
+        )
+
     service = ActionPolicyService(db)
 
     try:
@@ -183,6 +197,13 @@ def delete_action_policy(
     current_user: User = Depends(get_tenant_context),
     db: Session = Depends(get_db),
 ):
+    user_role = (current_user.role or "").strip().lower()
+    if user_role not in ("owner", "tenant_owner", "admin", "tenant_admin", "superadmin", "platform_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only tenant owners or administrators can manage action policies",
+        )
+
     service = ActionPolicyService(db)
 
     try:
