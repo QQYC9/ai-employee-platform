@@ -226,6 +226,7 @@ def update_my_business_brain(
         )
         brain = service.update_brain(
             tenant_id=current_user.tenant_id,
+            updated_by_user_id=current_user.id,
             **update_data,
         )
         db.commit()

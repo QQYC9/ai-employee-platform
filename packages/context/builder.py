@@ -48,10 +48,17 @@ class ContextBuilder:
             **mem_kwargs,
         )
 
+        k_sig = inspect.signature(self.retriever.get_knowledge)
+        k_kwargs: dict[str, Any] = {
+            "query": knowledge_query or task.objective,
+            "limit": knowledge_limit,
+        }
+        if "customer_id" in k_sig.parameters:
+            k_kwargs["customer_id"] = customer_id
+
         knowledge = self.retriever.get_knowledge(
             tenant_id=tenant_id,
-            query=knowledge_query or task.objective,
-            limit=knowledge_limit,
+            **k_kwargs,
         )
 
         business: dict[str, Any] = {}
@@ -164,11 +171,28 @@ class ContextBuilder:
 
     @staticmethod
     def _knowledge_to_dict(item: Any) -> dict[str, Any]:
+        meta = getattr(item, "metadata_json", getattr(item, "metadata", {})) or {}
+        is_conflict = (
+            getattr(item, "is_conflict", False)
+            or (isinstance(meta, dict) and meta.get("conflict_status") == "flagged")
+        )
         return {
             "id": str(item.id),
             "title": item.title,
             "content": item.content,
-            "knowledge_type": item.knowledge_type,
-            "metadata": item.metadata_json,
-            "version": item.version,
+            "knowledge_type": getattr(item, "knowledge_type", "general"),
+            "provenance_id": (
+                str(item.provenance_id)
+                if getattr(item, "provenance_id", None)
+                else None
+            ),
+            "metadata": meta,
+            "version": getattr(item, "version", 1),
+            "is_conflict": bool(is_conflict),
+            "conflict_warning": (
+                meta.get("conflict_reason")
+                if is_conflict and isinstance(meta, dict)
+                else None
+            ),
+            "is_untrusted_data": True,
         }

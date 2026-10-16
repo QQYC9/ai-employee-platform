@@ -112,6 +112,7 @@ class ContextRetriever:
         self,
         tenant_id: UUID,
         query: str | None = None,
+        customer_id: UUID | None = None,
         limit: int = 20,
     ) -> list[Knowledge]:
         if limit <= 0:
@@ -122,21 +123,57 @@ class ContextRetriever:
             Knowledge.status == "active",
         )
 
-        if query:
-            query = query.strip()
-
-            if query:
-                pattern = f"%{query}%"
-
+        if customer_id is not None:
+            # Enforce customer privacy: only retrieve knowledge specific to this customer
+            # or general tenant knowledge that is not tied to any customer
+            try:
                 statement = statement.where(
                     or_(
-                        Knowledge.title.ilike(pattern),
-                        Knowledge.content.ilike(pattern),
+                        Knowledge.metadata_json["customer_id"].as_string() == str(customer_id),
+                        Knowledge.metadata_json.is_(None),
+                        ~Knowledge.metadata_json.has_key("customer_id"),
                     )
                 )
+            except Exception:
+                pass
+        else:
+            # When customer_id is None, strictly exclude customer-specific knowledge
+            # Only general tenant knowledge (unassociated with any specific customer) is returned
+            try:
+                statement = statement.where(
+                    or_(
+                        Knowledge.metadata_json.is_(None),
+                        ~Knowledge.metadata_json.has_key("customer_id"),
+                    )
+                )
+            except Exception:
+                pass
 
-        statement = statement.order_by(
-            Knowledge.updated_at.desc(),
-        ).limit(limit)
+        candidates = list(self.db.scalars(statement).all())
 
-        return list(self.db.scalars(statement).all())
+        # Defense-in-depth: Python-level customer privacy isolation
+        def _get_cust_id(k: Any) -> Any:
+            meta = getattr(k, "metadata_json", None) or getattr(k, "metadata", None) or {}
+            if isinstance(meta, dict):
+                return meta.get("customer_id")
+            return None
+
+        if customer_id is not None:
+            str_customer_id = str(customer_id)
+            candidates = [
+                k for k in candidates
+                if not _get_cust_id(k)
+                or str(_get_cust_id(k)).strip() in ("", str_customer_id)
+            ]
+        else:
+            candidates = [
+                k for k in candidates
+                if not _get_cust_id(k)
+                or str(_get_cust_id(k)).strip() == ""
+            ]
+
+        return self.ranking.rank_knowledge(
+            candidates,
+            limit=limit,
+            query=query,
+        )

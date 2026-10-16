@@ -8,6 +8,7 @@ from apps.agent.api.v1.customers import router as customers_router
 from apps.agent.api.v1.channels import router as channels_router
 from apps.agent.api.v1.conversations import router as conversations_router
 from apps.agent.api.v1.memory import router as memory_router
+from apps.agent.api.v1.knowledge import router as knowledge_router
 from apps.agent.api.v1.capabilities import router as capabilities_router
 from apps.agent.api.v1.agent_capabilities import (
     router as agent_capabilities_router,
@@ -36,7 +37,14 @@ from apps.agent.api.v1.audit import (
 )
 
 from packages.auth.context import get_tenant_context
+from packages.auth.dependencies import get_db
 from packages.models.domain import User
+from sqlalchemy.orm import Session
+from apps.agent.api.v1.tenants import (
+    BusinessBrainUpdateRequest,
+    get_my_business_brain,
+    update_my_business_brain,
+)
 
 app = FastAPI(
     title="AI Employee Platform",
@@ -53,6 +61,7 @@ app.include_router(customers_router, prefix=API_PREFIX)
 app.include_router(channels_router, prefix=API_PREFIX)
 app.include_router(conversations_router, prefix=API_PREFIX)
 app.include_router(memory_router, prefix=API_PREFIX)
+app.include_router(knowledge_router, prefix=API_PREFIX)
 app.include_router(capabilities_router, prefix=API_PREFIX)
 app.include_router(agent_capabilities_router, prefix=API_PREFIX)
 app.include_router(tools_router, prefix=API_PREFIX)
@@ -89,3 +98,20 @@ def get_me(
         "name": current_user.name,
         "role": current_user.role,
     }
+
+
+@app.get("/api/v1/me/brain")
+def get_me_brain(
+    current_user: User = Depends(get_tenant_context),
+    db: Session = Depends(get_db),
+):
+    return get_my_business_brain(current_user=current_user, db=db)
+
+
+@app.patch("/api/v1/me/brain")
+def patch_me_brain(
+    payload: BusinessBrainUpdateRequest,
+    current_user: User = Depends(get_tenant_context),
+    db: Session = Depends(get_db),
+):
+    return update_my_business_brain(payload=payload, current_user=current_user, db=db)
