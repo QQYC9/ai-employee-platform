@@ -21,6 +21,7 @@ from packages.services.idempotency_service import (
     ReconciliationRequiredError,
 )
 from packages.services.task_execution_service import TaskExecutionService
+from packages.services.task_lifecycle import InvalidStateTransitionError
 from packages.services.task_planner import PlanStep
 from packages.services.task_service import TaskService
 
@@ -46,6 +47,23 @@ class AgentRequest(BaseModel):
     request: str = Field(min_length=1)
     agent_id: UUID | None = None
     priority: str = "normal"
+
+
+class TaskPlanRequest(BaseModel):
+    steps: list[dict[str, Any]] | None = None
+
+
+class TaskResumeRequest(BaseModel):
+    approval_id: UUID | None = None
+
+
+class TaskCancelRequest(BaseModel):
+    reason: str | None = None
+
+
+class TaskRetryRequest(BaseModel):
+    reason: str | None = None
+    reconciled: bool = False
 
 
 def serialize_task(task: Task) -> dict:
@@ -226,14 +244,6 @@ def update_task(
             status_code=status_code,
             detail=str(exc),
         )
-
-
-class TaskPlanRequest(BaseModel):
-    steps: list[dict[str, Any]] | None = None
-
-
-class TaskResumeRequest(BaseModel):
-    approval_id: UUID | None = None
 
 
 @router.post(
@@ -432,4 +442,128 @@ def resume_task(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{task_id}/cancel")
+def cancel_task(
+    task_id: UUID,
+    payload: TaskCancelRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = TaskService(db)
+    task = service.get_task(current_user.tenant_id, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    user_role = (current_user.role or "").strip().lower()
+    is_admin_or_owner = user_role in ("owner", "tenant_owner", "admin", "tenant_admin", "superadmin", "platform_admin")
+    is_task_requester = getattr(task, "requested_by_user_id", None) == current_user.id
+
+    if not (is_admin_or_owner or is_task_requester):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: User lacks permissions to cancel this task",
+        )
+
+    exec_service = TaskExecutionService(db)
+    try:
+        task = exec_service.cancel_task(
+            tenant_id=current_user.tenant_id,
+            task_id=task_id,
+            reason=payload.reason if payload else None,
+        )
+        db.commit()
+        db.refresh(task)
+        return serialize_task(task)
+    except InvalidStateTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/{task_id}/retry")
+def retry_task(
+    task_id: UUID,
+    payload: TaskRetryRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = TaskService(db)
+    task = service.get_task(current_user.tenant_id, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    user_role = (current_user.role or "").strip().lower()
+    is_admin_or_owner = user_role in ("owner", "tenant_owner", "admin", "tenant_admin", "superadmin", "platform_admin")
+    is_task_requester = getattr(task, "requested_by_user_id", None) == current_user.id
+
+    if not (is_admin_or_owner or is_task_requester):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: User lacks permissions to retry this task",
+        )
+
+    exec_service = TaskExecutionService(db)
+    try:
+        task = exec_service.retry_failed_task(
+            tenant_id=current_user.tenant_id,
+            task_id=task_id,
+            reason=payload.reason if payload else None,
+            reconciled=payload.reconciled if payload else False,
+        )
+        db.commit()
+        db.refresh(task)
+        return serialize_task(task)
+    except ReconciliationRequiredError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except InvalidStateTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/{task_id}/verification")
+def get_task_verification(
+    task_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = TaskService(db)
+    task = service.get_task(
+        tenant_id=current_user.tenant_id,
+        task_id=task_id,
+    )
+
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found",
+        )
+
+    result_payload = task.result if isinstance(task.result, dict) else {}
+    verification_data = result_payload.get("verification")
+    if verification_data is None:
+        return {
+            "task_id": str(task.id),
+            "status": task.status,
+            "verified": False,
+            "summary": "No verification evidence available for this task.",
+            "evidence": {},
+            "unresolved": ["Task has not completed verification."],
+            "details": {},
+        }
+
+    return {
+        "task_id": str(task.id),
+        "status": task.status,
+        **verification_data,
+    }
+
+
 

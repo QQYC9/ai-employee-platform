@@ -21,15 +21,17 @@ from packages.core.config import settings
 from packages.context.models import AgentContext, TaskContext
 from packages.context.retriever import ContextRetriever
 from packages.services.agent_capability_service import AgentCapabilityService
-from packages.services.idempotency_service import ConcurrencyConflictError
+from packages.services.idempotency_service import ConcurrencyConflictError, IdempotencyService
 from packages.services.capability_tool_service import CapabilityToolService
 from packages.services.gemini_task_planner import GeminiTaskPlanner
 from packages.services.task_execution_service import TaskExecutionService
+from packages.services.task_lifecycle import TaskStatus
 from packages.services.task_planner import (
     ExecutionPlan,
     PlanStep,
     TaskPlanner,
 )
+from packages.services.task_verification_service import TaskVerificationService
 from packages.tools.executor import ToolExecutor
 
 
@@ -193,7 +195,7 @@ class AgentOrchestrator:
             task_id=task_id,
         )
 
-        if task.status != "pending":
+        if task.status not in (TaskStatus.PENDING, TaskStatus.PLANNED):
             raise ValueError(
                 f"Task cannot be planned from status: {task.status}"
             )
@@ -240,6 +242,7 @@ class AgentOrchestrator:
             )
 
         task.plan = plan.to_dict()
+        task.status = TaskStatus.PLANNED
         self.db.flush()
 
         return plan
@@ -254,25 +257,7 @@ class AgentOrchestrator:
         Programmatically validates an execution plan prior to running any steps.
         Checks:
             1. Tool assignment to agent under tenant.
-            2. Agent permission to execute tool actions.
-            3. Parameter constraints.
         """
-        available_tools = self._get_available_tools(
-            tenant_id=tenant_id,
-            agent_id=task.agent_id,
-        )
-        allowed_tool_ids = {t["id"] for t in available_tools}
-
-        decision_engine = None
-        if self.tool_executor is not None and hasattr(self.tool_executor, "decision_engine"):
-            decision_engine = self.tool_executor.decision_engine
-        elif self.db is not None and hasattr(self.db, "query"):
-            from packages.services.decision_engine import DecisionEngine
-            try:
-                decision_engine = DecisionEngine(self.db)
-            except Exception:
-                decision_engine = None
-
         for step in plan.steps:
             if step.step_type == "tool":
                 if not step.tool_id:
@@ -283,21 +268,12 @@ class AgentOrchestrator:
                     raise ValueError(
                         f"Tool step requires action: {step.step_id}"
                     )
-                if task.agent_id is not None and str(step.tool_id) not in allowed_tool_ids:
-                    raise ValueError(
-                        f"Pre-execution validation failed: Tool '{step.tool_id}' is not authorized for agent '{task.agent_id}'"
-                    )
-                if decision_engine is not None and hasattr(decision_engine, "permission_service"):
-                    is_allowed = decision_engine.permission_service.is_allowed(
+                if task.agent_id is not None:
+                    self.executor._ensure_tool_assigned_to_agent(
                         tenant_id=tenant_id,
-                        action=step.action,
-                        resource=step.resource or "",
                         agent_id=task.agent_id,
+                        tool_id=step.tool_id,
                     )
-                    if not is_allowed:
-                        raise ValueError(
-                            f"Pre-execution validation failed: Action '{step.action}' is not permitted for agent '{task.agent_id}'"
-                        )
 
     def execute_task(
         self,
@@ -309,10 +285,36 @@ class AgentOrchestrator:
             task_id=task_id,
         )
 
-        if task.status not in ("pending", "running"):
+        if task.status not in (TaskStatus.PENDING, TaskStatus.PLANNED, TaskStatus.RUNNING):
             raise ValueError(
                 f"Task cannot be executed from status: {task.status}"
             )
+
+        # Concurrency protection
+        idempotency_service = getattr(self.tool_executor, "idempotency_service", None)
+        if idempotency_service is None and self.db is not None:
+            try:
+                idempotency_service = IdempotencyService(self.db)
+            except Exception:
+                idempotency_service = None
+
+        exec_lock_key = f"task_exec:{task_id}"
+        lock_acquired = False
+        if idempotency_service is not None:
+            try:
+                lock_status, _ = idempotency_service.acquire_or_check(
+                    tenant_id=tenant_id,
+                    idempotency_key=exec_lock_key,
+                    action="execute_task",
+                    resource="task",
+                    parameters={"task_id": str(task_id)},
+                    timeout_seconds=300,
+                )
+                lock_acquired = True
+            except ConcurrencyConflictError:
+                raise
+            except Exception:
+                pass
 
         if not task.plan or not task.plan.get("steps"):
             plan = self.plan_task(
@@ -334,7 +336,7 @@ class AgentOrchestrator:
                 ),
             )
 
-        if task.status == "pending":
+        if task.status in (TaskStatus.PENDING, TaskStatus.PLANNED):
             self.executor.start_task(
                 tenant_id=tenant_id,
                 task_id=task_id,
@@ -348,6 +350,9 @@ class AgentOrchestrator:
         }
 
         try:
+            # Pre-execution plan validation
+            self._validate_execution_plan(tenant_id, task, plan)
+
             for step in plan.steps:
                 existing_step = plan_steps_dict.get(step.step_id, {})
                 if existing_step.get("status") == "completed":
@@ -494,6 +499,11 @@ class AgentOrchestrator:
                         }
                         _safe_flag_modified(task, "plan")
                         self.db.flush()
+                    if lock_acquired and idempotency_service is not None:
+                        try:
+                            idempotency_service.fail(tenant_id, exec_lock_key, "waiting_approval")
+                        except Exception:
+                            pass
                     return OrchestrationResult(
                         status="waiting_approval",
                         task_id=task.id,
@@ -510,6 +520,11 @@ class AgentOrchestrator:
                         }
                         _safe_flag_modified(task, "plan")
                         self.db.flush()
+                    if lock_acquired and idempotency_service is not None:
+                        try:
+                            idempotency_service.fail(tenant_id, exec_lock_key, task.error or "step_failed")
+                        except Exception:
+                            pass
                     return OrchestrationResult(
                         status="failed",
                         task_id=task.id,
@@ -544,23 +559,83 @@ class AgentOrchestrator:
             )
 
             if current_task.status == "running":
+                # Workstream 4: Completion verification using evidence contract
+                verification_service = TaskVerificationService(self.db)
+                verification = verification_service.verify_completion(
+                    task=current_task,
+                    plan=plan,
+                    execution_results=execution_results,
+                )
+
+                if not verification.verified:
+                    err_msg = f"Task verification failed: {verification.summary}"
+                    self.executor.fail_task(
+                        tenant_id=tenant_id,
+                        task_id=task_id,
+                        error=err_msg,
+                    )
+                    current_task.result = {
+                        "steps": execution_results,
+                        "verification": {
+                            "verified": False,
+                            "summary": verification.summary,
+                            "unresolved": verification.unresolved,
+                            "details": verification.details,
+                        },
+                    }
+                    _safe_flag_modified(current_task, "result")
+                    self.db.flush()
+                    if lock_acquired and idempotency_service is not None:
+                        try:
+                            idempotency_service.fail(tenant_id, exec_lock_key, err_msg)
+                        except Exception:
+                            pass
+                    return OrchestrationResult(
+                        status="failed",
+                        task_id=task_id,
+                        plan=plan.to_dict(),
+                        result=current_task.result,
+                        error=err_msg,
+                    )
+
+                final_result = {
+                    "steps": execution_results,
+                    "verification": {
+                        "verified": True,
+                        "summary": verification.summary,
+                        "evidence": verification.evidence,
+                        "unresolved": [],
+                        "details": verification.details,
+                    },
+                }
                 self.executor.complete_task(
                     tenant_id=tenant_id,
                     task_id=task_id,
-                    result={"steps": execution_results},
+                    result=final_result,
                 )
+                if lock_acquired and idempotency_service is not None:
+                    try:
+                        idempotency_service.complete(tenant_id, exec_lock_key, result=final_result)
+                    except Exception:
+                        pass
 
             return OrchestrationResult(
                 status="completed",
                 task_id=task_id,
                 plan=plan.to_dict(),
-                result={"steps": execution_results},
+                result=current_task.result if current_task and current_task.result else {"steps": execution_results},
             )
 
         except ConcurrencyConflictError:
             raise
 
         except Exception as exc:
+            if lock_acquired and idempotency_service is not None:
+                try:
+                    idempotency_service.fail(tenant_id, exec_lock_key, str(exc))
+                except Exception:
+                    pass
+
             current_task = self.executor._get_task(
                 tenant_id=tenant_id,
                 task_id=task_id,
@@ -574,6 +649,26 @@ class AgentOrchestrator:
                 )
 
             raise
+
+    def resume_approved_task(
+        self,
+        tenant_id: UUID,
+        task_id: UUID,
+        approval_id: UUID,
+    ) -> OrchestrationResult:
+        """
+        Resume a task that was paused in waiting_approval status after approval.
+        Revalidates approval record, transitions task to running, and continues execution.
+        """
+        self.executor.resume_approved_task(
+            tenant_id=tenant_id,
+            task_id=task_id,
+            approval_id=approval_id,
+        )
+        return self.execute_task(
+            tenant_id=tenant_id,
+            task_id=task_id,
+        )
 
     @staticmethod
     def _deserialize_steps(

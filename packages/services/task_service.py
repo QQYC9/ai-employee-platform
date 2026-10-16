@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from packages.models.domain import Task
+from packages.services.task_lifecycle import TaskStatus, validate_transition
 
 
 class TaskService:
@@ -15,13 +16,7 @@ class TaskService:
     All operations are explicitly tenant-scoped.
     """
 
-    ALLOWED_STATUSES = {
-        "pending",
-        "running",
-        "waiting_approval",
-        "completed",
-        "failed",
-    }
+    ALLOWED_STATUSES = TaskStatus.ALL
 
     ALLOWED_PRIORITIES = {
         "low",

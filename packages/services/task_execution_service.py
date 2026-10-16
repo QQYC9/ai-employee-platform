@@ -13,6 +13,11 @@ from packages.services.agent_capability_service import AgentCapabilityService
 from packages.services.approval_service import ApprovalService
 from packages.services.audit_service import AuditService
 from packages.services.capability_tool_service import CapabilityToolService
+from packages.services.task_lifecycle import (
+    InvalidStateTransitionError,
+    TaskStatus,
+    validate_transition,
+)
 from packages.tools.executor import ToolExecutor
 
 
@@ -61,12 +66,15 @@ class TaskExecutionService:
     ) -> Task:
         task = self._get_task(tenant_id, task_id)
 
-        if task.status != "pending":
-            raise ValueError(
-                f"Task cannot be started from status: {task.status}"
+        if task.status not in (TaskStatus.PENDING, TaskStatus.PLANNED):
+            raise InvalidStateTransitionError(
+                task.status,
+                TaskStatus.RUNNING,
+                f"Task cannot be started from status: {task.status}",
             )
 
-        task.status = "running"
+        validate_transition(task.status, TaskStatus.RUNNING, task_id=str(task.id))
+        task.status = TaskStatus.RUNNING
         self.db.flush()
 
         return task
@@ -79,12 +87,15 @@ class TaskExecutionService:
     ) -> Task:
         task = self._get_task(tenant_id, task_id)
 
-        if task.status != "running":
-            raise ValueError(
-                f"Task cannot be completed from status: {task.status}"
+        if task.status != TaskStatus.RUNNING:
+            raise InvalidStateTransitionError(
+                task.status,
+                TaskStatus.COMPLETED,
+                f"Task cannot be completed from status: {task.status}",
             )
 
-        task.status = "completed"
+        validate_transition(task.status, TaskStatus.COMPLETED, task_id=str(task.id))
+        task.status = TaskStatus.COMPLETED
         task.result = result
         task.error = None
         self.db.flush()
@@ -97,7 +108,7 @@ class TaskExecutionService:
             description=f"Task '{task.title}' completed successfully",
             event_metadata={
                 "task_id": str(task.id),
-                "status": "completed",
+                "status": TaskStatus.COMPLETED,
             },
         )
 
@@ -112,15 +123,18 @@ class TaskExecutionService:
     ) -> Task:
         task = self._get_task(tenant_id, task_id)
 
-        if task.status != "running":
-            raise ValueError(
-                f"Task cannot be failed from status: {task.status}"
-            )
-
         if not error.strip():
             raise ValueError("Task error cannot be empty")
 
-        task.status = "failed"
+        if task.status not in (TaskStatus.RUNNING, TaskStatus.PLANNING, TaskStatus.WAITING_APPROVAL):
+            raise InvalidStateTransitionError(
+                task.status,
+                TaskStatus.FAILED,
+                f"Task cannot be failed from status: {task.status}",
+            )
+
+        validate_transition(task.status, TaskStatus.FAILED, task_id=str(task.id))
+        task.status = TaskStatus.FAILED
         task.error = error
         self.db.flush()
 
@@ -133,11 +147,98 @@ class TaskExecutionService:
                 description=error,
                 event_metadata={
                     "task_id": str(task.id),
-                    "status": "failed",
+                    "status": TaskStatus.FAILED,
                     "error": error,
                 },
             )
 
+        return task
+
+    def cancel_task(
+        self,
+        tenant_id: UUID,
+        task_id: UUID,
+        reason: str | None = None,
+    ) -> Task:
+        """Cancel a non-terminal task."""
+        task = self._get_task(tenant_id, task_id)
+
+        if task.status in TaskStatus.TERMINAL:
+            raise InvalidStateTransitionError(
+                task.status,
+                TaskStatus.CANCELLED,
+                f"Cannot cancel task in terminal status '{task.status}'",
+            )
+
+        validate_transition(task.status, TaskStatus.CANCELLED, task_id=str(task.id))
+        task.status = TaskStatus.CANCELLED
+        if reason and reason.strip():
+            task.error = f"Cancelled: {reason.strip()}"
+        self.db.flush()
+
+        self.audit_service.record_event(
+            tenant_id=tenant_id,
+            agent_id=task.agent_id,
+            event_type="task_cancelled",
+            action="cancel_task",
+            description=f"Task '{task.title}' was cancelled ({reason or 'no reason'})",
+            event_metadata={
+                "task_id": str(task.id),
+                "status": TaskStatus.CANCELLED,
+                "reason": reason,
+            },
+        )
+        return task
+
+    def retry_failed_task(
+        self,
+        tenant_id: UUID,
+        task_id: UUID,
+        reason: str | None = None,
+        reconciled: bool = False,
+    ) -> Task:
+        """Explicitly recover and retry a failed task."""
+        task = self._get_task(tenant_id, task_id)
+
+        if task.status != TaskStatus.FAILED:
+            raise InvalidStateTransitionError(
+                task.status,
+                TaskStatus.PLANNED,
+                f"Only failed tasks can be retried, current status: '{task.status}'",
+            )
+
+        validate_transition(task.status, TaskStatus.PLANNED, is_recovery=True, task_id=str(task.id))
+
+        # Check reconciliation requirements in plan steps
+        if task.plan and isinstance(task.plan, dict) and "steps" in task.plan:
+            for s in task.plan["steps"]:
+                if s.get("status") == "reconciliation_required":
+                    if not reconciled:
+                        from packages.services.idempotency_service import ReconciliationRequiredError
+                        raise ReconciliationRequiredError(
+                            f"Task '{task_id}' step '{s.get('step_id')}' requires manual reconciliation before retry."
+                        )
+                    s["status"] = "pending"
+                elif s.get("status") in ("failed", "in_progress"):
+                    s["status"] = "pending"
+                    s.pop("error", None)
+
+        task.status = TaskStatus.PLANNED
+        task.error = None
+        self.db.flush()
+
+        self.audit_service.record_event(
+            tenant_id=tenant_id,
+            agent_id=task.agent_id,
+            event_type="task_retried",
+            action="retry_failed_task",
+            description=f"Task '{task.title}' retried after failure",
+            event_metadata={
+                "task_id": str(task.id),
+                "status": TaskStatus.PLANNED,
+                "reason": reason,
+            },
+        )
         return task
 
     def request_approval(
@@ -150,10 +251,14 @@ class TaskExecutionService:
     ) -> Task:
         task = self._get_task(tenant_id, task_id)
 
-        if task.status != "running":
-            raise ValueError(
-                f"Task cannot request approval from status: {task.status}"
+        if task.status != TaskStatus.RUNNING:
+            raise InvalidStateTransitionError(
+                task.status,
+                TaskStatus.WAITING_APPROVAL,
+                f"Task cannot request approval from status: {task.status}",
             )
+
+        validate_transition(task.status, TaskStatus.WAITING_APPROVAL, task_id=str(task.id))
 
         approval = self.approval_service.create_approval(
             tenant_id=tenant_id,
@@ -164,7 +269,7 @@ class TaskExecutionService:
             requested_by_agent_id=task.agent_id,
         )
 
-        task.status = "waiting_approval"
+        task.status = TaskStatus.WAITING_APPROVAL
         self.db.flush()
 
         self.audit_service.record_event(
@@ -177,7 +282,7 @@ class TaskExecutionService:
                 "task_id": str(task.id),
                 "approval_id": str(approval.id),
                 "requested_for": requested_for,
-                "status": "waiting_approval",
+                "status": TaskStatus.WAITING_APPROVAL,
             },
         )
 
@@ -191,9 +296,11 @@ class TaskExecutionService:
     ) -> Task:
         task = self._get_task(tenant_id, task_id)
 
-        if task.status != "waiting_approval":
-            raise ValueError(
-                f"Task cannot be resumed from status: {task.status}"
+        if task.status != TaskStatus.WAITING_APPROVAL:
+            raise InvalidStateTransitionError(
+                task.status,
+                TaskStatus.RUNNING,
+                f"Task cannot be resumed from status: {task.status}",
             )
 
         approval = self.approval_service.get_approval(
@@ -208,6 +315,10 @@ class TaskExecutionService:
             raise ValueError("Approval does not belong to task")
 
         if approval.status != "approved":
+            if approval.status == "rejected":
+                task.status = TaskStatus.FAILED
+                task.error = f"Cannot resume task: approval was rejected ({approval.decision_reason or 'no reason'})"
+                self.db.flush()
             raise ValueError(
                 f"Task approval is not approved: {approval.status}"
             )
@@ -228,7 +339,8 @@ class TaskExecutionService:
                 if isinstance(exc, ValueError):
                     raise
 
-        task.status = "running"
+        validate_transition(task.status, TaskStatus.RUNNING, task_id=str(task.id))
+        task.status = TaskStatus.RUNNING
         self.db.flush()
 
         self.audit_service.record_event(
@@ -240,7 +352,7 @@ class TaskExecutionService:
             event_metadata={
                 "task_id": str(task.id),
                 "approval_id": str(approval.id),
-                "status": "running",
+                "status": TaskStatus.RUNNING,
             },
         )
 
@@ -293,12 +405,12 @@ class TaskExecutionService:
         )
 
         if task_already_running:
-            if task.status != "running":
+            if task.status != TaskStatus.RUNNING:
                 raise ValueError(
                     "Task must be running when task_already_running is true"
                 )
         else:
-            if task.status != "pending":
+            if task.status not in (TaskStatus.PENDING, TaskStatus.PLANNED):
                 raise ValueError(
                     f"Task cannot be executed from status: {task.status}"
                 )

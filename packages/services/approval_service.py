@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from packages.models.domain import Approval, User
+from packages.models.domain import Approval, Task, User
 
 
 class ApprovalService:
@@ -244,6 +244,29 @@ class ApprovalService:
         clean_reason = reason.strip() if reason is not None else None
         approval.decision_reason = clean_reason
         approval.reason = clean_reason
+
+        # Synchronize rejection with associated waiting task if present
+        if approval.task_id is not None:
+            task = self.db.scalar(
+                select(Task).where(
+                    Task.id == approval.task_id,
+                    Task.tenant_id == tenant_id,
+                )
+            )
+            if task is not None and task.status == "waiting_approval":
+                task.status = "failed"
+                detail_r = clean_reason or "Approval rejected by authorized user"
+                task.error = f"Task failed: Required approval for '{approval.action}' was rejected ({detail_r})"
+                if task.plan and isinstance(task.plan, dict) and "steps" in task.plan:
+                    for s in task.plan["steps"]:
+                        if s.get("status") == "waiting_approval":
+                            s["status"] = "failed"
+                            s["error"] = task.error
+                from sqlalchemy.orm.attributes import flag_modified
+                try:
+                    flag_modified(task, "plan")
+                except Exception:
+                    pass
 
         self.db.flush()
 
