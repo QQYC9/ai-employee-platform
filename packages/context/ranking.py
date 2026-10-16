@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any, Iterable
 
 
@@ -29,24 +30,40 @@ class ContextRanking:
         self.confidence_weight = confidence_weight
         self.recency_weight = recency_weight
 
-    def score_memory(self, memory: Any) -> float:
+    def score_memory(self, memory: Any, query: str | None = None) -> float:
         importance = self._normalize(getattr(memory, "importance", 50))
         confidence = self._normalize(getattr(memory, "confidence", 50))
         recency = self._recency_score(
             getattr(memory, "updated_at", None)
         )
 
-        total_weight = (
-            self.importance_weight
-            + self.confidence_weight
-            + self.recency_weight
-        )
+        if query and query.strip():
+            query_score = self._query_relevance(getattr(memory, "content", ""), query)
+            relevance_weight = 0.20
+            total_weight = (
+                self.importance_weight
+                + self.confidence_weight
+                + self.recency_weight
+                + relevance_weight
+            )
+            score = (
+                importance * self.importance_weight
+                + confidence * self.confidence_weight
+                + recency * self.recency_weight
+                + query_score * relevance_weight
+            ) / total_weight
+        else:
+            total_weight = (
+                self.importance_weight
+                + self.confidence_weight
+                + self.recency_weight
+            )
 
-        score = (
-            importance * self.importance_weight
-            + confidence * self.confidence_weight
-            + recency * self.recency_weight
-        ) / total_weight
+            score = (
+                importance * self.importance_weight
+                + confidence * self.confidence_weight
+                + recency * self.recency_weight
+            ) / total_weight
 
         return round(score, 4)
 
@@ -54,13 +71,14 @@ class ContextRanking:
         self,
         memories: Iterable[Any],
         limit: int | None = None,
+        query: str | None = None,
     ) -> list[Any]:
         if limit is not None and limit <= 0:
             return []
 
         ranked = sorted(
             memories,
-            key=self.score_memory,
+            key=lambda m: self.score_memory(m, query=query),
             reverse=True,
         )
 
@@ -94,3 +112,18 @@ class ContextRanking:
 
         # The recency score halves approximately every 30 days.
         return 0.5 ** (age_days / 30)
+
+    @staticmethod
+    def _query_relevance(content: Any, query: str) -> float:
+        """Compute lexical word overlap relevance score between memory content and query."""
+        if not content or not isinstance(content, str) or not query:
+            return 0.0
+
+        content_words = {w.strip().lower() for w in re.findall(r"\w+", content) if len(w) > 2}
+        query_words = {w.strip().lower() for w in re.findall(r"\w+", query) if len(w) > 2}
+
+        if not query_words or not content_words:
+            return 0.0
+
+        matches = content_words.intersection(query_words)
+        return min(1.0, len(matches) / max(1, len(query_words)))

@@ -20,6 +20,8 @@ class ContextBuilder:
         memory_limit: int = 20,
         knowledge_limit: int = 20,
         knowledge_query: str | None = None,
+        customer_id: UUID | None = None,
+        conversation_id: UUID | None = None,
     ) -> AgentContext:
         if memory_limit < 0:
             raise ValueError("memory_limit cannot be negative")
@@ -31,10 +33,19 @@ class ContextBuilder:
             tenant_id=tenant_id,
         )
 
+        import inspect
+        sig = inspect.signature(self.retriever.get_memories)
+        mem_kwargs: dict[str, Any] = {"limit": memory_limit}
+        if "agent_id" in sig.parameters:
+            mem_kwargs["agent_id"] = task.agent_id
+        if "customer_id" in sig.parameters and customer_id is not None:
+            mem_kwargs["customer_id"] = customer_id
+        if "query" in sig.parameters and task.objective:
+            mem_kwargs["query"] = task.objective
+
         memories = self.retriever.get_memories(
             tenant_id=tenant_id,
-            agent_id=task.agent_id,
-            limit=memory_limit,
+            **mem_kwargs,
         )
 
         knowledge = self.retriever.get_knowledge(
@@ -67,10 +78,48 @@ class ContextBuilder:
                 "version": business_brain.version,
             }
 
+        # Resolve customer profile if available and requested
+        customer_data: dict[str, Any] | None = None
+        if customer_id is not None and hasattr(self.retriever, "db") and self.retriever.db is not None:
+            try:
+                from packages.services.customer_service import CustomerService
+                c_svc = CustomerService(self.retriever.db)
+                cust = c_svc.get_customer(tenant_id, customer_id)
+                if cust is not None:
+                    customer_data = {
+                        "id": str(cust.id),
+                        "name": cust.name,
+                        "email": cust.email,
+                        "phone": cust.phone,
+                        "customer_type": cust.customer_type,
+                        "profile": cust.profile or {},
+                    }
+            except Exception:
+                customer_data = None
+
+        # Resolve conversation context if available and requested
+        conversation_data: dict[str, Any] | None = None
+        if conversation_id is not None and hasattr(self.retriever, "db") and self.retriever.db is not None:
+            try:
+                from packages.services.conversation_service import ConversationService
+                conv_svc = ConversationService(self.retriever.db)
+                conv = conv_svc.get_conversation(tenant_id, conversation_id)
+                if conv is not None:
+                    conversation_data = {
+                        "id": str(conv.id),
+                        "subject": conv.subject,
+                        "status": conv.status,
+                        "metadata": conv.metadata_json or {},
+                    }
+            except Exception:
+                conversation_data = None
+
         return AgentContext(
             tenant_id=tenant_id,
             task=task,
             business=business,
+            customer=customer_data,
+            conversation=conversation_data,
             memories=[
                 self._memory_to_dict(memory)
                 for memory in memories
@@ -82,6 +131,7 @@ class ContextBuilder:
             metadata={
                 "memory_count": len(memories),
                 "knowledge_count": len(knowledge),
+                "is_untrusted_data": True,
             },
         )
 
@@ -103,12 +153,13 @@ class ContextBuilder:
             "content": memory.content,
             "importance": memory.importance,
             "confidence": memory.confidence,
-            "metadata": memory.metadata_json,
+            "metadata": getattr(memory, "metadata_json", getattr(memory, "metadata", {})),
             "expires_at": (
                 memory.expires_at.isoformat()
-                if memory.expires_at is not None
+                if getattr(memory, "expires_at", None) is not None
                 else None
             ),
+            "is_untrusted_data": True,
         }
 
     @staticmethod

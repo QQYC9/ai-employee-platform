@@ -7,6 +7,7 @@ from apps.agent.api.v1.tasks import router as tasks_router
 from apps.agent.api.v1.customers import router as customers_router
 from apps.agent.api.v1.channels import router as channels_router
 from apps.agent.api.v1.conversations import router as conversations_router
+from apps.agent.api.v1.memory import router as memory_router
 from apps.agent.api.v1.capabilities import router as capabilities_router
 from apps.agent.api.v1.agent_capabilities import (
     router as agent_capabilities_router,
@@ -51,6 +52,7 @@ app.include_router(tasks_router, prefix=API_PREFIX)
 app.include_router(customers_router, prefix=API_PREFIX)
 app.include_router(channels_router, prefix=API_PREFIX)
 app.include_router(conversations_router, prefix=API_PREFIX)
+app.include_router(memory_router, prefix=API_PREFIX)
 app.include_router(capabilities_router, prefix=API_PREFIX)
 app.include_router(agent_capabilities_router, prefix=API_PREFIX)
 app.include_router(tools_router, prefix=API_PREFIX)

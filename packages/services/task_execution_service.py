@@ -112,6 +112,25 @@ class TaskExecutionService:
             },
         )
 
+        # Automated task learning memory extraction hook (fail-safe)
+        try:
+            from packages.memory.extractor import MemoryExtractor
+            from packages.memory.service import MemoryService
+            extractor = MemoryExtractor()
+            ext_result = extractor.extract_from_task(task)
+            if ext_result.candidates:
+                mem_service = MemoryService(self.db, audit_service=self.audit_service)
+                with self.db.begin_nested():
+                    for candidate in ext_result.candidates:
+                        mem_service.save_candidate(tenant_id, candidate)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Automated task learning memory hook skipped for task %s: %s",
+                task.id,
+                exc.__class__.__name__,
+            )
+
         return task
 
     def fail_task(
