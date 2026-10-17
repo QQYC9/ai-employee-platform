@@ -259,16 +259,33 @@ class OutboxWorker:
             )
             session.commit()
 
+    def process_workflow_run(self, run_id: UUID) -> bool:
+        """Process a single proactive workflow run in an independent database transaction."""
+        from packages.services.proactive_workflow_service import ProactiveWorkflowService
+        with self.session_factory() as session:
+            try:
+                service = ProactiveWorkflowService(session)
+                success = service.execute_run(run_id)
+                session.commit()
+                return success
+            except Exception as exc:
+                session.rollback()
+                logger.error("Worker %s: error executing proactive workflow run %s: %s", self.worker_id, run_id, exc)
+                return False
+
     def run_once(self) -> int:
         """
         Execute a single polling iteration:
-          1. Recovers any stale events left by crashed workers.
-          2. Safely claims up to batch_size pending events with FOR UPDATE SKIP LOCKED.
-          3. Processes each event in an independent session.
+          1. Recovers any stale events/runs left by crashed workers.
+          2. Spawns runs for any due proactive workflows (interval/cron).
+          3. Safely claims up to batch_size pending outbox events and proactive runs with FOR UPDATE SKIP LOCKED.
+          4. Processes each item in an independent session.
 
-        Returns the number of events processed.
+        Returns the number of events/runs processed.
         """
-        # Step 1: Recover stale events
+        from packages.services.proactive_workflow_service import ProactiveWorkflowService
+
+        # Step 1: Recover stale events and runs
         with self.session_factory() as session:
             service = OutboxService(session)
             service.recover_stale_events(
@@ -276,9 +293,18 @@ class OutboxWorker:
                 worker_id=self.worker_id,
                 lock_timeout_seconds=self.lock_timeout_seconds,
             )
+            wf_service = ProactiveWorkflowService(session)
+            wf_service.recover_stale_runs(stale_threshold_seconds=self.lock_timeout_seconds)
+            session.commit()
 
-        # Step 2: Claim events
-        claimed_ids: list[UUID] = []
+        # Step 2: Spawn runs for due proactive workflows
+        with self.session_factory() as session:
+            wf_service = ProactiveWorkflowService(session)
+            wf_service.spawn_due_workflow_runs(limit=self.batch_size)
+            session.commit()
+
+        # Step 3: Claim pending outbox events
+        claimed_event_ids: list[UUID] = []
         with self.session_factory() as session:
             service = OutboxService(session)
             claimed = service.claim_events(
@@ -287,20 +313,37 @@ class OutboxWorker:
                 batch_size=self.batch_size,
                 lock_timeout_seconds=self.lock_timeout_seconds,
             )
-            claimed_ids = [e.id for e in claimed]
+            claimed_event_ids = [e.id for e in claimed]
 
+        # Step 4: Claim pending proactive workflow runs
+        claimed_run_ids: list[UUID] = []
+        with self.session_factory() as session:
+            wf_service = ProactiveWorkflowService(session)
+            claimed_runs = wf_service.claim_due_runs(
+                worker_id=self.worker_id,
+                batch_size=self.batch_size,
+                tenant_id=self.tenant_id,
+                lock_timeout_seconds=self.lock_timeout_seconds,
+            )
+            claimed_run_ids = [r.id for r in claimed_runs]
+            session.commit()
 
-        if not claimed_ids:
-            return 0
-
-        # Step 3: Process each claimed event independently
         processed_count = 0
-        for event_id in claimed_ids:
+
+        # Step 5: Process claimed outbox events independently
+        for event_id in claimed_event_ids:
             if self._stop_event.is_set():
                 logger.info("Worker %s stopping mid-batch", self.worker_id)
                 break
-            success = self.process_event(event_id)
-            if success:
+            if self.process_event(event_id):
+                processed_count += 1
+
+        # Step 6: Process claimed proactive workflow runs independently
+        for run_id in claimed_run_ids:
+            if self._stop_event.is_set():
+                logger.info("Worker %s stopping mid-batch", self.worker_id)
+                break
+            if self.process_workflow_run(run_id):
                 processed_count += 1
 
         return processed_count

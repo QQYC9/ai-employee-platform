@@ -56,6 +56,8 @@ class GeminiProvider:
         else:
             self.client = genai.Client(api_key=self.api_key)
 
+        self.last_usage: dict[str, Any] | None = None
+
     def _sanitize(self, message: str) -> str:
         """Mask sensitive keys, tokens, or credentials from error logs and exceptions."""
         if not message:
@@ -141,6 +143,16 @@ class GeminiProvider:
                 f"Gemini provider error: {sanitized_err}"
             ) from exc
 
+        usage_meta = getattr(response, "usage_metadata", None)
+        if usage_meta:
+            self.last_usage = {
+                "prompt_tokens": getattr(usage_meta, "prompt_token_count", 0) or 0,
+                "completion_tokens": getattr(usage_meta, "candidates_token_count", 0) or 0,
+                "total_tokens": getattr(usage_meta, "total_token_count", 0) or 0,
+            }
+        else:
+            self.last_usage = None
+
         text = getattr(response, "text", None)
         if not text or not text.strip():
             raise ValueError("Gemini returned an empty response")
@@ -194,6 +206,16 @@ class GeminiProvider:
             raise AIProviderError(
                 f"Gemini provider error: {sanitized_err}"
             ) from exc
+
+        usage_meta = getattr(response, "usage_metadata", None)
+        if usage_meta:
+            self.last_usage = {
+                "prompt_tokens": getattr(usage_meta, "prompt_token_count", 0) or 0,
+                "completion_tokens": getattr(usage_meta, "candidates_token_count", 0) or 0,
+                "total_tokens": getattr(usage_meta, "total_token_count", 0) or 0,
+            }
+        else:
+            self.last_usage = None
 
         text = getattr(response, "text", None)
         if not text or not text.strip():

@@ -41,6 +41,9 @@ from apps.agent.api.v1.ai_providers import (
 from apps.agent.api.v1.webhooks import (
     router as webhooks_router,
 )
+from apps.agent.api.v1.proactive_workflows import (
+    router as proactive_workflows_router,
+)
 
 from packages.auth.context import get_tenant_context
 from packages.auth.dependencies import get_db
@@ -120,6 +123,7 @@ app.include_router(decision_router, prefix=API_PREFIX)
 app.include_router(audit_router, prefix=API_PREFIX)
 app.include_router(ai_providers_router, prefix=API_PREFIX)
 app.include_router(webhooks_router, prefix=API_PREFIX)
+app.include_router(proactive_workflows_router, prefix=API_PREFIX)
 
 
 @app.get("/")

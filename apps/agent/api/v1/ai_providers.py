@@ -116,3 +116,71 @@ def test_provider_config(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+class AIBudgetRequest(BaseModel):
+    daily_token_limit: int | None = Field(default=None, ge=1)
+    monthly_token_limit: int | None = Field(default=None, ge=1)
+    is_hard_limit: bool = Field(default=True)
+
+
+@router.get("/usage/summary")
+def get_ai_usage_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retrieve token consumption and provider usage metrics for current tenant."""
+    from packages.services.ai_usage_service import AIUsageService
+    if current_user.tenant_id is None:
+        raise HTTPException(status_code=400, detail="User has no tenant association")
+    service = AIUsageService(db)
+    return service.get_usage_summary(current_user.tenant_id)
+
+
+@router.get("/usage/logs")
+def list_ai_usage_logs(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retrieve detailed invocation logs for current tenant."""
+    from packages.services.ai_usage_service import AIUsageService
+    if current_user.tenant_id is None:
+        raise HTTPException(status_code=400, detail="User has no tenant association")
+    service = AIUsageService(db)
+    return service.list_usage_logs(current_user.tenant_id, limit=limit, offset=offset)
+
+
+@router.get("/budget")
+def get_ai_budget(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retrieve AI quota and token limits for current tenant."""
+    from packages.services.ai_usage_service import AIUsageService
+    if current_user.tenant_id is None:
+        raise HTTPException(status_code=400, detail="User has no tenant association")
+    service = AIUsageService(db)
+    return service.get_budget_status(current_user.tenant_id)
+
+
+@router.put("/budget")
+def update_ai_budget(
+    payload: AIBudgetRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_tenant_admin),
+):
+    """Configure or update daily and monthly AI token quota limits for current tenant."""
+    from packages.services.ai_usage_service import AIUsageService
+    if current_user.tenant_id is None:
+        raise HTTPException(status_code=400, detail="User has no tenant association")
+    service = AIUsageService(db)
+    service.set_budget(
+        current_user.tenant_id,
+        daily_token_limit=payload.daily_token_limit,
+        monthly_token_limit=payload.monthly_token_limit,
+        is_hard_limit=payload.is_hard_limit,
+    )
+    db.commit()
+    return service.get_budget_status(current_user.tenant_id)

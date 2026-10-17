@@ -51,6 +51,99 @@ class AIProviderFactory:
         return sorted(list(cls._registry.keys()))
 
     @classmethod
+    def create_resilient_provider(
+        cls,
+        tenant_id: UUID | None = None,
+        db: Session | None = None,
+        primary_provider: str | None = None,
+        fallback_providers: list[str] | None = None,
+        task_id: UUID | None = None,
+        conversation_id: UUID | None = None,
+        max_retries_per_provider: int = 2,
+        **kwargs: Any,
+    ) -> AIProvider:
+        """
+        Create a ResilientAIProvider wrapping the resolved primary provider and any configured fallback providers.
+        """
+        from packages.ai_providers.resilient_provider import ResilientAIProvider
+
+        provider_chain: list[tuple[str, AIProvider]] = []
+
+        if db is not None:
+            from packages.services.ai_provider_service import AIProviderService
+            service = AIProviderService(db)
+            all_configs = service.list_configs(tenant_id=tenant_id)
+            active_configs = [
+                c for c in all_configs
+                if c.get("status") == "active" and (c.get("provider") or "").strip().lower() in cls._registry
+            ]
+
+            if primary_provider:
+                matched_primary = [c for c in active_configs if c.get("provider") == primary_provider]
+                other_configs = [c for c in active_configs if c.get("provider") != primary_provider]
+                ordered_configs = matched_primary + other_configs
+            else:
+                tenant_default = [c for c in active_configs if c.get("is_default") and c.get("tenant_id")]
+                tenant_other = [c for c in active_configs if not c.get("is_default") and c.get("tenant_id")]
+                global_default = [c for c in active_configs if c.get("is_default") and not c.get("tenant_id")]
+                global_other = [c for c in active_configs if not c.get("is_default") and not c.get("tenant_id")]
+                ordered_configs = tenant_default + tenant_other + global_default + global_other
+
+            seen_providers = set()
+            for cfg in ordered_configs:
+                p_name = cfg.get("provider")
+                if p_name and p_name not in seen_providers:
+                    try:
+                        p_inst = cls.create_provider(
+                            provider_name=p_name,
+                            tenant_id=tenant_id,
+                            db=db,
+                            **kwargs,
+                        )
+                        provider_chain.append((p_name, p_inst))
+                        seen_providers.add(p_name)
+                    except Exception as exc:
+                        logger.warning("Could not instantiate provider '%s' in resilient chain: %s", p_name, exc)
+
+        # Fallback if chain is empty
+        if not provider_chain:
+            single = cls.create_provider(
+                provider_name=primary_provider,
+                tenant_id=tenant_id,
+                db=db,
+                **kwargs,
+            )
+            resolved_name = getattr(single, "provider_name", primary_provider or "default")
+            provider_chain.append((resolved_name, single))
+
+        if fallback_providers:
+            existing_names = {p[0] for p in provider_chain}
+            for fb_name in fallback_providers:
+                clean_fb = fb_name.strip().lower()
+                if clean_fb not in existing_names and clean_fb in cls._registry:
+                    try:
+                        fb_inst = cls.create_provider(
+                            provider_name=clean_fb,
+                            tenant_id=tenant_id,
+                            db=db,
+                            **kwargs,
+                        )
+                        provider_chain.append((clean_fb, fb_inst))
+                        existing_names.add(clean_fb)
+                    except Exception as exc:
+                        logger.warning("Could not instantiate fallback provider '%s': %s", clean_fb, exc)
+
+        from packages.core.database import SessionLocal
+        return ResilientAIProvider(
+            providers=provider_chain,
+            tenant_id=tenant_id,
+            db_session_factory=SessionLocal,
+            max_retries_per_provider=max_retries_per_provider,
+            task_id=task_id,
+            conversation_id=conversation_id,
+        )
+
+    @classmethod
     def create_provider(
         cls,
         provider_name: str | None = None,
@@ -98,6 +191,19 @@ class AIProviderFactory:
             raise ValueError(
                 f"Unsupported AI provider: '{resolved_provider}'. Supported: {', '.join(cls.supported_providers())}"
             )
+
+        provider_cls = cls._registry[resolved_provider]
+        if provider_cls not in (GeminiProvider, OpenAICompatibleProvider):
+            try:
+                return provider_cls(
+                    api_key=resolved_api_key,
+                    model=resolved_model,
+                    base_url=resolved_base_url,
+                    timeout_seconds=timeout_seconds or 30.0,
+                    **kwargs,
+                )
+            except TypeError:
+                return provider_cls(**kwargs)
 
         # Provider-specific default resolution from settings
         if resolved_provider == "gemini":

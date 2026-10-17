@@ -68,6 +68,7 @@ class OpenAICompatibleProvider:
         self.default_temperature = default_temperature
         self.max_tokens = max_tokens
         self.extra_headers = extra_headers or {}
+        self.last_usage: dict[str, Any] | None = None
 
     def _sanitize(self, message: str) -> str:
         """Strip sensitive credentials, keys, or bearer tokens from error strings."""
@@ -135,7 +136,9 @@ class OpenAICompatibleProvider:
         try:
             with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
                 body = resp.read().decode("utf-8")
-                return json.loads(body)
+                parsed = json.loads(body)
+                self.last_usage = parsed.get("usage")
+                return parsed
         except urllib.error.HTTPError as he:
             status_code = he.code
             raw_err = he.read().decode("utf-8", errors="replace")

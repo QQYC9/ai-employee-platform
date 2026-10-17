@@ -14,6 +14,11 @@ from packages.models.domain import (
     Provenance,
     IdempotencyRecord,
     OutboxEvent,
+    ProactiveWorkflow,
+    WorkflowRun,
+    WorkflowTriggerEvent,
+    AIUsageLog,
+    TenantAIBudget,
 )
 
 __all__ = [
@@ -32,4 +37,9 @@ __all__ = [
     "Provenance",
     "IdempotencyRecord",
     "OutboxEvent",
+    "ProactiveWorkflow",
+    "WorkflowRun",
+    "WorkflowTriggerEvent",
+    "AIUsageLog",
+    "TenantAIBudget",
 ]

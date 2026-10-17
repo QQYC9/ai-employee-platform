@@ -229,7 +229,11 @@ class ConversationalAgentEngine:
         if provider is None:
             try:
                 from packages.ai_providers.factory import AIProviderFactory
-                provider = AIProviderFactory.create_provider(tenant_id=tenant_id, db=self.db)
+                provider = AIProviderFactory.create_resilient_provider(
+                    tenant_id=tenant_id,
+                    db=self.db,
+                    conversation_id=conversation_id,
+                )
             except Exception as exc:
                 error_msg = f"Failed to resolve AI Provider: {self._sanitize_error(str(exc))}"
                 logger.error(error_msg)

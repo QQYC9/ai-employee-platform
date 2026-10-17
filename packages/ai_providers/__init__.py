@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from packages.ai_providers.base import (
+    AIBadRequestError,
+    AIBudgetExceededError,
+    AIContentFilterError,
     AIAuthenticationError,
     AIConnectionError,
     AIModelNotFoundError,
@@ -10,10 +13,13 @@ from packages.ai_providers.base import (
     AIProviderError,
     AIProviderTimeoutError,
     AIRateLimitError,
+    AllAIProvidersFailedError,
+    classify_ai_error,
 )
 from packages.ai_providers.factory import AIProviderFactory
 from packages.ai_providers.gemini_provider import GeminiProvider
 from packages.ai_providers.openai_compatible_provider import OpenAICompatibleProvider
+from packages.ai_providers.resilient_provider import CircuitBreaker, ResilientAIProvider
 
 
 def get_ai_provider(
@@ -25,6 +31,9 @@ def get_ai_provider(
 
 
 __all__ = [
+    "AIBadRequestError",
+    "AIBudgetExceededError",
+    "AIContentFilterError",
     "AIAuthenticationError",
     "AIConnectionError",
     "AIModelNotFoundError",
@@ -33,7 +42,11 @@ __all__ = [
     "AIProviderFactory",
     "AIProviderTimeoutError",
     "AIRateLimitError",
+    "AllAIProvidersFailedError",
+    "CircuitBreaker",
     "GeminiProvider",
     "OpenAICompatibleProvider",
+    "ResilientAIProvider",
+    "classify_ai_error",
     "get_ai_provider",
 ]
