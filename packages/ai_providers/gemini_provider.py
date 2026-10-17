@@ -100,18 +100,23 @@ class GeminiProvider:
         *,
         system_instruction: str | None = None,
         temperature: float = 0.2,
+        max_tokens: int | None = None,
     ) -> str:
         if not prompt.strip():
             raise ValueError("Prompt cannot be empty")
+
+        config_kwargs: dict[str, Any] = {
+            "system_instruction": system_instruction,
+            "temperature": temperature,
+        }
+        if max_tokens is not None and max_tokens > 0:
+            config_kwargs["max_output_tokens"] = max_tokens
 
         try:
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=temperature,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
         except Exception as exc:
             err_str = str(exc)
@@ -148,19 +153,24 @@ class GeminiProvider:
         *,
         system_instruction: str | None = None,
         temperature: float = 0.1,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         if not prompt.strip():
             raise ValueError("Prompt cannot be empty")
+
+        config_kwargs: dict[str, Any] = {
+            "system_instruction": system_instruction,
+            "temperature": temperature,
+            "response_mime_type": "application/json",
+        }
+        if max_tokens is not None and max_tokens > 0:
+            config_kwargs["max_output_tokens"] = max_tokens
 
         try:
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=temperature,
-                    response_mime_type="application/json",
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
         except Exception as exc:
             err_str = str(exc)
@@ -204,4 +214,34 @@ class GeminiProvider:
             raise ValueError("Gemini response must be a JSON object")
 
         return result
+
+    def test_connection(self) -> dict[str, Any]:
+        """Test connection and model availability without exposing secrets."""
+        import time
+        t0 = time.perf_counter()
+        try:
+            reply = self.generate_text("Respond with only the word OK", temperature=0.0)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+            return {
+                "success": True,
+                "provider": "gemini",
+                "model": self.model,
+                "latency_ms": latency_ms,
+                "reply": reply[:50],
+                "error_type": None,
+                "error_message": None,
+            }
+        except Exception as exc:
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+            err_type = type(exc).__name__
+            sanitized = self._sanitize(str(exc))
+            return {
+                "success": False,
+                "provider": "gemini",
+                "model": self.model,
+                "latency_ms": latency_ms,
+                "reply": None,
+                "error_type": err_type,
+                "error_message": sanitized[:300],
+            }
 

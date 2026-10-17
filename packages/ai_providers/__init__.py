@@ -3,28 +3,37 @@ from __future__ import annotations
 from typing import Any
 
 from packages.ai_providers.base import (
+    AIAuthenticationError,
+    AIConnectionError,
+    AIModelNotFoundError,
     AIProvider,
     AIProviderError,
     AIProviderTimeoutError,
+    AIRateLimitError,
 )
+from packages.ai_providers.factory import AIProviderFactory
 from packages.ai_providers.gemini_provider import GeminiProvider
-from packages.core.config import settings
+from packages.ai_providers.openai_compatible_provider import OpenAICompatibleProvider
 
 
 def get_ai_provider(
     provider_name: str | None = None,
     **kwargs: Any,
 ) -> AIProvider:
-    name = (provider_name or settings.ai_provider).strip().lower()
-    if name == "gemini":
-        return GeminiProvider(**kwargs)
-    raise ValueError(f"Unsupported AI provider: {name}")
+    """Convenience wrapper delegating to AIProviderFactory."""
+    return AIProviderFactory.create_provider(provider_name=provider_name, **kwargs)
 
 
 __all__ = [
+    "AIAuthenticationError",
+    "AIConnectionError",
+    "AIModelNotFoundError",
     "AIProvider",
     "AIProviderError",
+    "AIProviderFactory",
     "AIProviderTimeoutError",
+    "AIRateLimitError",
     "GeminiProvider",
+    "OpenAICompatibleProvider",
     "get_ai_provider",
 ]

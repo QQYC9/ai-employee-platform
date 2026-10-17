@@ -7,9 +7,32 @@ class Settings(BaseSettings):
 
     ai_provider: str = "gemini"
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
     gemini_timeout_seconds: float = 30.0
+
+    # Groq Provider Settings
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_timeout_seconds: float = 30.0
+
+    # OpenAI Provider Settings
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_timeout_seconds: float = 30.0
+
+    # Secrets Encryption Key (AES-256-GCM)
+    secrets_encryption_key: str = ""
+
     ai_planning_enabled: bool = False
+
+    # Background Worker Settings
+    enable_embedded_worker: bool = False
+    outbox_worker_poll_interval: float = 1.0
+    outbox_worker_batch_size: int = 10
+    outbox_worker_lock_timeout: int = 300
+
 
     # Production Authentication & Security Settings
     environment: str = "development"

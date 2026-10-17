@@ -35,6 +35,12 @@ from apps.agent.api.v1.decision import (
 from apps.agent.api.v1.audit import (
     router as audit_router,
 )
+from apps.agent.api.v1.ai_providers import (
+    router as ai_providers_router,
+)
+from apps.agent.api.v1.webhooks import (
+    router as webhooks_router,
+)
 
 from packages.auth.context import get_tenant_context
 from packages.auth.dependencies import get_db
@@ -46,10 +52,50 @@ from apps.agent.api.v1.tenants import (
     update_my_business_brain,
 )
 
+from contextlib import asynccontextmanager
+import logging
+import threading
+from packages.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    worker = None
+    worker_thread = None
+
+    if settings.enable_embedded_worker:
+        from packages.services.outbox_worker import OutboxWorker
+        worker = OutboxWorker(
+            poll_interval_seconds=settings.outbox_worker_poll_interval,
+            batch_size=settings.outbox_worker_batch_size,
+            lock_timeout_seconds=settings.outbox_worker_lock_timeout,
+        )
+        worker_thread = threading.Thread(
+            target=worker.run,
+            name="outbox-embedded-worker",
+            daemon=True,
+        )
+        worker_thread.start()
+        logger.info("Embedded outbox worker started in background thread")
+
+    yield
+
+    if worker is not None:
+        logger.info("Stopping embedded outbox worker...")
+        worker.stop()
+        if worker_thread is not None:
+            worker_thread.join(timeout=5.0)
+        logger.info("Embedded outbox worker stopped")
+
+
 app = FastAPI(
     title="AI Employee Platform",
     version="0.1.0",
+    lifespan=lifespan,
 )
+
 
 API_PREFIX = "/api/v1"
 
@@ -72,6 +118,8 @@ app.include_router(approvals_router, prefix=API_PREFIX)
 app.include_router(action_policies_router, prefix=API_PREFIX)
 app.include_router(decision_router, prefix=API_PREFIX)
 app.include_router(audit_router, prefix=API_PREFIX)
+app.include_router(ai_providers_router, prefix=API_PREFIX)
+app.include_router(webhooks_router, prefix=API_PREFIX)
 
 
 @app.get("/")

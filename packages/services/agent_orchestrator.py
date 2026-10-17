@@ -74,18 +74,12 @@ class AgentOrchestrator:
         )
         self.last_context: AgentContext | None = None
 
-    def _resolve_ai_planner(self) -> GeminiTaskPlanner | None:
+    def _resolve_ai_planner(self, tenant_id: UUID | None = None) -> GeminiTaskPlanner | None:
         if not settings.ai_planning_enabled:
             return None
 
         if self.ai_planner is not None:
             return self.ai_planner
-
-        provider_name = settings.ai_provider.strip().lower()
-        if provider_name != "gemini":
-            raise ValueError(
-                f"Unsupported AI planning provider: {provider_name}"
-            )
 
         decision_engine = None
         if self.tool_executor is not None and hasattr(self.tool_executor, "decision_engine"):
@@ -97,13 +91,16 @@ class AgentOrchestrator:
             except Exception:
                 decision_engine = None
 
-        self.ai_planner = GeminiTaskPlanner(
-            provider=GeminiProvider(
-                model=settings.gemini_model,
-            ),
+        from packages.ai_providers.factory import AIProviderFactory
+        provider = AIProviderFactory.create_provider(
+            tenant_id=tenant_id,
+            db=self.db,
+        )
+
+        return GeminiTaskPlanner(
+            provider=provider,
             decision_engine=decision_engine,
         )
-        return self.ai_planner
 
     def _get_available_tools(
         self,
@@ -206,7 +203,7 @@ class AgentOrchestrator:
         )
 
         if steps is None:
-            ai_planner = self._resolve_ai_planner()
+            ai_planner = self._resolve_ai_planner(tenant_id=tenant_id)
 
             if ai_planner is None:
                 plan = self.planner.create_basic_plan(

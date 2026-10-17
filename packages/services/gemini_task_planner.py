@@ -333,3 +333,12 @@ class GeminiTaskPlanner:
             context=context,
         )
 
+
+# Provider-neutral alias for multi-provider planning
+AITaskPlanner = GeminiTaskPlanner
+
+__all__ = [
+    "AITaskPlanner",
+    "GeminiTaskPlanner",
+]
+

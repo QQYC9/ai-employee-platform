@@ -13,6 +13,7 @@ from packages.models.domain import (
     AuditEvent,
     Provenance,
     IdempotencyRecord,
+    OutboxEvent,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "AuditEvent",
     "Provenance",
     "IdempotencyRecord",
+    "OutboxEvent",
 ]
