@@ -19,6 +19,7 @@ from packages.models.domain import (
     WorkflowTriggerEvent,
     AIUsageLog,
     TenantAIBudget,
+    GeneratedDocument,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "WorkflowTriggerEvent",
     "AIUsageLog",
     "TenantAIBudget",
+    "GeneratedDocument",
 ]

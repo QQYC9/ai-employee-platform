@@ -76,9 +76,11 @@ class IdempotencyService:
           - ReconciliationRequiredError: execution was interrupted and needs manual resolution
           - IdempotencyTamperingError: parameters or action mismatch
         """
+        clean_params = {k: v for k, v in (parameters or {}).items() if not str(k).startswith("_")}
         params_hash = hashlib.sha256(
-            json.dumps(parameters or {}, sort_keys=True).encode()
+            json.dumps(clean_params, sort_keys=True, default=str).encode()
         ).hexdigest()
+
 
         try:
             statement = select(IdempotencyRecord).where(

@@ -36,7 +36,12 @@ class ChannelUpdateRequest(BaseModel):
     config: dict[str, Any] | None = None
 
 
-def serialize_channel(channel: Channel) -> dict[str, Any]:
+def serialize_channel(channel: Channel, service: ChannelService | None = None) -> dict[str, Any]:
+    safe_config = (
+        service.sanitize_channel_config(channel.config)
+        if service is not None
+        else ChannelService(None).sanitize_channel_config(channel.config) if hasattr(ChannelService, "sanitize_channel_config") else (channel.config or {})
+    )
     return {
         "id": str(channel.id),
         "tenant_id": str(channel.tenant_id),
@@ -44,10 +49,11 @@ def serialize_channel(channel: Channel) -> dict[str, Any]:
         "channel_type": channel.channel_type,
         "provider": channel.provider,
         "status": channel.status,
-        "config": channel.config or {},
+        "config": safe_config,
         "created_at": channel.created_at.isoformat() if channel.created_at else None,
         "updated_at": channel.updated_at.isoformat() if channel.updated_at else None,
     }
+
 
 
 def _require_admin(user: User):
@@ -157,3 +163,57 @@ def delete_channel(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+class ChannelSendMessageRequest(BaseModel):
+    recipient: str
+    content: str
+    options: dict[str, Any] | None = None
+
+
+@router.post("/{channel_id}/test")
+def test_channel_connection(
+    channel_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Probes channel connectivity and credentials."""
+    service = ChannelService(db)
+    try:
+        result = service.test_channel_connection(current_user.tenant_id, channel_id)
+        db.commit()
+        return result.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/{channel_id}/send")
+def send_channel_message(
+    channel_id: UUID,
+    payload: ChannelSendMessageRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Sends a message to an external recipient via the configured channel."""
+    service = ChannelService(db)
+    try:
+        opts = payload.options or {}
+        result = service.send_channel_message(
+            tenant_id=current_user.tenant_id,
+            channel_id=channel_id,
+            recipient=payload.recipient,
+            content=payload.content,
+            **opts,
+        )
+        db.commit()
+        if not result.success:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=result.error)
+        return result.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

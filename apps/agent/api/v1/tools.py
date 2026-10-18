@@ -171,3 +171,81 @@ def update_tool(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         )
+
+
+class ToolExecuteRequest(BaseModel):
+    action: str | None = None
+    resource: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+    task_id: UUID | None = None
+    agent_id: UUID | None = None
+
+
+@router.get("/catalog/definitions")
+def list_tool_definitions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_tenant_context),
+):
+    """List contracts and schemas of all built-in real tools."""
+    from packages.tools.registry import create_default_registry
+    registry = create_default_registry(db)
+    return {
+        "items": [
+            contract.to_dict()
+            for contract in registry.list_contracts()
+        ]
+    }
+
+
+@router.post("/{tool_id}/execute")
+def execute_tool(
+    tool_id: UUID,
+    payload: ToolExecuteRequest,
+    current_user: User = Depends(get_tenant_context),
+    db: Session = Depends(get_db),
+):
+    """Executes a tool with DecisionEngine checks, tenant isolation, and audit logging."""
+    from packages.tools.registry import create_default_registry
+    from packages.tools.executor import ToolExecutor
+
+    service = ToolService(db)
+    tool = service.get_tool(current_user.tenant_id, tool_id)
+    if tool is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tool not found")
+
+    executor = ToolExecutor(db)
+    registry = create_default_registry(db)
+    registry.bind_to_executor(
+        executor,
+        tenant_id=current_user.tenant_id,
+        agent_id=payload.agent_id,
+        task_id=payload.task_id,
+    )
+
+    action = payload.action or f"execute:{tool.slug}"
+    resource = payload.resource or f"tools:{tool.slug}"
+
+    try:
+        result = executor.execute(
+            tenant_id=current_user.tenant_id,
+            tool_id=tool.id,
+            action=action,
+            resource=resource,
+            agent_id=payload.agent_id,
+            task_id=payload.task_id,
+            parameters=payload.parameters,
+            idempotency_key=payload.idempotency_key,
+        )
+        db.commit()
+        return {
+            "status": result.status,
+            "tool_id": str(result.tool_id),
+            "tool_slug": result.tool_slug,
+            "decision": result.decision,
+            "reason": result.reason,
+            "output": result.output,
+        }
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))

@@ -8,7 +8,7 @@ import re
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -16,9 +16,13 @@ from packages.ai_providers.base import AIProvider, AIProviderError, AIProviderTi
 from packages.context.builder import ContextBuilder
 from packages.context.models import AgentContext, TaskContext
 from packages.context.retriever import ContextRetriever
-from packages.models.domain import Conversation, Customer, Message
+from packages.models.domain import Conversation, Customer, Message, Tool
 from packages.services.audit_service import AuditService
 from packages.services.conversation_service import ConversationService
+from packages.services.decision_engine import DecisionEngine
+from packages.tools.contract import ToolExecutionContext
+from packages.tools.executor import ToolExecutionResult, ToolExecutor
+from packages.tools.registry import ToolRegistry, create_default_registry
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +54,14 @@ class ConversationalAgentEngine:
       4. Assembles tenant-isolated, customer-safe context (Brain, Knowledge, Memory).
       5. Generates a secure, aligned prompt with strict untrusted-data boundaries.
       6. Invokes the AIProvider and verifies the response.
-      7. Persists the agent's reply in the conversation with full provenance.
-      8. Sanitizes errors and audit logs to prevent credential leakage.
+      7. Coordinates tool execution via DecisionEngine and ToolExecutor.
+      8. Persists the agent's reply in the conversation with full provenance.
+      9. Sanitizes errors and audit logs to prevent credential leakage.
     """
 
     ALLOWED_INPUT_SENDERS = {"customer", "user"}
     DEFAULT_HISTORY_LIMIT = 15
+    MAX_TOOL_CALL_ITERATIONS = 3
 
     def __init__(
         self,
@@ -64,6 +70,9 @@ class ConversationalAgentEngine:
         conversation_service: ConversationService | None = None,
         context_builder: ContextBuilder | None = None,
         audit_service: AuditService | None = None,
+        tool_executor: ToolExecutor | None = None,
+        tool_registry: ToolRegistry | None = None,
+        decision_engine: DecisionEngine | None = None,
     ):
         self.db = db
         self.ai_provider = ai_provider
@@ -72,6 +81,11 @@ class ConversationalAgentEngine:
             db, audit_service=self.audit_service
         )
         self.context_builder = context_builder or ContextBuilder(ContextRetriever(db))
+        self.decision_engine = decision_engine or DecisionEngine(db)
+        self.tool_registry = tool_registry or create_default_registry(db)
+        self.tool_executor = tool_executor or ToolExecutor(db)
+        self.tool_registry.bind_to_executor(self.tool_executor)
+
 
     def process_incoming_message(
         self,
@@ -323,6 +337,77 @@ class ConversationalAgentEngine:
             reply_message_id=reply_msg.id,
             reply_content=reply_text,
         )
+
+    def execute_tool_action(
+        self,
+        tenant_id: UUID,
+        tool_slug: str,
+        parameters: dict[str, Any] | None = None,
+        *,
+        conversation_id: UUID | None = None,
+        agent_id: UUID | None = None,
+        task_id: UUID | None = None,
+        idempotency_key: str | None = None,
+    ) -> ToolExecutionResult:
+        """
+        Executes a real tool within the conversational agent lifecycle:
+          1. Validates that the tool exists in ToolRegistry.
+          2. Resolves or provisions the Tool DB record for the tenant.
+          3. Evaluates permissions and approval policies via DecisionEngine.
+          4. If APPROVAL_REQUIRED or DENY, returns blocked result with clear audit reason.
+          5. If ALLOW, delegates to ToolExecutor with tenant isolation, timeout guard, and audit logging.
+        """
+        slug = tool_slug.strip().lower()
+        real_tool = self.tool_registry.get(slug)
+        if real_tool is None:
+            raise ValueError(f"Unknown tool slug: '{tool_slug}'")
+
+        # Resolve or auto-register Tool DB record
+        tool_record = self.db.scalar(
+            select(Tool).where(
+                or_(Tool.tenant_id.is_(None), Tool.tenant_id == tenant_id),
+                Tool.slug == slug,
+                Tool.is_active.is_(True),
+            )
+        )
+        if tool_record is None:
+            tool_record = Tool(
+                tenant_id=tenant_id,
+                name=real_tool.contract.name,
+                slug=slug,
+                description=real_tool.contract.description,
+                tool_type="real_tool",
+                config=real_tool.contract.to_dict(),
+                is_active=True,
+            )
+            self.db.add(tool_record)
+            self.db.flush()
+
+        # Build context
+        ctx = ToolExecutionContext(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            task_id=task_id,
+            conversation_id=conversation_id,
+            idempotency_key=idempotency_key,
+        )
+        params = dict(parameters or {})
+        params["_context"] = ctx
+
+        # Execute through ToolExecutor (which evaluates DecisionEngine and audits)
+        action_name = f"execute:{slug}"
+        resource_name = f"tools:{slug}"
+        return self.tool_executor.execute(
+            tenant_id=tenant_id,
+            tool_id=tool_record.id,
+            action=action_name,
+            resource=resource_name,
+            agent_id=agent_id,
+            task_id=task_id,
+            parameters=params,
+            idempotency_key=idempotency_key,
+        )
+
 
     def _construct_prompt(
         self,

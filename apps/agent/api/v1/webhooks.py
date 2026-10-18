@@ -73,6 +73,14 @@ def verify_webhook_signature(
         logger.warning("Webhook signature verification failed closed: secret is empty string")
         return False
 
+    from packages.core.crypto import SecretsEncryptionService
+    if secret_str.startswith(SecretsEncryptionService.PREFIX):
+        try:
+            secret_str = SecretsEncryptionService().decrypt(secret_str)
+        except Exception as exc:
+            logger.error("Failed to decrypt webhook secret: %s", exc)
+            return False
+
     sig_header_name = str(channel_config.get("signature_header") or "x-webhook-signature").lower().strip()
     provided_signature = headers.get(sig_header_name) or headers.get("x-hub-signature-256") or headers.get("x-signature")
 
@@ -298,3 +306,129 @@ async def ingest_channel_message(
         "outbox_event_id": str(event.id),
         "idempotency_key": idempotency_key,
     }
+
+
+@router.get("/whatsapp/{channel_id}")
+async def whatsapp_webhook_verification(
+    channel_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Handles Meta WhatsApp Cloud API webhook verification challenge (hub.challenge).
+    """
+    from packages.services.channel_service import ChannelService
+
+    channel = db.scalar(select(Channel).where(Channel.id == channel_id, Channel.status != "deleted"))
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    if channel.status != "active":
+        raise HTTPException(status_code=400, detail=f"Channel is not active (current status: '{channel.status}')")
+
+    channel_service = ChannelService(db)
+    try:
+        connector = channel_service.get_connector(channel.tenant_id, channel_id)
+        params = dict(request.query_params)
+        headers = dict(request.headers)
+        is_valid, challenge_or_err = connector.verify_webhook(headers, b"", params)
+        if not is_valid:
+            logger.warning("WhatsApp webhook challenge verification failed: %s", challenge_or_err)
+            raise HTTPException(status_code=403, detail=challenge_or_err or "Verification failed")
+
+        return Response(content=str(challenge_or_err or ""), media_type="text/plain")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error during WhatsApp webhook verification: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/whatsapp/{channel_id}", status_code=status.HTTP_200_OK)
+async def whatsapp_webhook_event(
+    channel_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Handles incoming Meta WhatsApp Cloud API notification events with HMAC-SHA256 signature verification.
+    """
+    from packages.services.channel_service import ChannelService
+
+    channel = db.scalar(select(Channel).where(Channel.id == channel_id, Channel.status != "deleted"))
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    if channel.status != "active":
+        raise HTTPException(status_code=400, detail=f"Channel is not active (current status: '{channel.status}')")
+
+    raw_body = await request.body()
+    headers = dict(request.headers)
+
+    channel_service = ChannelService(db)
+    try:
+        connector = channel_service.get_connector(channel.tenant_id, channel_id)
+        is_valid, err_msg = connector.verify_webhook(headers, raw_body)
+        if not is_valid:
+            logger.warning("WhatsApp event signature failed: %s", err_msg)
+            raise HTTPException(status_code=401, detail=err_msg or "Invalid signature")
+
+        inbound_messages = connector.parse_inbound(raw_body, headers)
+        processed_ids = []
+        for inbound in inbound_messages:
+            persisted = channel_service.process_inbound_message(inbound)
+            processed_ids.append(str(persisted.id))
+
+        db.commit()
+        return {"status": "ok", "processed_count": len(processed_ids), "message_ids": processed_ids}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.error("WhatsApp webhook event processing failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/telegram/{channel_id}", status_code=status.HTTP_200_OK)
+async def telegram_webhook_event(
+    channel_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Handles incoming Telegram Bot API updates with secret token verification.
+    """
+    from packages.services.channel_service import ChannelService
+
+    channel = db.scalar(select(Channel).where(Channel.id == channel_id, Channel.status != "deleted"))
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    if channel.status != "active":
+        raise HTTPException(status_code=400, detail=f"Channel is not active (current status: '{channel.status}')")
+
+    raw_body = await request.body()
+    headers = dict(request.headers)
+
+    channel_service = ChannelService(db)
+    try:
+        connector = channel_service.get_connector(channel.tenant_id, channel_id)
+        is_valid, err_msg = connector.verify_webhook(headers, raw_body)
+        if not is_valid:
+            logger.warning("Telegram secret token failed: %s", err_msg)
+            raise HTTPException(status_code=401, detail=err_msg or "Invalid secret token")
+
+        inbound_messages = connector.parse_inbound(raw_body, headers)
+        processed_ids = []
+        for inbound in inbound_messages:
+            persisted = channel_service.process_inbound_message(inbound)
+            processed_ids.append(str(persisted.id))
+
+        db.commit()
+        return {"status": "ok", "processed_count": len(processed_ids), "message_ids": processed_ids}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.error("Telegram webhook event processing failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

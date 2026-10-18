@@ -68,11 +68,23 @@ class AgentOrchestrator:
         self.planner = planner or TaskPlanner()
         self.executor = TaskExecutionService(db)
         self.tool_executor = executor
+        if self.tool_executor is not None:
+            try:
+                from packages.tools.registry import create_default_registry
+                def_reg = create_default_registry(db)
+                for slug, tool in def_reg._tools.items():
+                    if slug not in self.tool_executor.handlers:
+                        handler = def_reg._create_executor_handler(tool)
+                        setattr(handler, "supports_idempotency", tool.contract.supports_idempotency)
+                        self.tool_executor.register_handler(slug, handler)
+            except Exception:
+                pass
         self.ai_planner = ai_planner
         self.context_builder = context_builder or ContextBuilder(
             ContextRetriever(db)
         )
         self.last_context: AgentContext | None = None
+
 
     def _resolve_ai_planner(self, tenant_id: UUID | None = None) -> GeminiTaskPlanner | None:
         if not settings.ai_planning_enabled:
