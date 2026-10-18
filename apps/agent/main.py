@@ -76,6 +76,17 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Verify production security configuration at startup
+    if settings.environment.lower() in ("production", "prod", "staging"):
+        if (
+            not settings.jwt_secret_key
+            or settings.jwt_secret_key.startswith("dev-")
+            or len(settings.jwt_secret_key) < 32
+        ):
+            raise RuntimeError(
+                f"Application startup aborted: Insecure JWT_SECRET_KEY in production environment ({settings.environment})"
+            )
+
     worker = None
     worker_thread = None
 

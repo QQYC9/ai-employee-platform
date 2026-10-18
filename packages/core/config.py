@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -57,6 +58,38 @@ class Settings(BaseSettings):
         if self.environment.lower() in ("production", "prod", "staging"):
             return False
         return self.allow_dev_auth_header
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> Settings:
+        """
+        Rejects insecure development defaults when running in production or staging.
+        Prevents starting with default JWT secrets or insufficient key lengths.
+        """
+        env_clean = (self.environment or "").strip().lower()
+        if env_clean in ("production", "prod", "staging"):
+            insecure_jwt_defaults = {
+                "dev-insecure-jwt-secret-replace-in-production-min32chars",
+                "secret",
+                "changeme",
+                "password",
+            }
+            clean_jwt = (self.jwt_secret_key or "").strip()
+            if not clean_jwt or clean_jwt in insecure_jwt_defaults or clean_jwt.startswith("dev-"):
+                raise ValueError(
+                    f"Production startup rejected: JWT_SECRET_KEY cannot use default development value in '{self.environment}' environment."
+                )
+            if len(clean_jwt) < 32:
+                raise ValueError(
+                    f"Production startup rejected: JWT_SECRET_KEY must be at least 32 characters in '{self.environment}' environment."
+                )
+
+            if self.secrets_encryption_key:
+                clean_enc = self.secrets_encryption_key.strip()
+                if len(clean_enc) < 32:
+                    raise ValueError(
+                        f"Production startup rejected: SECRETS_ENCRYPTION_KEY must be at least 32 characters or 64-char hex in '{self.environment}' environment."
+                    )
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

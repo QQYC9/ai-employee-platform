@@ -51,7 +51,11 @@ class SecretsEncryptionService:
     @classmethod
     def _resolve_key(cls, explicit_key: bytes | str | None = None) -> bytes:
         """Resolve a 32-byte (256-bit) encryption key from parameter or environment."""
-        candidate = explicit_key or os.environ.get("SECRETS_ENCRYPTION_KEY")
+        candidate = (
+            explicit_key
+            or getattr(settings, "secrets_encryption_key", None)
+            or os.environ.get("SECRETS_ENCRYPTION_KEY")
+        )
 
         if candidate:
             if isinstance(candidate, str):
@@ -78,7 +82,7 @@ class SecretsEncryptionService:
 
         # Development fallback: derive deterministically from jwt_secret_key
         jwt_key = getattr(settings, "jwt_secret_key", None)
-        if jwt_key and getattr(settings, "environment", "development").lower() not in ("production", "prod"):
+        if jwt_key and getattr(settings, "environment", "development").lower() not in ("production", "prod", "staging"):
             return hashlib.sha256(f"secrets-enc::{jwt_key}".encode("utf-8")).digest()
 
         raise MissingEncryptionKeyError(
