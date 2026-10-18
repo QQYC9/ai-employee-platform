@@ -46,6 +46,7 @@ class ChannelService:
         "token",
         "password",
         "webhook_verify_token",
+        "webhook_secret",
         "verify_token",
         "secret",
         "private_key",
@@ -81,9 +82,15 @@ class ChannelService:
         if not config:
             return {}
         sanitized = dict(config)
-        for key in config:
+        for key, val in config.items():
             k_lower = key.lower().strip()
-            if k_lower in self.SECRET_CONFIG_KEYS:
+            if (
+                k_lower in self.SECRET_CONFIG_KEYS
+                or "secret" in k_lower
+                or "token" in k_lower
+                or "password" in k_lower
+                or (isinstance(val, str) and val.startswith(SecretsEncryptionService.PREFIX))
+            ):
                 sanitized[key] = "********"
         return sanitized
 
