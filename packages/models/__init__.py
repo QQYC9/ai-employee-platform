@@ -20,6 +20,8 @@ from packages.models.domain import (
     AIUsageLog,
     TenantAIBudget,
     GeneratedDocument,
+    CapabilityVersion,
+    DevelopmentRun,
 )
 
 __all__ = [
@@ -44,4 +46,6 @@ __all__ = [
     "AIUsageLog",
     "TenantAIBudget",
     "GeneratedDocument",
+    "CapabilityVersion",
+    "DevelopmentRun",
 ]

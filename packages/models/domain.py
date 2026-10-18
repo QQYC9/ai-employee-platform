@@ -1691,3 +1691,89 @@ class GeneratedDocument(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class CapabilityVersion(Base):
+    __tablename__ = "capability_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    capability_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("capabilities.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    request_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("development_requests.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    slug: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    specification: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    implementation_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    risk_level: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="medium", server_default="medium", index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="draft", server_default="draft", index=True
+    )
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("approvals.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    test_results: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rolled_back_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rollback_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DevelopmentRun(Base):
+    __tablename__ = "development_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    request_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("development_requests.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    capability_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("capability_versions.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    run_type: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="sandbox_test", server_default="sandbox_test"
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="running", server_default="running", index=True
+    )
+    test_summary: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    security_verdict: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    logs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )

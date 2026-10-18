@@ -39,7 +39,13 @@ class ToolRegistry:
         slug = tool.contract.slug.strip().lower()
         self._tools[slug] = tool
 
+    def unregister(self, slug: str) -> bool:
+        """Remove a tool from the runtime registry by its slug."""
+        clean_slug = slug.strip().lower()
+        return self._tools.pop(clean_slug, None) is not None
+
     def get(self, slug: str) -> BaseRealTool | None:
+
         return self._tools.get(slug.strip().lower())
 
     def list_contracts(self) -> list[ToolContract]:
