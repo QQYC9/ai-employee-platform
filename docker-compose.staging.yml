@@ -1,0 +1,98 @@
+# ==============================================================================
+# AI Employee Platform - Local Staging Environment
+#
+# USAGE:
+#   docker compose -f docker-compose.staging.yml up -d
+#
+# ISOLATION:
+#   - Completely separate network (ai_employee_staging_network)
+#   - Completely separate volumes (ai_employee_postgres_staging_data, ai_employee_redis_staging_data)
+#   - Dedicated staging database (ai_employee_staging)
+#   - Postgres and Redis have NO published ports to host (container-internal only)
+#   - API is exposed exclusively on local loopback: 127.0.0.1:8001
+#
+# WORKER EXECUTION:
+#   - ENABLE_EMBEDDED_WORKER is set to true to run the outbox worker in the
+#     agent process thread. No standalone worker service is defined to prevent
+#     duplicate processing. If a dedicated worker container is added in the
+#     future, toggle ENABLE_EMBEDDED_WORKER to false on the agent service.
+# ==============================================================================
+
+name: ai-employee-platform-staging
+
+services:
+
+  agent:
+    image: ai-employee-platform:staging-phase17
+    container_name: ai_employee_staging_agent
+    ports:
+      - "127.0.0.1:8001:8000"
+    environment:
+      ENVIRONMENT: "staging"
+      DATABASE_URL: "${STAGING_DATABASE_URL:-postgresql+psycopg://ai_employee_staging:${STAGING_POSTGRES_PASSWORD:-staging_secure_local_pass_2026}@postgres:5432/${STAGING_POSTGRES_DB:-ai_employee_staging}}"
+      REDIS_URL: "${STAGING_REDIS_URL:-redis://redis:6379/0}"
+      JWT_SECRET_KEY: "${STAGING_JWT_SECRET_KEY:-staging-jwt-secret-key-must-be-min-32chars-for-testing-security-2026}"
+      SECRETS_ENCRYPTION_KEY: "${STAGING_SECRETS_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
+      AI_PROVIDER: "${STAGING_AI_PROVIDER:-gemini}"
+      AI_PLANNING_ENABLED: "${STAGING_AI_PLANNING_ENABLED:-false}"
+      ENABLE_EMBEDDED_WORKER: "true"
+      OUTBOX_WORKER_POLL_INTERVAL: "1.0"
+      OUTBOX_WORKER_BATCH_SIZE: "10"
+      OUTBOX_WORKER_LOCK_TIMEOUT: "300"
+      RATE_LIMIT_LOGIN_PER_MINUTE: "20"
+      RATE_LIMIT_PLANNING_PER_MINUTE: "60"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - staging_network
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: ai_employee_staging_postgres
+    environment:
+      POSTGRES_DB: "${STAGING_POSTGRES_DB:-ai_employee_staging}"
+      POSTGRES_USER: "${STAGING_POSTGRES_USER:-ai_employee_staging}"
+      POSTGRES_PASSWORD: "${STAGING_POSTGRES_PASSWORD:-staging_secure_local_pass_2026}"
+    expose:
+      - "5432"
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+    networks:
+      - staging_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_employee_staging -d ai_employee_staging"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai_employee_staging_redis
+    expose:
+      - "6379"
+    volumes:
+      - redis_staging_data:/data
+    networks:
+      - staging_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+networks:
+  staging_network:
+    name: ai_employee_staging_network
+    driver: bridge
+
+volumes:
+  postgres_staging_data:
+    name: ai_employee_postgres_staging_data
+  redis_staging_data:
+    name: ai_employee_redis_staging_data
