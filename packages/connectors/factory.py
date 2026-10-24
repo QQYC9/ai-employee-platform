@@ -6,6 +6,7 @@ from uuid import UUID
 
 from packages.connectors.base import BaseConnector
 from packages.connectors.email import EmailConnector
+from packages.connectors.meta_messaging import FacebookMessengerConnector, InstagramConnector
 from packages.connectors.telegram import TelegramConnector
 from packages.connectors.whatsapp import WhatsAppCloudConnector
 from packages.core.crypto import SecretsEncryptionService
@@ -94,6 +95,42 @@ class ConnectorFactory:
                 from_name=from_name,
                 use_tls=use_tls,
                 use_ssl=use_ssl,
+            )
+
+        elif c_type == "facebook":
+            page_id = config.get("page_id") or ""
+            raw_token = config.get("access_token") or config.get("page_access_token") or config.get("token") or ""
+            access_token = self._decrypt_value(raw_token)
+            raw_verify = config.get("webhook_verify_token") or config.get("verify_token")
+            webhook_verify_token = self._decrypt_value(raw_verify) if raw_verify else None
+            raw_secret = config.get("app_secret") or config.get("client_secret")
+            app_secret = self._decrypt_value(raw_secret) if raw_secret else None
+
+            return FacebookMessengerConnector(
+                tenant_id=channel.tenant_id,
+                channel_id=channel.id,
+                page_id=page_id,
+                access_token=access_token,
+                webhook_verify_token=webhook_verify_token,
+                app_secret=app_secret,
+            )
+
+        elif c_type == "instagram":
+            instagram_account_id = config.get("instagram_account_id") or config.get("account_id") or ""
+            raw_token = config.get("access_token") or config.get("token") or ""
+            access_token = self._decrypt_value(raw_token)
+            raw_verify = config.get("webhook_verify_token") or config.get("verify_token")
+            webhook_verify_token = self._decrypt_value(raw_verify) if raw_verify else None
+            raw_secret = config.get("app_secret") or config.get("client_secret")
+            app_secret = self._decrypt_value(raw_secret) if raw_secret else None
+
+            return InstagramConnector(
+                tenant_id=channel.tenant_id,
+                channel_id=channel.id,
+                instagram_account_id=instagram_account_id,
+                access_token=access_token,
+                webhook_verify_token=webhook_verify_token,
+                app_secret=app_secret,
             )
 
         raise ValueError(f"No connector available for channel type '{channel.channel_type}'")

@@ -42,6 +42,7 @@ def serialize_channel(channel: Channel, service: ChannelService | None = None) -
         if service is not None
         else ChannelService(None).sanitize_channel_config(channel.config) if hasattr(ChannelService, "sanitize_channel_config") else (channel.config or {})
     )
+    raw_cfg = channel.config or {}
     return {
         "id": str(channel.id),
         "tenant_id": str(channel.tenant_id),
@@ -50,6 +51,9 @@ def serialize_channel(channel: Channel, service: ChannelService | None = None) -
         "provider": channel.provider,
         "status": channel.status,
         "config": safe_config,
+        "last_test_status": raw_cfg.get("last_test_status", "untested"),
+        "last_test_result": raw_cfg.get("last_test_result", {}),
+        "last_tested_at": raw_cfg.get("last_tested_at"),
         "created_at": channel.created_at.isoformat() if channel.created_at else None,
         "updated_at": channel.updated_at.isoformat() if channel.updated_at else None,
     }

@@ -5,6 +5,7 @@ import {
   Bot,
   ListTodo,
   Radio,
+  Megaphone,
   Coins,
   Building2,
   ChevronLeft,
@@ -48,6 +49,12 @@ export const TenantSidebar: React.FC<TenantSidebarProps> = ({
       label: 'قنوات التواصل',
       icon: Radio,
       description: 'واتساب وواجهات الربط والرسائل',
+    },
+    {
+      to: '/campaigns',
+      label: 'الحملات والإشعارات',
+      icon: Megaphone,
+      description: 'إرسال الحملات وجدولة الإشعارات الاستباقية',
     },
     {
       to: '/usage',

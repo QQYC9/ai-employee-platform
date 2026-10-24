@@ -53,6 +53,9 @@ export interface Channel {
   provider?: string | null;
   status: string;
   config?: Record<string, any>;
+  last_test_status?: string;
+  last_test_result?: Record<string, any>;
+  last_tested_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -135,4 +138,51 @@ export interface BusinessBrain {
   policies?: Record<string, any>;
   goals?: Record<string, any>;
   [key: string]: any;
+}
+
+export interface CampaignMetrics {
+  total_recipients: number;
+  enqueued_count: number;
+  sent_count: number;
+  delivered_count: number;
+  failed_count: number;
+  skipped_count: number;
+}
+
+export interface Campaign {
+  id: string;
+  tenant_id: string;
+  name: string;
+  goal?: string | null;
+  message_template: string;
+  channel_id?: string | null;
+  status: 'draft' | 'scheduled' | 'running' | 'paused' | 'completed' | 'cancelled' | string;
+  audience_filter: Record<string, any>;
+  scheduled_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  metrics: CampaignMetrics;
+  requires_approval: boolean;
+  approval_id?: string | null;
+  rate_limit_per_minute: number;
+  batch_size: number;
+  metadata_json?: Record<string, any>;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface CampaignRecipient {
+  id: string;
+  tenant_id: string;
+  campaign_id: string;
+  customer_id: string;
+  channel_id?: string | null;
+  recipient_address: string;
+  status: 'pending' | 'enqueued' | 'sent' | 'delivered' | 'failed' | 'skipped' | string;
+  skip_reason?: string | null;
+  error_message?: string | null;
+  rendered_content?: string | null;
+  sent_at?: string | null;
+  delivered_at?: string | null;
+  created_at?: string | null;
 }

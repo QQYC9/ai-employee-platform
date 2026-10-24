@@ -64,6 +64,7 @@ class ToolExecutionContext:
     agent_id: UUID | None = None
     task_id: UUID | None = None
     conversation_id: UUID | None = None
+    trace_id: UUID | None = None
     idempotency_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 

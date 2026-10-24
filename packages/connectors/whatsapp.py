@@ -187,57 +187,61 @@ class WhatsAppCloudConnector(BaseConnector):
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
         }
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": clean_recipient,
-            "type": "text",
-            "text": {
-                "preview_url": False,
-                "body": content,
-            },
-        }
+        chunk_size = 4000
+        chunks = [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)] if len(content) > chunk_size else [content]
 
         client = self._client or httpx.Client(timeout=15.0)
         should_close = self._client is None
         start_time = time.perf_counter()
 
         try:
-            resp = client.post(url, headers=headers, json=payload)
-            duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+            last_msg_id = None
+            for chunk in chunks:
+                payload = {
+                    "messaging_product": "whatsapp",
+                    "recipient_type": "individual",
+                    "to": clean_recipient,
+                    "type": "text",
+                    "text": {
+                        "preview_url": False,
+                        "body": chunk,
+                    },
+                }
 
-            if resp.status_code in (200, 201):
+                resp = client.post(url, headers=headers, json=payload)
+                if resp.status_code not in (200, 201):
+                    duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+                    error_detail = resp.text
+                    try:
+                        err_json = resp.json()
+                        error_detail = err_json.get("error", {}).get("message", error_detail)
+                    except Exception:
+                        pass
+
+                    return OutboundDeliveryResult(
+                        success=False,
+                        channel_type=self.channel_type,
+                        recipient_id=clean_recipient,
+                        status="failed",
+                        error=f"WhatsApp API error ({resp.status_code}): {error_detail}",
+                        latency_ms=duration_ms,
+                        metadata={"provider": "meta", "status_code": resp.status_code},
+                    )
+
                 data = resp.json()
-                msg_id = None
                 messages_data = data.get("messages", [])
                 if messages_data and isinstance(messages_data, list):
-                    msg_id = messages_data[0].get("id")
+                    last_msg_id = messages_data[0].get("id")
 
-                return OutboundDeliveryResult(
-                    success=True,
-                    channel_type=self.channel_type,
-                    recipient_id=clean_recipient,
-                    external_message_id=msg_id,
-                    status="sent",
-                    latency_ms=duration_ms,
-                    metadata={"provider": "meta", "status_code": resp.status_code},
-                )
-
-            error_detail = resp.text
-            try:
-                err_json = resp.json()
-                error_detail = err_json.get("error", {}).get("message", error_detail)
-            except Exception:
-                pass
-
+            duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
             return OutboundDeliveryResult(
-                success=False,
+                success=True,
                 channel_type=self.channel_type,
                 recipient_id=clean_recipient,
-                status="failed",
-                error=f"WhatsApp API error ({resp.status_code}): {error_detail}",
+                external_message_id=last_msg_id,
+                status="sent",
                 latency_ms=duration_ms,
-                metadata={"provider": "meta", "status_code": resp.status_code},
+                metadata={"provider": "meta", "chunks_sent": len(chunks)},
             )
         except Exception as exc:
             duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)

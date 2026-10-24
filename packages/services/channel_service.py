@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
+import re
 from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from packages.connectors.base import (
     BaseConnector,
@@ -15,7 +18,7 @@ from packages.connectors.base import (
 )
 from packages.connectors.factory import ConnectorFactory
 from packages.core.crypto import SecretsEncryptionService
-from packages.models.domain import Channel, Conversation, Customer, Message, OutboxEvent
+from packages.models.domain import Channel, Conversation, Customer, Message, OutboxEvent, User
 from packages.services.audit_service import AuditService
 from packages.services.idempotency_service import IdempotencyService
 from packages.services.outbox_service import OutboxService
@@ -33,10 +36,11 @@ class ChannelService:
     and inbound message deduplication.
     """
 
-    ALLOWED_CHANNEL_TYPES = {"webchat", "whatsapp", "email", "slack", "api", "telegram", "sms"}
-    ALLOWED_STATUSES = {"active", "inactive", "maintenance", "deleted"}
+    ALLOWED_CHANNEL_TYPES = {"webchat", "whatsapp", "email", "slack", "api", "telegram", "sms", "facebook", "instagram", "webhook"}
+    ALLOWED_STATUSES = {"active", "inactive", "disabled", "maintenance", "deleted"}
     SECRET_CONFIG_KEYS = {
         "access_token",
+        "page_access_token",
         "bot_token",
         "smtp_password",
         "app_secret",
@@ -209,7 +213,12 @@ class ChannelService:
             channel.provider = provider.strip() if provider.strip() else None
 
         if config is not None:
-            encrypted_config = self._encrypt_config(config)
+            clean_config = dict(config)
+            existing_config = channel.config or {}
+            for k, v in config.items():
+                if isinstance(v, str) and (set(v.strip()) == {"*"} or v.strip() == "********") and k in existing_config:
+                    clean_config[k] = existing_config[k]
+            encrypted_config = self._encrypt_config(clean_config)
             updated_cfg = dict(channel.config or {})
             updated_cfg.update(encrypted_config)
             channel.config = updated_cfg
@@ -260,9 +269,19 @@ class ChannelService:
         return self.connector_factory.create_connector(channel)
 
     def test_channel_connection(self, tenant_id: UUID, channel_id: UUID) -> ConnectionTestResult:
-        """Probes channel connectivity and logs audit event."""
+        """Probes channel connectivity, updates channel config telemetry, and logs audit event."""
         connector = self.get_connector(tenant_id, channel_id)
         result = connector.test_connection()
+
+        channel = self.get_channel(tenant_id, channel_id)
+        if channel:
+            cfg = dict(channel.config or {})
+            cfg["last_test_status"] = "success" if result.connected else "failed"
+            cfg["last_test_result"] = result.to_dict()
+            cfg["last_tested_at"] = datetime.now(timezone.utc).isoformat()
+            channel.config = cfg
+            flag_modified(channel, "config")
+            self.db.flush()
 
         self.audit_service.record_event(
             tenant_id=tenant_id,
@@ -307,6 +326,57 @@ class ChannelService:
         )
         return result
 
+    def is_owner_sender(self, channel: Channel | None, sender_id: str) -> bool:
+        """
+        Determines whether the given sender_id matches an authorized owner for this channel.
+        Matches against channel.config owner_identifiers, owner_phone, owner_telegram_id,
+        and registered tenant owners/admins.
+        """
+        if not channel or not channel.config or not sender_id:
+            return False
+
+        config = dict(channel.config or {})
+        owner_identifiers: list[str] = []
+
+        # 1. Configured identifiers in channel config
+        raw_ids = config.get("owner_identifiers") or []
+        if isinstance(raw_ids, list):
+            owner_identifiers.extend(str(x).strip() for x in raw_ids if x)
+        elif isinstance(raw_ids, str):
+            owner_identifiers.append(raw_ids.strip())
+
+        for key in ("owner_phone", "owner_telegram_id", "owner_id", "owner_identifier", "phone_number"):
+            val = config.get(key)
+            if val:
+                owner_identifiers.append(str(val).strip())
+
+        def _normalize(val: str) -> str:
+            # Strip +, -, spaces, parentheses, leading zeros, and lower-case
+            return re.sub(r"[^\w]", "", str(val)).lower().lstrip("0")
+
+        norm_sender = _normalize(sender_id)
+        if not norm_sender:
+            return False
+
+        for oid in owner_identifiers:
+            norm_oid = _normalize(oid)
+            if not norm_oid:
+                continue
+            if norm_sender == norm_oid or norm_sender.endswith(norm_oid) or norm_oid.endswith(norm_sender):
+                return True
+
+        return False
+
+    def resolve_owner_user(self, tenant_id: UUID) -> User | None:
+        """Finds the primary active owner/admin user for the tenant."""
+        return self.db.scalar(
+            select(User).where(
+                User.tenant_id == tenant_id,
+                User.role.in_(["tenant_owner", "owner", "tenant_admin", "admin"]),
+                User.status == "active",
+            ).order_by(User.created_at.asc())
+        )
+
     def process_inbound_message(self, inbound: InboundMessage) -> Message:
         """
         Processes an incoming message from a connector:
@@ -336,98 +406,189 @@ class ChannelService:
             if existing_msg:
                 return existing_msg
 
-        # 2. Find or Create Customer
-        customer = None
-        if inbound.channel_type in ("whatsapp", "sms"):
-            customer = self.db.scalar(
-                select(Customer).where(
-                    Customer.tenant_id == tenant_id,
-                    Customer.phone == inbound.sender_id,
-                    Customer.status != "deleted",
-                )
-            )
-        elif inbound.channel_type == "email":
-            customer = self.db.scalar(
-                select(Customer).where(
-                    Customer.tenant_id == tenant_id,
-                    Customer.email == inbound.sender_id.lower(),
-                    Customer.status != "deleted",
-                )
+        channel = self.get_channel(tenant_id, channel_id)
+        is_owner = self.is_owner_sender(channel, inbound.sender_id)
+        owner_user = self.resolve_owner_user(tenant_id) if is_owner else None
+
+        if is_owner:
+            # -------------------------------------------------------------
+            # OWNER MANAGEMENT MODE
+            # Authenticated internal owner interacting with the AI Employee
+            # -------------------------------------------------------------
+            conversation = self.db.scalar(
+                select(Conversation).where(
+                    Conversation.tenant_id == tenant_id,
+                    Conversation.channel_id == channel_id,
+                    Conversation.customer_id.is_(None),
+                    Conversation.status.in_(["open", "active"]),
+                ).order_by(Conversation.started_at.desc())
             )
 
-        if customer is None:
-            # Check by metadata external ID
-            customer = self.db.scalar(
-                select(Customer).where(
-                    Customer.tenant_id == tenant_id,
-                    Customer.status != "deleted",
-                    Customer.metadata_json[f"{inbound.channel_type}_id"].as_string() == inbound.sender_id,
+            if conversation is None:
+                ch_name = channel.name if channel else inbound.channel_type.capitalize()
+                conversation = Conversation(
+                    tenant_id=tenant_id,
+                    channel_id=channel_id,
+                    customer_id=None,
+                    subject=f"Owner Management ({ch_name})",
+                    status="open",
+                    metadata_json={
+                        "is_owner": True,
+                        "conversation_type": "owner_management",
+                        "channel_type": inbound.channel_type,
+                        "sender_id": inbound.sender_id,
+                    },
                 )
-            )
+                self.db.add(conversation)
+                self.db.flush()
 
-        if customer is None:
-            # Create new customer
-            cust_name = inbound.sender_name or f"User {inbound.sender_id[:8]}"
-            customer = Customer(
+            # Persist inbound owner message as sender_type="user"
+            message = Message(
                 tenant_id=tenant_id,
-                name=cust_name,
-                phone=inbound.sender_id if inbound.channel_type in ("whatsapp", "sms") else None,
-                email=inbound.sender_id.lower() if inbound.channel_type == "email" else None,
-                status="active",
+                conversation_id=conversation.id,
+                sender_type="user",
+                sender_id=owner_user.id if owner_user else None,
+                customer_id=None,
+                content=inbound.content,
+                message_type=inbound.content_type,
                 metadata_json={
-                    f"{inbound.channel_type}_id": inbound.sender_id,
-                    "created_via_channel": str(channel_id),
-                },
-            )
-            self.db.add(customer)
-            self.db.flush()
-
-        # 3. Find or Create Active Conversation
-        conversation = self.db.scalar(
-            select(Conversation).where(
-                Conversation.tenant_id == tenant_id,
-                Conversation.channel_id == channel_id,
-                Conversation.customer_id == customer.id,
-                Conversation.status.in_(["open", "active"]),
-            ).order_by(Conversation.started_at.desc())
-        )
-
-        if conversation is None:
-            conversation = Conversation(
-                tenant_id=tenant_id,
-                channel_id=channel_id,
-                customer_id=customer.id,
-                subject=f"{inbound.channel_type.capitalize()} Chat with {customer.name}",
-                status="open",
-                metadata_json={
+                    "is_owner": True,
+                    "external_message_id": inbound.external_message_id,
+                    "channel_id": str(channel_id),
                     "channel_type": inbound.channel_type,
                     "sender_id": inbound.sender_id,
+                    "recipient_id": inbound.recipient_id,
+                    "raw_payload": inbound.raw_payload,
                 },
             )
-            self.db.add(conversation)
+            self.db.add(message)
             self.db.flush()
 
-
-        # 4. Persist Inbound Message
-        message = Message(
-            tenant_id=tenant_id,
-            conversation_id=conversation.id,
-            sender_type="customer",
-            customer_id=customer.id,
-            content=inbound.content,
-            message_type=inbound.content_type,
-            metadata_json={
-                "external_message_id": inbound.external_message_id,
+            outbox_payload = {
+                "message_id": str(message.id),
+                "conversation_id": str(conversation.id),
+                "tenant_id": str(tenant_id),
                 "channel_id": str(channel_id),
                 "channel_type": inbound.channel_type,
                 "sender_id": inbound.sender_id,
-                "raw_payload": inbound.raw_payload,
-            },
-        )
-        self.db.add(message)
-        self.db.flush()
+                "recipient_id": inbound.recipient_id,
+                "is_owner": True,
+                "content": inbound.content,
+                "external_message_id": inbound.external_message_id,
+            }
+        else:
+            # -------------------------------------------------------------
+            # CUSTOMER SERVICE MODE
+            # End-customer interacting with customer service (restricted permissions)
+            # -------------------------------------------------------------
+            customer = None
+            if inbound.channel_type in ("whatsapp", "sms"):
+                customer = self.db.scalar(
+                    select(Customer).where(
+                        Customer.tenant_id == tenant_id,
+                        Customer.phone == inbound.sender_id,
+                        Customer.status != "deleted",
+                    )
+                )
+            elif inbound.channel_type == "email":
+                customer = self.db.scalar(
+                    select(Customer).where(
+                        Customer.tenant_id == tenant_id,
+                        Customer.email == inbound.sender_id.lower(),
+                        Customer.status != "deleted",
+                    )
+                )
 
-        # 5. Atomic Outbox Event for Background Processing
+            if customer is None:
+                # Check by metadata external ID
+                customer = self.db.scalar(
+                    select(Customer).where(
+                        Customer.tenant_id == tenant_id,
+                        Customer.status != "deleted",
+                        Customer.metadata_json[f"{inbound.channel_type}_id"].as_string() == inbound.sender_id,
+                    )
+                )
+
+            if customer is None:
+                # Create new customer
+                cust_name = inbound.sender_name or f"User {inbound.sender_id[:8]}"
+                customer = Customer(
+                    tenant_id=tenant_id,
+                    name=cust_name,
+                    phone=inbound.sender_id if inbound.channel_type in ("whatsapp", "sms") else None,
+                    email=inbound.sender_id.lower() if inbound.channel_type == "email" else None,
+                    status="active",
+                    metadata_json={
+                        f"{inbound.channel_type}_id": inbound.sender_id,
+                        "created_via_channel": str(channel_id),
+                    },
+                )
+                self.db.add(customer)
+                self.db.flush()
+
+            # Find or Create Active Conversation for customer
+            conversation = self.db.scalar(
+                select(Conversation).where(
+                    Conversation.tenant_id == tenant_id,
+                    Conversation.channel_id == channel_id,
+                    Conversation.customer_id == customer.id,
+                    Conversation.status.in_(["open", "active"]),
+                ).order_by(Conversation.started_at.desc())
+            )
+
+            if conversation is None:
+                conversation = Conversation(
+                    tenant_id=tenant_id,
+                    channel_id=channel_id,
+                    customer_id=customer.id,
+                    subject=f"{inbound.channel_type.capitalize()} Chat with {customer.name}",
+                    status="open",
+                    metadata_json={
+                        "is_owner": False,
+                        "conversation_type": "customer_support",
+                        "channel_type": inbound.channel_type,
+                        "sender_id": inbound.sender_id,
+                    },
+                )
+                self.db.add(conversation)
+                self.db.flush()
+
+            # Persist Inbound Message as sender_type="customer"
+            message = Message(
+                tenant_id=tenant_id,
+                conversation_id=conversation.id,
+                sender_type="customer",
+                customer_id=customer.id,
+                content=inbound.content,
+                message_type=inbound.content_type,
+                metadata_json={
+                    "is_owner": False,
+                    "external_message_id": inbound.external_message_id,
+                    "channel_id": str(channel_id),
+                    "channel_type": inbound.channel_type,
+                    "sender_id": inbound.sender_id,
+                    "recipient_id": inbound.recipient_id,
+                    "raw_payload": inbound.raw_payload,
+                },
+            )
+            self.db.add(message)
+            self.db.flush()
+
+            outbox_payload = {
+                "message_id": str(message.id),
+                "conversation_id": str(conversation.id),
+                "tenant_id": str(tenant_id),
+                "customer_id": str(customer.id),
+                "channel_id": str(channel_id),
+                "channel_type": inbound.channel_type,
+                "sender_id": inbound.sender_id,
+                "recipient_id": inbound.recipient_id,
+                "is_owner": False,
+                "content": inbound.content,
+                "external_message_id": inbound.external_message_id,
+            }
+
+        # Atomic Outbox Event for Background Processing
         outbox_service = OutboxService(self.db)
         outbox_event = outbox_service.create_event(
             tenant_id=tenant_id,
@@ -435,16 +596,7 @@ class ChannelService:
             message_id=message.id,
             idempotency_key=f"outbox:inbound:{message.id}",
             event_type="process_incoming_message",
-            payload={
-                "message_id": str(message.id),
-                "conversation_id": str(conversation.id),
-                "tenant_id": str(tenant_id),
-                "customer_id": str(customer.id),
-                "channel_id": str(channel_id),
-                "channel_type": inbound.channel_type,
-                "content": inbound.content,
-                "external_message_id": inbound.external_message_id,
-            },
+            payload=outbox_payload,
         )
 
 

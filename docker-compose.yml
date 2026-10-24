@@ -1,4 +1,4 @@
-﻿services:
+services:
 
   agent:
     build:
@@ -9,6 +9,15 @@
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      - DATABASE_URL=postgresql+psycopg://ai_employee:change_me_local@postgres:5432/ai_employee
+      - REDIS_URL=redis://redis:6379/0
+      - ENABLE_EMBEDDED_WORKER=true
+      - AI_PROVIDER=groq
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+      - ./infrastructure:/app/infrastructure
     depends_on:
       - postgres
       - redis
@@ -35,6 +44,22 @@
     volumes:
       - redis_data:/data
     restart: unless-stopped
+
+  ngrok:
+    image: ngrok/ngrok:alpine
+    container_name: ai_employee_ngrok
+    restart: "no"
+    profiles:
+      - tunnel
+    ports:
+      - "127.0.0.1:4040:4040"
+    environment:
+      NGROK_AUTHTOKEN: "${NGROK_AUTHTOKEN:-}"
+    command:
+      - "http"
+      - "agent:8000"
+    depends_on:
+      - agent
 
 volumes:
   postgres_data:

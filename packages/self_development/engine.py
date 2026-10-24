@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
+import os
 from typing import Any
 
 from uuid import UUID, uuid4
@@ -50,7 +52,7 @@ class SelfDevelopmentEngine:
         sandbox: ExecutionSandbox | None = None,
         approval_service: ApprovalService | None = None,
         audit_service: AuditService | None = None,
-        require_container_isolation: bool = False,
+        require_container_isolation: bool | None = None,
     ):
         self.db = db
         self.tool_registry = tool_registry
@@ -58,6 +60,8 @@ class SelfDevelopmentEngine:
         self.verifier = verifier or CapabilitySecurityVerifier(sandbox=self.sandbox)
         self.approval_service = approval_service or ApprovalService(db)
         self.audit_service = audit_service or AuditService(db)
+        if require_container_isolation is None:
+            require_container_isolation = os.environ.get("REQUIRE_CONTAINER_ISOLATION", "").lower() in ("1", "true", "yes")
         self.require_container_isolation = require_container_isolation
 
 
@@ -268,6 +272,8 @@ class SelfDevelopmentEngine:
         if not clean_code:
             raise ValueError("Implementation code cannot be empty")
 
+        content_hash = hashlib.sha256(clean_code.encode("utf-8")).hexdigest()
+
         version.status = "developing"
         self.db.flush()
 
@@ -277,6 +283,12 @@ class SelfDevelopmentEngine:
         overall_success, test_summary, security_verdict = self.verifier.full_verification(
             clean_code, spec
         )
+
+        test_summary["content_hash"] = content_hash
+        security_verdict["content_hash"] = content_hash
+        spec_dict = dict(version.specification or {})
+        spec_dict["content_hash"] = content_hash
+        version.specification = spec_dict
 
         version.implementation_code = clean_code
         version.test_results = test_summary
@@ -309,7 +321,7 @@ class SelfDevelopmentEngine:
                 action="activate_capability",
                 description=(
                     f"Approval requested for dynamic capability '{version.name}' "
-                    f"(v{version.version_number}, risk: {version.risk_level})"
+                    f"(v{version.version_number}, risk: {version.risk_level}) [hash:{content_hash}]"
                 ),
             )
             version.approval_id = approval.id
@@ -376,6 +388,15 @@ class SelfDevelopmentEngine:
 
         if not is_human_admin:
             raise PermissionError(f"User role '{user.role}' lacks permission to approve capabilities")
+
+        # Content hash verification against tested candidate
+        if version.implementation_code:
+            current_hash = hashlib.sha256(version.implementation_code.strip().encode("utf-8")).hexdigest()
+            tested_hash = (version.test_results or {}).get("content_hash") or (version.specification or {}).get("content_hash")
+            if tested_hash and current_hash != tested_hash:
+                raise ValueError(
+                    f"Integrity check failed: implementation code has been modified (current: {current_hash}, tested: {tested_hash})"
+                )
 
 
         # Update approval record if exists
@@ -454,6 +475,15 @@ class SelfDevelopmentEngine:
         if version.status != "approved":
             raise ValueError(f"Only approved capability versions can be activated (current status: '{version.status}')")
 
+        # Content hash verification before activation
+        if version.implementation_code:
+            current_hash = hashlib.sha256(version.implementation_code.strip().encode("utf-8")).hexdigest()
+            tested_hash = (version.test_results or {}).get("content_hash") or (version.specification or {}).get("content_hash")
+            if tested_hash and current_hash != tested_hash:
+                raise ValueError(
+                    f"Activation blocked: code tampering detected. Current hash {current_hash} != tested hash {tested_hash}."
+                )
+
         # Verify test results are passing
         test_results = version.test_results or {}
         if not test_results.get("all_passed"):
@@ -514,6 +544,7 @@ class SelfDevelopmentEngine:
                 implementation_code=version.implementation_code,
                 spec=spec,
                 sandbox=self.sandbox,
+                require_container_isolation=self.require_container_isolation,
             )
             self.tool_registry.register(dyn_tool)
 
@@ -611,6 +642,18 @@ class SelfDevelopmentEngine:
         # Synchronize runtime ToolRegistry
         if self.tool_registry is not None:
             if rollback_to_version_number is not None and result_version.implementation_code:
+                if self.require_container_isolation and not self.sandbox.is_containerized:
+                    raise PermissionError(
+                        "Activation blocked: Dynamic capability cannot be rolled back or activated without verified container isolation (restricted Docker container with --network none)."
+                    )
+                # Content hash verification on target rollback version
+                cur_hash = hashlib.sha256(result_version.implementation_code.strip().encode("utf-8")).hexdigest()
+                tested_hash = (result_version.test_results or {}).get("content_hash") or (result_version.specification or {}).get("content_hash")
+                if tested_hash and cur_hash != tested_hash:
+                    raise ValueError(
+                        f"Rollback blocked: code tampering detected in rollback version (current: {cur_hash}, tested: {tested_hash})."
+                    )
+
                 spec = CapabilitySpecification(**result_version.specification)
                 dyn_tool = DynamicCapabilityTool(
                     tenant_id=tenant_id,
@@ -620,6 +663,7 @@ class SelfDevelopmentEngine:
                     implementation_code=result_version.implementation_code,
                     spec=spec,
                     sandbox=self.sandbox,
+                    require_container_isolation=self.require_container_isolation,
                 )
                 self.tool_registry.register(dyn_tool)
             else:

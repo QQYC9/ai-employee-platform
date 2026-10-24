@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 from uuid import UUID
+import re
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from packages.memory.sanitizer import MemorySanitizer
 from packages.models.domain import BusinessBrain
+from packages.models.tenant import Tenant
 from packages.services.audit_service import AuditService
 
 
@@ -82,6 +84,10 @@ class BusinessBrainService:
         self.db.flush()
         return brain
 
+    def get_or_create_brain(self, tenant_id: UUID) -> BusinessBrain:
+        """Alias for create_brain_if_not_exists."""
+        return self.create_brain_if_not_exists(tenant_id)
+
     def update_brain(
         self,
         tenant_id: UUID,
@@ -103,11 +109,12 @@ class BusinessBrainService:
         performance: dict | None = None,
         lessons: dict | None = None,
         updated_by_user_id: UUID | None = None,
+        replace_sections: list[str] | set[str] | None = None,
     ) -> BusinessBrain:
         """Update validated sections of a tenant's BusinessBrain with secret scanning."""
-        brain = self.get_brain(tenant_id)
-        if brain is None:
-            raise ValueError("BusinessBrain not found")
+        from sqlalchemy.orm.attributes import flag_modified
+
+        brain = self.create_brain_if_not_exists(tenant_id)
 
         fields = {
             "identity": identity,
@@ -130,6 +137,7 @@ class BusinessBrainService:
         }
 
         updated_sections: list[str] = []
+        replace_set = set(replace_sections or [])
 
         for field_name, value in fields.items():
             if value is not None:
@@ -140,11 +148,16 @@ class BusinessBrainService:
                 MemorySanitizer.scan_dict_for_secrets(value)
 
                 current_val = getattr(brain, field_name) or {}
-                if isinstance(current_val, dict):
+                if field_name in replace_set:
+                    # Full section replacement requested
+                    setattr(brain, field_name, dict(value))
+                elif isinstance(current_val, dict):
                     updated = self._deep_merge_dict(current_val, value)
                     setattr(brain, field_name, updated)
                 else:
                     setattr(brain, field_name, value)
+
+                flag_modified(brain, field_name)
                 updated_sections.append(field_name)
 
         brain.version += 1
@@ -203,3 +216,289 @@ class BusinessBrainService:
             "created_at": brain.created_at.isoformat() if brain.created_at else None,
             "updated_at": brain.updated_at.isoformat() if brain.updated_at else None,
         }
+
+    def get_profile(self, tenant_id: UUID) -> dict[str, Any]:
+        """Fetch unified business profile for a tenant."""
+        statement = select(Tenant).where(
+            Tenant.id == tenant_id,
+            Tenant.status == "active",
+        )
+        tenant = self.db.scalar(statement)
+        if tenant is None:
+            raise ValueError(f"Active tenant '{tenant_id}' not found")
+
+        brain = self.create_brain_if_not_exists(tenant_id)
+        identity = brain.identity or {}
+        commercial_name = identity.get("commercial_name") or tenant.name
+
+        return {
+            "tenant_id": str(tenant_id),
+            "commercial_name": commercial_name,
+            "legal_name": identity.get("legal_name"),
+            "business_type": identity.get("business_type"),
+            "description": identity.get("description"),
+            "contact": identity.get("contact", {}),
+            "address": identity.get("address", {}),
+            "operating_hours": identity.get("operating_hours", {}),
+            "products": brain.products or {},
+            "services": brain.services or {},
+            "pricing": brain.pricing or {},
+            "policies": brain.policies or {},
+            "operations": brain.operations or {},
+            "version": brain.version,
+            "updated_at": brain.updated_at.isoformat() if brain.updated_at else None,
+        }
+
+    def update_profile(
+        self,
+        tenant_id: UUID,
+        profile_data: dict[str, Any],
+        user_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        """
+        Update unified business profile for a tenant with strict validation,
+        secret scanning, and audit logging. Synchronizes commercial_name with Tenant.name.
+        """
+        from sqlalchemy.orm.attributes import flag_modified
+
+        statement = select(Tenant).where(
+            Tenant.id == tenant_id,
+            Tenant.status == "active",
+        )
+        tenant = self.db.scalar(statement)
+        if tenant is None:
+            raise ValueError(f"Active tenant '{tenant_id}' not found")
+
+        # 1. Secret scanning across the entire input payload
+        MemorySanitizer.scan_dict_for_secrets(profile_data)
+
+        brain = self.create_brain_if_not_exists(tenant_id)
+        updated_sections: list[str] = []
+
+        # 2. Commercial name synchronization with Tenant model
+        commercial_name = profile_data.get("commercial_name")
+        if commercial_name is not None:
+            commercial_name = commercial_name.strip()
+            if not commercial_name:
+                raise ValueError("Commercial name cannot be empty")
+            tenant.name = commercial_name
+
+        # 3. Identity attributes
+        identity_fields = [
+            "legal_name",
+            "business_type",
+            "description",
+            "contact",
+            "address",
+            "operating_hours",
+        ]
+        current_identity = dict(brain.identity or {})
+        has_identity_updates = False
+
+        if commercial_name is not None:
+            current_identity["commercial_name"] = commercial_name
+            has_identity_updates = True
+
+        for field in identity_fields:
+            if field in profile_data and profile_data[field] is not None:
+                val = profile_data[field]
+                if isinstance(val, dict) and isinstance(current_identity.get(field), dict):
+                    current_identity[field] = self._deep_merge_dict(current_identity[field], val)
+                else:
+                    current_identity[field] = val
+                has_identity_updates = True
+
+        if has_identity_updates:
+            brain.identity = current_identity
+            flag_modified(brain, "identity")
+            updated_sections.append("identity")
+
+        # 4. Direct domain sections
+        direct_sections = ["products", "services", "pricing", "policies", "operations"]
+        for section in direct_sections:
+            if section in profile_data and profile_data[section] is not None:
+                val = profile_data[section]
+                if isinstance(val, list):
+                    normalized_dict = {}
+                    for idx, item in enumerate(val):
+                        if isinstance(item, dict):
+                            name = item.get("name") or f"item_{idx+1}"
+                            slug = (
+                                item.get("slug")
+                                or re.sub(r"[^\w]+", "_", str(name)).strip("_").lower()
+                                or f"{section}_{idx+1}"
+                            )
+                            normalized_dict[slug] = item
+                        else:
+                            normalized_dict[str(idx)] = item
+                    val = normalized_dict
+
+                if not isinstance(val, dict):
+                    raise ValueError(f"Section '{section}' must be a dictionary or list")
+
+                current_val = getattr(brain, section) or {}
+                if isinstance(current_val, dict):
+                    updated = self._deep_merge_dict(current_val, val)
+                    setattr(brain, section, updated)
+                else:
+                    setattr(brain, section, val)
+
+                flag_modified(brain, section)
+                updated_sections.append(section)
+
+        brain.version += 1
+        self.db.flush()
+
+        if updated_sections:
+            self.audit_service.record_event(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                event_type="business_profile_updated",
+                action="update_profile",
+                description=f"Updated business profile sections: {', '.join(updated_sections)}",
+                event_metadata={
+                    "sections_updated": updated_sections,
+                    "version": brain.version,
+                },
+            )
+
+        return self.get_profile(tenant_id)
+
+    def get_catalog(self, tenant_id: UUID) -> dict[str, Any]:
+        """Fetch catalog components (products, services, pricing) for a tenant."""
+        brain = self.create_brain_if_not_exists(tenant_id)
+        return {
+            "tenant_id": str(tenant_id),
+            "products": brain.products or {},
+            "services": brain.services or {},
+            "pricing": brain.pricing or {},
+            "version": brain.version,
+        }
+
+    def update_catalog(
+        self,
+        tenant_id: UUID,
+        products: Any = None,
+        services: Any = None,
+        pricing: Any = None,
+        replace_all: bool = False,
+        user_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        """Update catalog components with secret scanning and versioning."""
+        from sqlalchemy.orm.attributes import flag_modified
+
+        payload = {}
+        if products is not None:
+            payload["products"] = products
+        if services is not None:
+            payload["services"] = services
+        if pricing is not None:
+            payload["pricing"] = pricing
+
+        MemorySanitizer.scan_dict_for_secrets(payload)
+
+        brain = self.create_brain_if_not_exists(tenant_id)
+        updated_sections = []
+
+        for key, raw_val in payload.items():
+            val = raw_val
+            if isinstance(val, list):
+                normalized = {}
+                for idx, item in enumerate(val):
+                    if isinstance(item, dict):
+                        name = item.get("name") or f"item_{idx+1}"
+                        slug = (
+                            item.get("slug")
+                            or re.sub(r"[^\w]+", "_", str(name)).strip("_").lower()
+                            or f"{key}_{idx+1}"
+                        )
+                        normalized[slug] = item
+                    else:
+                        normalized[str(idx)] = item
+                val = normalized
+
+            if not isinstance(val, dict):
+                raise ValueError(f"Field '{key}' must be a dictionary or list")
+
+            if replace_all:
+                setattr(brain, key, dict(val))
+            else:
+                current_val = getattr(brain, key) or {}
+                if isinstance(current_val, dict):
+                    setattr(brain, key, self._deep_merge_dict(current_val, val))
+                else:
+                    setattr(brain, key, val)
+
+            flag_modified(brain, key)
+            updated_sections.append(key)
+
+        brain.version += 1
+        self.db.flush()
+
+        if updated_sections:
+            self.audit_service.record_event(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                event_type="business_catalog_updated",
+                action="update_catalog",
+                description=f"Updated catalog sections: {', '.join(updated_sections)}",
+                event_metadata={
+                    "sections": updated_sections,
+                    "replace_all": replace_all,
+                    "version": brain.version,
+                },
+            )
+
+        return self.get_catalog(tenant_id)
+
+    def get_policies(self, tenant_id: UUID) -> dict[str, Any]:
+        """Fetch business policies (delivery, returns, exchange, payment, etc.)."""
+        brain = self.create_brain_if_not_exists(tenant_id)
+        return {
+            "tenant_id": str(tenant_id),
+            "policies": brain.policies or {},
+            "version": brain.version,
+        }
+
+    def update_policies(
+        self,
+        tenant_id: UUID,
+        policies: dict[str, Any],
+        replace_all: bool = False,
+        user_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        """Update business policies with secret scanning and versioning."""
+        from sqlalchemy.orm.attributes import flag_modified
+
+        if not isinstance(policies, dict):
+            raise ValueError("Policies must be a dictionary")
+
+        MemorySanitizer.scan_dict_for_secrets(policies)
+
+        brain = self.create_brain_if_not_exists(tenant_id)
+        if replace_all:
+            brain.policies = dict(policies)
+        else:
+            current_policies = brain.policies or {}
+            if isinstance(current_policies, dict):
+                brain.policies = self._deep_merge_dict(current_policies, policies)
+            else:
+                brain.policies = dict(policies)
+
+        flag_modified(brain, "policies")
+        brain.version += 1
+        self.db.flush()
+
+        self.audit_service.record_event(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            event_type="business_policies_updated",
+            action="update_policies",
+            description="Updated business policies",
+            event_metadata={
+                "replace_all": replace_all,
+                "version": brain.version,
+            },
+        )
+
+        return self.get_policies(tenant_id)

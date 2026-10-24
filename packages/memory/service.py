@@ -93,6 +93,12 @@ class MemoryService:
         )
 
         meta = dict(metadata_json or {})
+        # Security guard: Customer conversation messages cannot establish store decisions or policies
+        if clean_type == MemoryType.DECISION:
+            sender_type = str(meta.get("sender_type") or "").strip().lower()
+            if sender_type == "customer" or (customer_id is not None and source == "conversation_message"):
+                raise ValueError("Customer messages cannot establish store decisions or policies")
+
         if customer_id is not None:
             meta["customer_id"] = str(customer_id)
         if conversation_id is not None:
@@ -370,11 +376,38 @@ class MemoryService:
         if old_memory is None:
             raise ValueError(f"Memory '{old_memory_id}' not found to supersede")
 
-        new_meta = dict(old_memory.metadata_json or {})
+        old_meta = dict(old_memory.metadata_json or {})
+
+        # Extract scope identifiers from old memory
+        old_customer_id = None
+        raw_cust = old_meta.get("customer_id")
+        if raw_cust:
+            try:
+                old_customer_id = UUID(str(raw_cust))
+            except Exception:
+                old_customer_id = None
+
+        old_conv_id = None
+        raw_conv = old_meta.get("conversation_id")
+        if raw_conv:
+            try:
+                old_conv_id = UUID(str(raw_conv))
+            except Exception:
+                old_conv_id = None
+
+        old_task_id = None
+        raw_task = old_meta.get("task_id")
+        if raw_task:
+            try:
+                old_task_id = UUID(str(raw_task))
+            except Exception:
+                old_task_id = None
+
+        new_meta = dict(old_meta)
         new_meta["supersedes"] = str(old_memory.id)
         new_meta["superseded_reason"] = reason or "Updated fact superseded earlier record"
 
-        # Create new memory
+        # Create new memory while preserving scope and provenance
         new_memory = self.create_memory(
             tenant_id=tenant_id,
             content=new_content,
@@ -382,6 +415,10 @@ class MemoryService:
             importance=importance if importance is not None else old_memory.importance,
             confidence=confidence if confidence is not None else old_memory.confidence,
             agent_id=old_memory.agent_id,
+            user_id=old_memory.user_id,
+            customer_id=old_customer_id,
+            conversation_id=old_conv_id,
+            task_id=old_task_id,
             source=source,
             metadata_json=new_meta,
             status=MemoryStatus.ACTIVE,

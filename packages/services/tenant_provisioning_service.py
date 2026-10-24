@@ -19,6 +19,37 @@ from packages.models.domain import (
 )
 from packages.models.tenant import Tenant
 
+ARABIC_CHAR_MAP: dict[str, str] = {
+    "أ": "a", "إ": "i", "آ": "aa", "ا": "a", "ء": "", "ؤ": "u", "ئ": "e",
+    "ب": "b", "ت": "t", "ث": "th", "ج": "j", "ح": "h", "خ": "kh",
+    "د": "d", "ذ": "dh", "ر": "r", "ز": "z", "س": "s", "ش": "sh",
+    "ص": "s", "ض": "d", "ط": "t", "ظ": "z", "ع": "a", "غ": "gh",
+    "ف": "f", "ق": "q", "ك": "k", "ل": "l", "م": "m", "ن": "n",
+    "ه": "h", "ة": "h", "و": "w", "ي": "y", "ى": "a",
+    "پ": "p", "چ": "ch", "ژ": "zh", "گ": "g", "ڤ": "v",
+    "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+    "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+}
+
+
+def slugify_text(text: str) -> str:
+    """
+    Convert text (supporting Arabic and Latin) into a clean, URL-safe slug.
+    Transliterates Arabic characters into Latin equivalents and normalizes separators.
+    """
+    if not text:
+        return ""
+    chars: list[str] = []
+    for ch in text.lower():
+        if ch in ARABIC_CHAR_MAP:
+            chars.append(ARABIC_CHAR_MAP[ch])
+        else:
+            chars.append(ch)
+    joined = "".join(chars)
+    cleaned = re.sub(r"[^a-z0-9]+", "-", joined)
+    return re.sub(r"-+", "-", cleaned).strip("-")
+
+
 
 class BusinessBrainInput(BaseModel):
     industry: str | None = None
@@ -112,17 +143,34 @@ class TenantProvisioningService:
 
         # Slug generation & uniqueness check
         if request.slug and request.slug.strip():
-            slug = re.sub(r"[^a-z0-9-]+", "", request.slug.strip().lower())
+            slug = slugify_text(request.slug)
             if not slug:
                 raise ValueError("Invalid tenant slug")
+            if len(slug) > 100:
+                slug = slug[:100].rstrip("-")
             existing_tenant = self.db.scalar(
                 select(Tenant).where(Tenant.slug == slug)
             )
             if existing_tenant is not None:
                 raise ValueError(f"Tenant slug '{slug}' already exists")
         else:
-            base_slug = re.sub(r"[^a-z0-9]+", "-", clean_name.lower()).strip("-")
-            slug = f"{base_slug[:80]}-{uuid4().hex[:8]}"
+            base_slug = slugify_text(clean_name)
+            if not base_slug:
+                base_slug = "tenant"
+            base_prefix = base_slug[:80].rstrip("-")
+            if not base_prefix:
+                base_prefix = "tenant"
+
+            for _ in range(5):
+                candidate_slug = f"{base_prefix}-{uuid4().hex[:8]}"
+                existing_tenant = self.db.scalar(
+                    select(Tenant).where(Tenant.slug == candidate_slug)
+                )
+                if existing_tenant is None:
+                    slug = candidate_slug
+                    break
+            else:
+                slug = f"tenant-{uuid4().hex}"[:100]
 
         # Capabilities validation: ensure only global or tenant-approved capabilities are assigned
         agent_input = request.agent or InitialAgentInput()

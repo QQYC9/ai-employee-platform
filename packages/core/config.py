@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://ai_employee:change_me_local@127.0.0.1:5433/ai_employee"
+    test_database_url: str | None = None
     redis_url: str = "redis://localhost:6379/0"
 
     ai_provider: str = "gemini"
@@ -50,6 +51,17 @@ class Settings(BaseSettings):
     # Rate Limiting
     rate_limit_login_per_minute: int = 10
     rate_limit_planning_per_minute: int = 30
+
+    @property
+    def effective_test_database_url(self) -> str:
+        """
+        Derives or returns the isolated test database URL.
+        Preserves host, port, credentials, and driver while targeting 'ai_employee_test'.
+        """
+        if self.test_database_url:
+            return self.test_database_url
+        from packages.core.safety_guard import derive_test_database_url
+        return derive_test_database_url(self.database_url, "ai_employee_test")
 
     @property
     def is_dev_auth_allowed(self) -> bool:

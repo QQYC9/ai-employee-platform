@@ -1,0 +1,247 @@
+# ==============================================================================
+# AI Employee Platform — Production Docker Compose Architecture
+# Phase 21: Production Gateway, Frontend Containerization & Reverse Proxy
+#
+# USAGE:
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# ARCHITECTURAL RULES:
+#   1. Ingress: Only Caddy publishes host ports (80, 443).
+#   2. DB & Redis: Zero host ports; isolated exclusively in backend_network.
+#   3. Frontends: Pure static Nginx Alpine images (28.9MB each).
+#   4. Outbox Worker: Dedicated standalone worker with embedded worker disabled.
+#   5. Migrations: Executed as a deliberate one-off command, never on startup.
+# ==============================================================================
+
+name: ai-employee-platform-prod
+
+services:
+
+  # ----------------------------------------------------------------------------
+  # 1. Edge Gateway & Reverse Proxy (Caddy v2)
+  # ----------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: ai_employee_prod_caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ADMIN_DOMAIN: "${ADMIN_DOMAIN:-admin.example.com}"
+      APP_DOMAIN: "${APP_DOMAIN:-app.example.com}"
+      API_DOMAIN: "${API_DOMAIN:-api.example.com}"
+      CADDY_ACME_EMAIL: "${CADDY_ACME_EMAIL:-admin@example.com}"
+      CADDY_AUTO_HTTPS: "${CADDY_AUTO_HTTPS:-on}"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_prod_data:/data
+      - caddy_prod_config:/config
+    networks:
+      - gateway_network
+    depends_on:
+      backend:
+        condition: service_healthy
+      admin_dashboard:
+        condition: service_healthy
+      tenant_dashboard:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # 2. Super Admin Dashboard (Nginx Alpine)
+  # ----------------------------------------------------------------------------
+  admin_dashboard:
+    image: ai-employee-admin-dashboard:prod
+    container_name: ai_employee_prod_admin_dashboard
+    expose:
+      - "80"
+    networks:
+      - gateway_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ----------------------------------------------------------------------------
+  # 3. Tenant Dashboard (Nginx Alpine)
+  # ----------------------------------------------------------------------------
+  tenant_dashboard:
+    image: ai-employee-tenant-dashboard:prod
+    container_name: ai_employee_prod_tenant_dashboard
+    expose:
+      - "80"
+    networks:
+      - gateway_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ----------------------------------------------------------------------------
+  # 4. Backend REST API Service (FastAPI / Python 3.13)
+  # ----------------------------------------------------------------------------
+  backend:
+    image: ai-employee-platform:prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_employee_prod_backend
+    expose:
+      - "8000"
+    environment:
+      ENVIRONMENT: "production"
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY}"
+      JWT_ALGORITHM: "${JWT_ALGORITHM:-HS256}"
+      JWT_ISSUER: "${JWT_ISSUER:-ai-employee-platform}"
+      JWT_AUDIENCE: "${JWT_AUDIENCE:-ai-employee-api}"
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-15}"
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: "${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-7}"
+      SECRETS_ENCRYPTION_KEY: "${SECRETS_ENCRYPTION_KEY}"
+      AI_PROVIDER: "${AI_PROVIDER:-gemini}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.8-flash}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      AI_PLANNING_ENABLED: "${AI_PLANNING_ENABLED:-false}"
+      ENABLE_EMBEDDED_WORKER: "false"
+      RATE_LIMIT_LOGIN_PER_MINUTE: "${RATE_LIMIT_LOGIN_PER_MINUTE:-10}"
+      RATE_LIMIT_PLANNING_PER_MINUTE: "${RATE_LIMIT_PLANNING_PER_MINUTE:-30}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - gateway_network
+      - backend_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 5. Dedicated Outbox Background Worker (Process Isolation)
+  # ----------------------------------------------------------------------------
+  worker:
+    image: ai-employee-platform:prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_employee_prod_worker
+    command:
+      - "python"
+      - "-m"
+      - "apps.worker"
+      - "--poll-interval"
+      - "${OUTBOX_WORKER_POLL_INTERVAL:-1.0}"
+      - "--batch-size"
+      - "${OUTBOX_WORKER_BATCH_SIZE:-10}"
+      - "--lock-timeout"
+      - "${OUTBOX_WORKER_LOCK_TIMEOUT:-300}"
+    environment:
+      ENVIRONMENT: "production"
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY}"
+      SECRETS_ENCRYPTION_KEY: "${SECRETS_ENCRYPTION_KEY}"
+      AI_PROVIDER: "${AI_PROVIDER:-gemini}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OUTBOX_WORKER_POLL_INTERVAL: "${OUTBOX_WORKER_POLL_INTERVAL:-1.0}"
+      OUTBOX_WORKER_BATCH_SIZE: "${OUTBOX_WORKER_BATCH_SIZE:-10}"
+      OUTBOX_WORKER_LOCK_TIMEOUT: "${OUTBOX_WORKER_LOCK_TIMEOUT:-300}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend_network
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # 6. Relational Database with Vector Search (PostgreSQL 17 + pgvector)
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: ai_employee_prod_postgres
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    expose:
+      - "5432"
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    networks:
+      - backend_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 7. Distributed Cache, Locks & Event Outbox Queue (Redis 7 Alpine)
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ai_employee_prod_redis
+    command:
+      - "redis-server"
+      - "--requirepass"
+      - "${REDIS_PASSWORD}"
+      - "--appendonly"
+      - "yes"
+    expose:
+      - "6379"
+    volumes:
+      - redis_prod_data:/data
+    networks:
+      - backend_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+# ------------------------------------------------------------------------------
+# Isolated Networks Topology
+# ------------------------------------------------------------------------------
+networks:
+  gateway_network:
+    name: ai_employee_prod_gateway_net
+    driver: bridge
+
+  backend_network:
+    name: ai_employee_prod_backend_net
+    driver: bridge
+
+# ------------------------------------------------------------------------------
+# Persistent Storage Volumes
+# ------------------------------------------------------------------------------
+volumes:
+  postgres_prod_data:
+    name: ai_employee_prod_postgres_data
+  redis_prod_data:
+    name: ai_employee_prod_redis_data
+  caddy_prod_data:
+    name: ai_employee_prod_caddy_data
+  caddy_prod_config:
+    name: ai_employee_prod_caddy_config

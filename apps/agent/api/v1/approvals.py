@@ -158,6 +158,13 @@ def approve_approval(
     current_user: User = Depends(get_tenant_context),
     db: Session = Depends(get_db),
 ):
+    user_role = (current_user.role or "").strip().lower()
+    if user_role in ("platform_admin", "superadmin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Platform administrators cannot approve or reject routine tenant approvals via standard endpoints",
+        )
+
     service = ApprovalService(db)
 
     try:
@@ -202,6 +209,13 @@ def reject_approval(
     current_user: User = Depends(get_tenant_context),
     db: Session = Depends(get_db),
 ):
+    user_role = (current_user.role or "").strip().lower()
+    if user_role in ("platform_admin", "superadmin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Platform administrators cannot approve or reject routine tenant approvals via standard endpoints",
+        )
+
     service = ApprovalService(db)
 
     try:
@@ -245,6 +259,13 @@ def cancel_approval(
     current_user: User = Depends(get_tenant_context),
     db: Session = Depends(get_db),
 ):
+    user_role = (current_user.role or "").strip().lower()
+    if user_role in ("platform_admin", "superadmin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Platform administrators cannot cancel routine tenant approvals via standard endpoints",
+        )
+
     service = ApprovalService(db)
 
     try:

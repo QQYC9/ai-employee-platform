@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, ForeignKeyConstraint, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -67,6 +67,11 @@ class Agent(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_agents_tenant_id"),
+    )
+
 
 
 class Capability(Base):
@@ -272,6 +277,11 @@ class Task(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_tasks_tenant_id"),
+    )
+
+
 
 class Permission(Base):
     __tablename__ = "permissions"
@@ -325,6 +335,11 @@ class Approval(Base):
     decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_approvals_tenant_id"),
+    )
+
 
 
 
@@ -910,6 +925,11 @@ class Conversation(Base):
         nullable=True,
     )
 
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_conversations_tenant_id"),
+    )
+
+
 
 class Message(Base):
     __tablename__ = "messages"
@@ -967,6 +987,11 @@ class Message(Base):
         server_default=func.now(),
         index=True,
     )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_messages_tenant_id"),
+    )
+
 
 class Source(Base):
     __tablename__ = "sources"
@@ -1426,6 +1451,7 @@ class OutboxEvent(Base):
     )
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_outbox_events_tenant_id"),
         UniqueConstraint(
             "tenant_id",
             "idempotency_key",
@@ -1433,6 +1459,7 @@ class OutboxEvent(Base):
         ),
         Index("ix_outbox_events_claim", "status", "scheduled_at"),
     )
+
 
 
 class ProactiveWorkflow(Base):
@@ -1777,3 +1804,311 @@ class DevelopmentRun(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
     )
+
+
+class ExecutionTrace(Base):
+    __tablename__ = "execution_traces"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    trace_id: Mapped[uuid.UUID] = mapped_column(
+        nullable=False, unique=True, index=True, default=uuid.uuid4
+    )
+    trigger_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="inbound_message", server_default="inbound_message"
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True, index=True
+    )
+    inbound_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True, index=True
+    )
+    reply_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True, index=True
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True, index=True
+    )
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="running", server_default="running", index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_execution_traces_tenant_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            ondelete="SET NULL (conversation_id)",
+            name="fk_traces_conversation_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "inbound_message_id"],
+            ["messages.tenant_id", "messages.id"],
+            ondelete="SET NULL (inbound_message_id)",
+            name="fk_traces_inbound_msg_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "reply_message_id"],
+            ["messages.tenant_id", "messages.id"],
+            ondelete="SET NULL (reply_message_id)",
+            name="fk_traces_reply_msg_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "task_id"],
+            ["tasks.tenant_id", "tasks.id"],
+            ondelete="SET NULL (task_id)",
+            name="fk_traces_task_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_id"],
+            ["agents.tenant_id", "agents.id"],
+            ondelete="SET NULL (agent_id)",
+            name="fk_traces_agent_tenant",
+        ),
+        Index("ix_execution_traces_tenant_status", "tenant_id", "status"),
+        Index("ix_execution_traces_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class ExecutionStep(Base):
+    __tablename__ = "execution_steps"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    trace_id: Mapped[uuid.UUID] = mapped_column(
+        nullable=False, index=True
+    )
+    parent_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True, index=True
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True, index=True
+    )
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True, index=True
+    )
+    outbox_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True, index=True
+    )
+    step_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    step_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, index=True
+    )
+    step_name: Mapped[str] = mapped_column(
+        String(150), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="pending", server_default="pending", index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    attempts_history: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    input_summary: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    output_summary: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    error_info: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_execution_steps_tenant_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "trace_id"],
+            ["execution_traces.tenant_id", "execution_traces.id"],
+            ondelete="CASCADE",
+            name="fk_steps_trace_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "parent_step_id"],
+            ["execution_steps.tenant_id", "execution_steps.id"],
+            ondelete="CASCADE",
+            name="fk_steps_parent_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "task_id"],
+            ["tasks.tenant_id", "tasks.id"],
+            ondelete="SET NULL (task_id)",
+            name="fk_steps_task_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "approval_id"],
+            ["approvals.tenant_id", "approvals.id"],
+            ondelete="SET NULL (approval_id)",
+            name="fk_steps_approval_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "outbox_event_id"],
+            ["outbox_events.tenant_id", "outbox_events.id"],
+            ondelete="SET NULL (outbox_event_id)",
+            name="fk_steps_outbox_event_tenant",
+        ),
+        Index("ix_execution_steps_tenant_trace_order", "tenant_id", "trace_id", "step_order"),
+        Index("ix_execution_steps_tenant_status", "tenant_id", "status"),
+    )
+
+
+class Campaign(Base):
+    __tablename__ = "campaigns"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    goal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_template: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("channels.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="draft", server_default="draft", index=True
+    )
+    audience_filter: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    scheduled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    metrics: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=lambda: {
+            "total_recipients": 0,
+            "enqueued_count": 0,
+            "sent_count": 0,
+            "delivered_count": 0,
+            "failed_count": 0,
+            "skipped_count": 0,
+        },
+        server_default='{"total_recipients": 0, "enqueued_count": 0, "sent_count": 0, "delivered_count": 0, "failed_count": 0, "skipped_count": 0}',
+    )
+    requires_approval: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("approvals.id", ondelete="SET NULL"), nullable=True
+    )
+    rate_limit_per_minute: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=60, server_default="60"
+    )
+    batch_size: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=50, server_default="50"
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_campaigns_tenant_id"),
+        Index("ix_campaigns_tenant_status", "tenant_id", "status"),
+    )
+
+
+class CampaignRecipient(Base):
+    __tablename__ = "campaign_recipients"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    customer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("channels.id", ondelete="SET NULL"), nullable=True
+    )
+    recipient_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="pending", server_default="pending", index=True
+    )
+    skip_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    outbox_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("outbox_events.id", ondelete="SET NULL"), nullable=True
+    )
+    rendered_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "customer_id", name="uq_campaign_recipient_customer"),
+        UniqueConstraint("tenant_id", "id", name="uq_campaign_recipients_tenant_id"),
+        Index("ix_campaign_recipients_campaign_status", "campaign_id", "status"),
+    )
+
+
+

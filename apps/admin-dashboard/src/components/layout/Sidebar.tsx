@@ -5,6 +5,7 @@ import {
   Building2,
   Bot,
   Activity,
+  KeyRound,
   Settings,
   ShieldCheck,
   ChevronLeft,
@@ -40,6 +41,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onToggle }) => {
       label: 'مراقبة النظام',
       icon: Activity,
       description: 'صندوق الصادر والأخطاء والتدقيق',
+    },
+    {
+      to: '/integrations',
+      label: 'تكاملات ومزودو المنصة',
+      icon: KeyRound,
+      description: 'إدارة مفاتيح API ومزودي الذكاء الاصطناعي',
     },
     {
       to: '/settings',

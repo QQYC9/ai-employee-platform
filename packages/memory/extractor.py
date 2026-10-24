@@ -99,32 +99,40 @@ class MemoryExtractor:
                             continue
 
         # 2. Check for Confirmed Decisions
-        for pattern in self.DECISION_PATTERNS:
-            match = pattern.search(content)
-            if match:
-                extracted_text = match.group(0).strip()
-                if len(extracted_text) < 5:
-                    continue
+        # Security hardening: Operational store decisions can ONLY be extracted from authenticated internal authorities
+        # (owner, admin, agent, system). Customer messages MUST NEVER forge store decisions or policies!
+        sender = (message.sender_type or "").strip().lower()
+        is_authorized_decision_source = sender in ("owner", "admin", "agent", "system") or (
+            sender == "user" and not effective_customer_id
+        )
 
-                try:
-                    MemorySanitizer.scan_for_secrets(extracted_text)
-                    candidate = MemoryCandidate(
-                        content=extracted_text,
-                        memory_type=MemoryType.DECISION,
-                        importance=80,
-                        confidence=85,
-                        customer_id=effective_customer_id,
-                        conversation_id=message.conversation_id,
-                        source="conversation_message",
-                        source_id=str(message.id),
-                        metadata_json={
-                            "sender_type": message.sender_type,
-                            "extracted_at": datetime.now(timezone.utc).isoformat(),
-                        },
-                    )
-                    candidates.append(candidate)
-                except SecretDetectedError:
-                    continue
+        if is_authorized_decision_source:
+            for pattern in self.DECISION_PATTERNS:
+                match = pattern.search(content)
+                if match:
+                    extracted_text = match.group(0).strip()
+                    if len(extracted_text) < 5:
+                        continue
+
+                    try:
+                        MemorySanitizer.scan_for_secrets(extracted_text)
+                        candidate = MemoryCandidate(
+                            content=extracted_text,
+                            memory_type=MemoryType.DECISION,
+                            importance=80,
+                            confidence=85,
+                            customer_id=effective_customer_id,
+                            conversation_id=message.conversation_id,
+                            source="conversation_message",
+                            source_id=str(message.id),
+                            metadata_json={
+                                "sender_type": message.sender_type,
+                                "extracted_at": datetime.now(timezone.utc).isoformat(),
+                            },
+                        )
+                        candidates.append(candidate)
+                    except SecretDetectedError:
+                        continue
 
         return MemoryExtractionResult(
             candidates=candidates,

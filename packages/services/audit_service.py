@@ -93,3 +93,106 @@ class AuditService:
         )
 
         return self.db.scalar(statement)
+
+    @staticmethod
+    def sanitize_audit_metadata(metadata: dict | None) -> dict:
+        """
+        Sanitize audit metadata to strictly prevent leaking message text,
+        customer credentials, API keys, or raw payloads.
+        """
+        if not metadata or not isinstance(metadata, dict):
+            return {}
+
+        sensitive_substrings = {
+            "content", "message", "body", "text", "password", "token",
+            "secret", "api_key", "authorization", "bearer", "raw_payload"
+        }
+
+        sanitized: dict = {}
+        for key, value in metadata.items():
+            norm_key = str(key).strip().lower()
+            if any(sub in norm_key for sub in sensitive_substrings):
+                continue
+
+            if isinstance(value, dict):
+                sanitized[key] = AuditService.sanitize_audit_metadata(value)
+            elif isinstance(value, list):
+                sanitized[key] = [
+                    AuditService.sanitize_audit_metadata(item) if isinstance(item, dict) else str(item)[:100]
+                    for item in value[:20]
+                ]
+            elif isinstance(value, (int, float, bool)) or value is None:
+                sanitized[key] = value
+            else:
+                str_val = str(value)
+                if any(sub in str_val.lower() for sub in ("bearer ", "sk-", "token=")):
+                    continue
+                sanitized[key] = str_val[:200]
+
+        return sanitized
+
+    def record_access_event(
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        resource_type: str,
+        resource_id: UUID | str,
+        action: str = "access_requested",
+        reason: str | None = None,
+        event_metadata: dict | None = None,
+    ) -> AuditEvent:
+        """
+        Pre-fetch audit recording for sensitive data access.
+        Enforces strict metadata sanitization to prevent leaks.
+        """
+        clean_metadata = self.sanitize_audit_metadata(event_metadata)
+        clean_metadata["resource_type"] = resource_type
+        clean_metadata["resource_id"] = str(resource_id)
+        if reason:
+            clean_metadata["access_reason"] = str(reason)[:250]
+
+        description = (
+            f"Administrative access to {resource_type} '{resource_id}' "
+            f"requested by user '{user_id}' for tenant '{tenant_id}'."
+        )
+
+        return self.record_event(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            event_type=f"admin.{resource_type}.read",
+            action=action,
+            description=description,
+            event_metadata=clean_metadata,
+        )
+
+    def update_access_event_status(
+        self,
+        event_id: UUID,
+        status: str,
+        extra_metadata: dict | None = None,
+    ) -> AuditEvent | None:
+        """
+        Update the lifecycle status of an existing access audit record
+        (e.g. from 'attempted' to 'disclosed' or 'fetch_failed').
+        """
+        statement = select(AuditEvent).where(AuditEvent.id == event_id)
+        event = self.db.scalar(statement)
+        if event is None:
+            return None
+
+        clean_extra = self.sanitize_audit_metadata(extra_metadata)
+        updated_meta = dict(event.event_metadata or {})
+        updated_meta["status"] = status
+        updated_meta.update(clean_extra)
+        event.event_metadata = updated_meta
+
+        from sqlalchemy.orm.attributes import flag_modified
+        try:
+            flag_modified(event, "event_metadata")
+        except Exception:
+            pass
+
+        self.db.flush()
+        return event
+

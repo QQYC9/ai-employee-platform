@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from uuid import UUID
 
@@ -32,6 +33,7 @@ class DynamicCapabilityTool(BaseRealTool):
         implementation_code: str,
         spec: CapabilitySpecification,
         sandbox: ExecutionSandbox | None = None,
+        require_container_isolation: bool | None = None,
     ):
         self.tenant_id = tenant_id
         self.implementation_code = implementation_code
@@ -40,6 +42,9 @@ class DynamicCapabilityTool(BaseRealTool):
             timeout_seconds=spec.execution_limits.timeout_seconds,
             max_output_chars=spec.execution_limits.max_output_chars,
         )
+        if require_container_isolation is None:
+            require_container_isolation = os.environ.get("REQUIRE_CONTAINER_ISOLATION", "").lower() in ("1", "true", "yes")
+        self.require_container_isolation = require_container_isolation
 
         risk_enum = ToolRiskLevel.MEDIUM
         if spec.risk_level == "low":
@@ -73,6 +78,11 @@ class DynamicCapabilityTool(BaseRealTool):
         if context.tenant_id != self.tenant_id:
             raise PermissionError(
                 f"Cross-tenant execution denied: tool belongs to tenant {self.tenant_id}"
+            )
+
+        if self.require_container_isolation and not self.sandbox.is_containerized:
+            raise PermissionError(
+                "Execution blocked: Dynamic capability cannot be executed without verified container isolation (restricted Docker container with --network none)."
             )
 
         exec_res = self.sandbox.run_code(self.implementation_code, input_data=parameters)

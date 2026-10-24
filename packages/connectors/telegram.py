@@ -91,6 +91,33 @@ class TelegramConnector(BaseConnector):
         else:
             data = payload or {}
 
+        # Extract callback_query if present
+        cb_query = data.get("callback_query")
+        if cb_query and isinstance(cb_query, dict):
+            msg_obj = cb_query.get("message") or {}
+            chat = msg_obj.get("chat", {})
+            chat_id = str(chat.get("id"))
+            from_user = cb_query.get("from", {})
+            sender_id = str(from_user.get("id") or chat_id)
+            sender_name = from_user.get("first_name") or from_user.get("username")
+            query_id = str(cb_query.get("id"))
+            data_val = str(cb_query.get("data") or "")
+            return [
+                InboundMessage(
+                    channel_type=self.channel_type,
+                    channel_id=self.channel_id,
+                    tenant_id=self.tenant_id,
+                    external_message_id=f"cb_{query_id}",
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    recipient_id=chat_id,
+                    content=data_val,
+                    content_type="callback_query",
+                    timestamp=datetime.now(timezone.utc),
+                    raw_payload=cb_query,
+                )
+            ]
+
         # Extract message, edited_message, or channel_post
         msg_obj = data.get("message") or data.get("edited_message") or data.get("channel_post")
         if not msg_obj or not isinstance(msg_obj, dict):
@@ -151,49 +178,56 @@ class TelegramConnector(BaseConnector):
         Dispatches a message using Telegram Bot API sendMessage.
         """
         url = f"{self.BASE_URL}/bot{self.bot_token}/sendMessage"
-        payload = {
-            "chat_id": str(recipient).strip(),
-            "text": content,
-        }
-        parse_mode = kwargs.get("parse_mode")
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
+        # Telegram character limit is 4096 characters per message
+        chunk_size = 4000
+        chunks = [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)] if len(content) > chunk_size else [content]
 
         client = self._client or httpx.Client(timeout=15.0)
         should_close = self._client is None
         start_time = time.perf_counter()
 
         try:
-            resp = client.post(url, json=payload)
-            duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+            last_msg_id = None
+            for chunk in chunks:
+                payload = {
+                    "chat_id": str(recipient).strip(),
+                    "text": chunk,
+                }
+                parse_mode = kwargs.get("parse_mode")
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
 
-            if resp.status_code == 200:
+                resp = client.post(url, json=payload)
+                if resp.status_code != 200:
+                    duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+                    err_text = resp.text
+                    try:
+                        err_json = resp.json()
+                        err_text = err_json.get("description", err_text)
+                    except Exception:
+                        pass
+
+                    return OutboundDeliveryResult(
+                        success=False,
+                        channel_type=self.channel_type,
+                        recipient_id=str(recipient),
+                        status="failed",
+                        error=f"Telegram API error ({resp.status_code}): {err_text}",
+                        latency_ms=duration_ms,
+                    )
+
                 data = resp.json()
-                msg_id = str(data.get("result", {}).get("message_id"))
-                return OutboundDeliveryResult(
-                    success=True,
-                    channel_type=self.channel_type,
-                    recipient_id=str(recipient),
-                    external_message_id=msg_id,
-                    status="sent",
-                    latency_ms=duration_ms,
-                    metadata={"provider": "telegram"},
-                )
+                last_msg_id = str(data.get("result", {}).get("message_id"))
 
-            err_text = resp.text
-            try:
-                err_json = resp.json()
-                err_text = err_json.get("description", err_text)
-            except Exception:
-                pass
-
+            duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
             return OutboundDeliveryResult(
-                success=False,
+                success=True,
                 channel_type=self.channel_type,
                 recipient_id=str(recipient),
-                status="failed",
-                error=f"Telegram API error ({resp.status_code}): {err_text}",
+                external_message_id=last_msg_id,
+                status="sent",
                 latency_ms=duration_ms,
+                metadata={"provider": "telegram", "chunks_sent": len(chunks)},
             )
         except Exception as exc:
             duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)

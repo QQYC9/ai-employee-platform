@@ -5,8 +5,10 @@ import { AdminLayout } from './components/layout/AdminLayout';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { TenantsPage } from './pages/TenantsPage';
+import { TenantDetailPage } from './pages/TenantDetailPage';
 import { AgentsTasksPage } from './pages/AgentsTasksPage';
 import { MonitoringPage } from './pages/MonitoringPage';
+import { PlatformIntegrationsPage } from './pages/PlatformIntegrationsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LoadingState } from './components/common/LoadingState';
 
@@ -45,8 +47,10 @@ export const App: React.FC = () => {
           >
             <Route index element={<DashboardPage />} />
             <Route path="tenants" element={<TenantsPage />} />
+            <Route path="tenants/:tenantId" element={<TenantDetailPage />} />
             <Route path="agents-tasks" element={<AgentsTasksPage />} />
             <Route path="monitoring" element={<MonitoringPage />} />
+            <Route path="integrations" element={<PlatformIntegrationsPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>
 

@@ -120,12 +120,22 @@ class ApprovalService:
         norm_role = (role or "").strip().lower()
         norm_req = (requested_for or "").strip().lower()
 
-        if norm_role in ("owner", "tenant_owner", "superadmin", "platform_admin"):
+        # Routine tenant commercial approvals: strictly reserved for tenant owner/owner
+        if norm_req in ("owner", "tenant_owner"):
+            return norm_role in ("owner", "tenant_owner")
+
+        if norm_role in ("owner", "tenant_owner"):
             return True
+
+        if norm_req in ("superadmin", "platform_admin"):
+            return norm_role in ("superadmin", "platform_admin", "owner", "tenant_owner")
+
         if norm_req in ("tenant_admin", "admin"):
-            return norm_role in ("admin", "tenant_admin")
+            return norm_role in ("admin", "tenant_admin", "owner", "tenant_owner")
+
         if norm_req in ("tenant_user", "user", "member", ""):
             return True
+
         return False
 
     def approve(

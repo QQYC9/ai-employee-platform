@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from packages.models.domain import Task
@@ -84,6 +84,8 @@ class TaskService:
         tenant_id: UUID,
         status: str | None = None,
         agent_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
     ) -> list[Task]:
         statement = (
             select(Task)
@@ -100,7 +102,30 @@ class TaskService:
         if agent_id is not None:
             statement = statement.where(Task.agent_id == agent_id)
 
+        if offset is not None and offset > 0:
+            statement = statement.offset(offset)
+        if limit is not None and limit > 0:
+            statement = statement.limit(limit)
+
         return list(self.db.scalars(statement).all())
+
+    def count_tasks(
+        self,
+        tenant_id: UUID,
+        status: str | None = None,
+        agent_id: UUID | None = None,
+    ) -> int:
+        statement = (
+            select(func.count(Task.id))
+            .where(Task.tenant_id == tenant_id)
+        )
+        if status is not None:
+            if status not in self.ALLOWED_STATUSES:
+                raise ValueError("Invalid task status")
+            statement = statement.where(Task.status == status)
+        if agent_id is not None:
+            statement = statement.where(Task.agent_id == agent_id)
+        return self.db.scalar(statement) or 0
 
     def update_task(
         self,

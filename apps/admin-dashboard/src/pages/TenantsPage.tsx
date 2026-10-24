@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { adminApi } from '../api/admin';
 import { TenantItem } from '../api/types';
 import { Badge } from '../components/common/Badge';
@@ -17,9 +18,12 @@ import {
   AlertTriangle,
   Bot,
   ListTodo,
+  Activity,
 } from 'lucide-react';
+import { TenantManagementHubModal } from '../components/tenants/TenantManagementHubModal';
 
 export const TenantsPage: React.FC = () => {
+  const navigate = useNavigate();
   const [tenants, setTenants] = useState<TenantItem[]>([]);
   const [total, setTotal] = useState<number>(0);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -28,6 +32,8 @@ export const TenantsPage: React.FC = () => {
   // Filters
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('');
+  const [page, setPage] = useState<number>(1);
+  const pageSize = 50;
 
   // Modals
   const [statusModalTenant, setStatusModalTenant] = useState<TenantItem | null>(null);
@@ -37,6 +43,9 @@ export const TenantsPage: React.FC = () => {
   const [dailyLimit, setDailyLimit] = useState<number | ''>('');
   const [monthlyLimit, setMonthlyLimit] = useState<number | ''>('');
   const [isHardLimit, setIsHardLimit] = useState<boolean>(true);
+
+  // Tenant Management Hub Modal
+  const [hubModalTenant, setHubModalTenant] = useState<TenantItem | null>(null);
 
   const [isProvisionOpen, setIsProvisionOpen] = useState<boolean>(false);
   const [provisionData, setProvisionData] = useState({
@@ -55,7 +64,8 @@ export const TenantsPage: React.FC = () => {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await adminApi.listTenants(50, 0, statusFilter || undefined);
+      const offset = (page - 1) * pageSize;
+      const res = await adminApi.listTenants(pageSize, offset, statusFilter || undefined, searchTerm || undefined);
       setTenants(res.tenants || []);
       setTotal(res.total || 0);
     } catch (err: any) {
@@ -66,8 +76,11 @@ export const TenantsPage: React.FC = () => {
   };
 
   useEffect(() => {
-    fetchTenants();
-  }, [statusFilter]);
+    const timer = setTimeout(() => {
+      fetchTenants();
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [page, statusFilter, searchTerm]);
 
   // Handle Status Update
   const handleUpdateStatus = async () => {
@@ -214,8 +227,9 @@ export const TenantsPage: React.FC = () => {
           icon={Building2}
         />
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40">
-          <table className="w-full text-right border-collapse text-xs">
+        <div className="space-y-4">
+          <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40">
+            <table className="w-full text-right border-collapse text-xs">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-950/80 text-slate-400">
                 <th className="py-3.5 px-4 font-semibold">المستأجر</th>
@@ -234,8 +248,13 @@ export const TenantsPage: React.FC = () => {
                 >
                   {/* Name and Slug */}
                   <td className="py-3.5 px-4">
-                    <div className="font-bold text-white text-sm">{tenant.name}</div>
-                    <div className="text-[11px] text-slate-400 font-mono flex items-center gap-2">
+                    <Link
+                      to={`/tenants/${tenant.id}`}
+                      className="font-bold text-white text-sm hover:text-emerald-400 transition"
+                    >
+                      {tenant.name}
+                    </Link>
+                    <div className="text-[11px] text-slate-400 font-mono flex items-center gap-2 mt-0.5">
                       <span>{tenant.slug}</span>
                       <span className="text-slate-600">|</span>
                       <span className="truncate max-w-[120px]" title={tenant.id}>
@@ -303,6 +322,15 @@ export const TenantsPage: React.FC = () => {
                   <td className="py-3.5 px-4 text-left">
                     <div className="flex items-center justify-end gap-2">
                       <button
+                        onClick={() => navigate(`/tenants/${tenant.id}`)}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20 transition"
+                        title="مركز الإدارة الشامل للمستأجر"
+                      >
+                        <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>مركز المستأجر</span>
+                      </button>
+
+                      <button
                         onClick={() => {
                           setActionError(null);
                           setStatusModalTenant(tenant);
@@ -334,6 +362,37 @@ export const TenantsPage: React.FC = () => {
               ))}
             </tbody>
           </table>
+        </div>
+
+          {total > pageSize && (
+            <div className="flex items-center justify-between border border-slate-800 bg-slate-900/60 p-4 rounded-xl text-xs text-slate-400">
+              <div>
+                عرض <span className="font-bold text-white">{(page - 1) * pageSize + 1}</span> إلى{' '}
+                <span className="font-bold text-white">{Math.min(page * pageSize, total)}</span> من أصل{' '}
+                <span className="font-bold text-emerald-400">{total}</span> مستأجر
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  disabled={page <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  className="rounded-lg bg-slate-800 px-3 py-1.5 font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  السابق
+                </button>
+                <span className="px-2 text-slate-300">
+                  صفحة <span className="text-white font-bold">{page}</span> من{' '}
+                  <span className="text-white font-bold">{Math.ceil(total / pageSize)}</span>
+                </span>
+                <button
+                  disabled={page >= Math.ceil(total / pageSize)}
+                  onClick={() => setPage((p) => p + 1)}
+                  className="rounded-lg bg-slate-800 px-3 py-1.5 font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  التالي
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -581,6 +640,14 @@ export const TenantsPage: React.FC = () => {
           </div>
         </form>
       </Modal>
+
+      {/* Tenant Management Hub Modal */}
+      <TenantManagementHubModal
+        tenant={hubModalTenant}
+        isOpen={!!hubModalTenant}
+        onClose={() => setHubModalTenant(null)}
+        onTenantUpdated={fetchTenants}
+      />
     </div>
   );
 };

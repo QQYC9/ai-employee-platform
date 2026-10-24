@@ -12,12 +12,21 @@ from packages.tools.business_tools import (
     CustomerCreateOrUpdateTool,
     CustomerGetTool,
     CustomerSearchTool,
+    ProductAddOrUpdateTool,
+    ProductListTool,
     TaskCreateTool,
     TaskQueryTool,
 )
 from packages.tools.contract import (
     ToolContract,
     ToolExecutionContext,
+)
+from packages.tools.conversation_tools import (
+    ConversationEscalationStatusTool,
+    ConversationGetMessagesTool,
+    ConversationSearchTool,
+    ConversationSummarizeAllTool,
+    ConversationSummarizeTool,
 )
 from packages.tools.document_tool import DocumentGeneratorTool
 from packages.tools.executor import ToolExecutor
@@ -120,4 +129,11 @@ def create_default_registry(db: Session) -> ToolRegistry:
     registry.register(TaskCreateTool(db))
     registry.register(BusinessSummaryTool(db))
     registry.register(DocumentGeneratorTool(db))
+    registry.register(ConversationSearchTool(db))
+    registry.register(ConversationGetMessagesTool(db))
+    registry.register(ConversationSummarizeTool(db))
+    registry.register(ConversationSummarizeAllTool(db))
+    registry.register(ConversationEscalationStatusTool(db))
+    registry.register(ProductAddOrUpdateTool(db))
+    registry.register(ProductListTool(db))
     return registry

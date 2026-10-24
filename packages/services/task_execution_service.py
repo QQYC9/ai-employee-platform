@@ -13,6 +13,7 @@ from packages.services.agent_capability_service import AgentCapabilityService
 from packages.services.approval_service import ApprovalService
 from packages.services.audit_service import AuditService
 from packages.services.capability_tool_service import CapabilityToolService
+from packages.services.execution_tracing_service import ExecutionTracingService
 from packages.services.task_lifecycle import (
     InvalidStateTransitionError,
     TaskStatus,
@@ -29,6 +30,7 @@ class TaskExecutionService:
         audit_service: AuditService | None = None,
         agent_capability_service: AgentCapabilityService | None = None,
         capability_tool_service: CapabilityToolService | None = None,
+        execution_tracing_service: ExecutionTracingService | None = None,
     ):
         self.db = db
         self.approval_service = approval_service or ApprovalService(db)
@@ -39,6 +41,7 @@ class TaskExecutionService:
         self.capability_tool_service = (
             capability_tool_service or CapabilityToolService(db)
         )
+        self.tracing_service = execution_tracing_service or ExecutionTracingService(db)
 
     def _get_task(
         self,
@@ -414,14 +417,27 @@ class TaskExecutionService:
         executor: ToolExecutor | None = None,
         task_already_running: bool = False,
         idempotency_key: str | None = None,
+        trace_id: UUID | None = None,
     ) -> Task:
         if executor is None:
-            executor = ToolExecutor(self.db)
+            executor = ToolExecutor(self.db, execution_tracing_service=self.tracing_service)
 
         task = self._get_task(
             tenant_id=tenant_id,
             task_id=task_id,
         )
+
+        effective_trace_id = trace_id
+        if effective_trace_id is None:
+            trace = self.tracing_service.start_trace(
+                tenant_id=tenant_id,
+                trigger_type="task_execution",
+                task_id=task_id,
+                agent_id=task.agent_id,
+                metadata={"action": action, "resource": resource},
+            )
+            if trace:
+                effective_trace_id = trace.id
 
         if task_already_running:
             if task.status != TaskStatus.RUNNING:
@@ -466,9 +482,15 @@ class TaskExecutionService:
                     for p in sig.parameters.values()
                 ):
                     execute_kwargs["idempotency_key"] = idempotency_key
+                if "trace_id" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                ):
+                    execute_kwargs["trace_id"] = effective_trace_id
             except (ValueError, TypeError):
                 execute_kwargs["task_id"] = task_id
                 execute_kwargs["idempotency_key"] = idempotency_key
+                execute_kwargs["trace_id"] = effective_trace_id
 
             execution = executor.execute(**execute_kwargs)
 
@@ -493,6 +515,18 @@ class TaskExecutionService:
                         action=action,
                         description=approval_desc,
                     )
+                    if effective_trace_id:
+                        try:
+                            self.tracing_service.record_step(
+                                tenant_id=tenant_id,
+                                trace_id=effective_trace_id,
+                                step_name=f"task_approval_requested:{execution.tool_slug}",
+                                step_type="approval_request",
+                                status="waiting_approval",
+                                task_id=task_id,
+                            )
+                        except Exception:
+                            pass
                     return task
 
                 self.fail_task(
@@ -500,6 +534,15 @@ class TaskExecutionService:
                     task_id=task_id,
                     error=execution.reason,
                 )
+                if effective_trace_id:
+                    try:
+                        self.tracing_service.fail_trace(
+                            tenant_id=tenant_id,
+                            trace_id=effective_trace_id,
+                            error_summary=execution.reason,
+                        )
+                    except Exception:
+                        pass
                 return task
 
             if execution.status != "executed":
@@ -508,19 +551,47 @@ class TaskExecutionService:
                     task_id=task_id,
                     error=execution.reason,
                 )
+                if effective_trace_id:
+                    try:
+                        self.tracing_service.fail_trace(
+                            tenant_id=tenant_id,
+                            trace_id=effective_trace_id,
+                            error_summary=execution.reason,
+                        )
+                    except Exception:
+                        pass
                 return task
 
             if task_already_running:
                 task.result = execution.output
                 task.error = None
                 self.db.flush()
+                if effective_trace_id:
+                    try:
+                        self.tracing_service.complete_trace(
+                            tenant_id=tenant_id,
+                            trace_id=effective_trace_id,
+                            status="completed",
+                        )
+                    except Exception:
+                        pass
                 return task
 
-            return self.complete_task(
+            completed_task = self.complete_task(
                 tenant_id=tenant_id,
                 task_id=task_id,
                 result=execution.output,
             )
+            if effective_trace_id:
+                try:
+                    self.tracing_service.complete_trace(
+                        tenant_id=tenant_id,
+                        trace_id=effective_trace_id,
+                        status="completed",
+                    )
+                except Exception:
+                    pass
+            return completed_task
 
         except Exception as exc:
             current_task = self._get_task(
@@ -535,6 +606,16 @@ class TaskExecutionService:
                     error=str(exc),
                     record_audit=not isinstance(exc, ValueError),
                 )
+
+            if effective_trace_id:
+                try:
+                    self.tracing_service.fail_trace(
+                        tenant_id=tenant_id,
+                        trace_id=effective_trace_id,
+                        error_summary=str(exc),
+                    )
+                except Exception:
+                    pass
 
             if isinstance(exc, ValueError):
                 self.audit_service.record_event(

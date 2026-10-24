@@ -22,6 +22,10 @@ from packages.models.domain import (
     GeneratedDocument,
     CapabilityVersion,
     DevelopmentRun,
+    ExecutionTrace,
+    ExecutionStep,
+    Campaign,
+    CampaignRecipient,
 )
 
 __all__ = [
@@ -48,4 +52,8 @@ __all__ = [
     "GeneratedDocument",
     "CapabilityVersion",
     "DevelopmentRun",
+    "ExecutionTrace",
+    "ExecutionStep",
+    "Campaign",
+    "CampaignRecipient",
 ]

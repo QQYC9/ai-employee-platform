@@ -144,6 +144,11 @@ class ContextBuilder:
 
     @staticmethod
     def _memory_to_dict(memory: Any) -> dict[str, Any]:
+        meta = getattr(memory, "metadata_json", getattr(memory, "metadata", {})) or {}
+        cust_id = meta.get("customer_id") if isinstance(meta, dict) else None
+        scope = "customer" if cust_id else "tenant"
+        visibility = "public" if isinstance(meta, dict) and (meta.get("visibility") in ("public", "customer") or meta.get("is_customer_facing") or meta.get("is_public")) else ("internal" if not cust_id else "customer")
+
         return {
             "id": str(memory.id),
             "agent_id": (
@@ -160,7 +165,9 @@ class ContextBuilder:
             "content": memory.content,
             "importance": memory.importance,
             "confidence": memory.confidence,
-            "metadata": getattr(memory, "metadata_json", getattr(memory, "metadata", {})),
+            "scope": scope,
+            "visibility": visibility,
+            "metadata": meta,
             "expires_at": (
                 memory.expires_at.isoformat()
                 if getattr(memory, "expires_at", None) is not None

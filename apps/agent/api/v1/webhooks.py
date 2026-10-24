@@ -198,6 +198,7 @@ async def ingest_channel_message(
         }
 
     # 7. Customer resolution
+    cust: Customer | None = None
     customer_id = payload.customer_id
     if customer_id is not None:
         cust = db.scalar(
@@ -275,6 +276,15 @@ async def ingest_channel_message(
             metadata_json=payload.metadata_json,
         )
 
+        meta = dict(payload.metadata_json or {})
+        sender_id_val = (
+            meta.get("sender_id")
+            or payload.external_id
+            or (cust.phone if (cust and channel.channel_type in ("whatsapp", "sms")) else None)
+            or (cust.email if (cust and channel.channel_type == "email") else None)
+        )
+        recipient_id_val = meta.get("recipient_id")
+
         event = outbox_service.create_event(
             tenant_id=tenant_id,
             conversation_id=conv.id,
@@ -285,6 +295,8 @@ async def ingest_channel_message(
                 "channel_id": str(channel_id),
                 "channel_type": channel.channel_type,
                 "external_id": payload.external_id,
+                "sender_id": str(sender_id_val) if sender_id_val else None,
+                "recipient_id": str(recipient_id_val) if recipient_id_val else None,
             },
         )
 

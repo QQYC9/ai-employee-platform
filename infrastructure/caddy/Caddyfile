@@ -1,0 +1,74 @@
+# ==============================================================================
+# AI Employee Platform — Production Caddy Gateway Configuration
+#
+# ROUTING ARCHITECTURE:
+#   - {$ADMIN_DOMAIN}: Admin Dashboard SPA + Same-Origin /api/* backend proxy
+#   - {$APP_DOMAIN}:   Tenant Dashboard SPA + Same-Origin /api/* backend proxy
+#   - {$API_DOMAIN}:   Dedicated API endpoint for external integrations & webhooks
+#
+# TLS MODES:
+#   - Production: Uses real FQDNs. Caddy automatically provisions Let's Encrypt / ZeroSSL.
+#   - Local Testing: Use "http://" prefix in domain variables (e.g. http://admin.local),
+#     or configure "tls internal" to issue locally trusted certificates.
+# ==============================================================================
+
+{
+	admin off
+	email {$CADDY_ACME_EMAIL:admin@example.com}
+}
+
+# Reusable security headers
+(security_headers) {
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+}
+
+# ------------------------------------------------------------------------------
+# 1. Super Admin Dashboard (Host-based routing)
+# ------------------------------------------------------------------------------
+{$ADMIN_DOMAIN:admin.example.com} {
+	import security_headers
+
+	# API Proxy: Route /api/* directly to FastAPI backend on the same origin
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# SPA Frontend: Route all remaining requests to Admin Dashboard Nginx
+	handle {
+		reverse_proxy admin_dashboard:80
+	}
+}
+
+# ------------------------------------------------------------------------------
+# 2. Tenant Dashboard (Host-based routing)
+# ------------------------------------------------------------------------------
+{$APP_DOMAIN:app.example.com} {
+	import security_headers
+
+	# API Proxy: Route /api/* directly to FastAPI backend on the same origin
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# SPA Frontend: Route all remaining requests to Tenant Dashboard Nginx
+	handle {
+		reverse_proxy tenant_dashboard:80
+	}
+}
+
+# ------------------------------------------------------------------------------
+# 3. Dedicated Backend API Entry Point (External integrations & webhooks)
+# ------------------------------------------------------------------------------
+{$API_DOMAIN:api.example.com} {
+	import security_headers
+
+	handle {
+		reverse_proxy backend:8000
+	}
+}

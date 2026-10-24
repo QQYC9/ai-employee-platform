@@ -50,8 +50,17 @@ from apps.agent.api.v1.documents import (
 from apps.agent.api.v1.admin import (
     router as admin_router,
 )
+from apps.agent.api.v1.admin_integrations import (
+    router as admin_integrations_router,
+)
 from apps.agent.api.v1.self_development import (
     router as self_development_router,
+)
+from apps.agent.api.v1.traces import (
+    router as traces_router,
+)
+from apps.agent.api.v1.campaigns import (
+    router as campaigns_router,
 )
 
 
@@ -148,7 +157,10 @@ app.include_router(webhooks_router, prefix=API_PREFIX)
 app.include_router(proactive_workflows_router, prefix=API_PREFIX)
 app.include_router(documents_router, prefix=API_PREFIX)
 app.include_router(admin_router, prefix=API_PREFIX)
+app.include_router(admin_integrations_router, prefix=API_PREFIX)
 app.include_router(self_development_router, prefix=API_PREFIX)
+app.include_router(traces_router, prefix=API_PREFIX)
+app.include_router(campaigns_router, prefix=API_PREFIX)
 
 
 

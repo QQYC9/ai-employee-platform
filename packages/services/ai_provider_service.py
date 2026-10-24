@@ -73,7 +73,7 @@ class AIProviderService:
 
         # Find existing integration by tenant_id and name
         stmt = select(Integration).where(
-            Integration.tenant_id == tenant_id,
+            Integration.tenant_id.is_(None) if tenant_id is None else Integration.tenant_id == tenant_id,
             Integration.name == clean_name,
         )
         integration = self.db.scalar(stmt)
@@ -140,6 +140,12 @@ class AIProviderService:
                     meta["masked_key"] = masked_key
                     cred.metadata_json = meta
                     flag_modified(cred, "metadata_json")
+
+                # Store masked_api_key in config for rapid retrieval without leaking secret
+                cfg_dict = dict(integration.config or {})
+                cfg_dict["masked_api_key"] = masked_key
+                integration.config = cfg_dict
+                flag_modified(integration, "config")
                 self.db.flush()
             else:
                 # Platform-wide integration (tenant_id is None): store encrypted at rest in integration.config
@@ -169,7 +175,9 @@ class AIProviderService:
 
     def _unset_default_integrations(self, tenant_id: UUID | None) -> None:
         """Unset is_default flag on all existing integrations in the same scope."""
-        stmt = select(Integration).where(Integration.tenant_id == tenant_id)
+        stmt = select(Integration).where(
+            Integration.tenant_id.is_(None) if tenant_id is None else Integration.tenant_id == tenant_id
+        )
         for integ in self.db.scalars(stmt).all():
             if integ.config and integ.config.get("is_default"):
                 c = dict(integ.config)
@@ -177,6 +185,136 @@ class AIProviderService:
                 integ.config = c
                 flag_modified(integ, "config")
         self.db.flush()
+
+    def update_config(
+        self,
+        tenant_id: UUID | None,
+        integration_id: UUID,
+        *,
+        name: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        is_default: bool | None = None,
+        status: str | None = None,
+        extra_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Update fields of an existing AI provider configuration."""
+        stmt = select(Integration).where(
+            Integration.id == integration_id,
+            Integration.tenant_id.is_(None) if tenant_id is None else Integration.tenant_id == tenant_id,
+            Integration.status != "deleted",
+        )
+        integration = self.db.scalar(stmt)
+        if integration is None:
+            raise ValueError(f"Integration '{integration_id}' not found")
+
+        if name is not None:
+            clean_name = name.strip()
+            if not clean_name:
+                raise ValueError("Name cannot be empty")
+            integration.name = clean_name
+
+        if status is not None:
+            clean_status = status.strip().lower()
+            if clean_status not in ("active", "inactive", "disabled", "deleted"):
+                raise ValueError(f"Invalid status: '{status}'")
+            integration.status = clean_status
+
+        if is_default is True:
+            self._unset_default_integrations(tenant_id)
+
+        cfg = dict(integration.config or {})
+        if model is not None:
+            clean_model = model.strip()
+            if not clean_model:
+                raise ValueError("Model cannot be empty")
+            cfg["model"] = clean_model
+
+        if base_url is not None:
+            cfg["base_url"] = base_url.strip() if base_url.strip() else None
+
+        if temperature is not None:
+            cfg["temperature"] = max(0.0, min(float(temperature), 2.0))
+
+        if max_tokens is not None:
+            cfg["max_tokens"] = max_tokens if max_tokens > 0 else None
+
+        if is_default is not None:
+            cfg["is_default"] = bool(is_default)
+
+        if extra_params is not None:
+            cfg["extra_params"] = extra_params
+
+        # Handle API key encryption if provided
+        if api_key and api_key.strip():
+            encrypted_val = self.crypto.encrypt(api_key.strip())
+            masked_key = self.crypto.mask_secret(api_key.strip())
+
+            if tenant_id is not None:
+                cred = self.db.scalar(select(Credential).where(
+                    Credential.integration_id == integration.id,
+                    Credential.tenant_id == tenant_id,
+                ))
+                if cred is None:
+                    cred = Credential(
+                        id=uuid4(),
+                        tenant_id=tenant_id,
+                        integration_id=integration.id,
+                        name=f"{integration.name}-credential",
+                        credential_type="api_key",
+                        secret_reference=encrypted_val,
+                        status="active",
+                        metadata_json={"masked_key": masked_key},
+                    )
+                    self.db.add(cred)
+                else:
+                    cred.secret_reference = encrypted_val
+                    meta = dict(cred.metadata_json or {})
+                    meta["masked_key"] = masked_key
+                    cred.metadata_json = meta
+                    flag_modified(cred, "metadata_json")
+            else:
+                cfg["encrypted_api_key"] = encrypted_val
+                cfg["masked_api_key"] = masked_key
+
+        integration.config = cfg
+        flag_modified(integration, "config")
+        self.db.flush()
+
+        masked_key = self._get_masked_key(integration.id)
+        self.audit_service.record_event(
+            tenant_id=tenant_id,
+            event_type="ai_provider_config_updated",
+            action="update_config",
+            description=f"Updated AI provider config '{integration.name}'",
+            event_metadata={
+                "integration_id": str(integration.id),
+                "status": integration.status,
+                "is_default": cfg.get("is_default"),
+            },
+        )
+        return self._to_dto(integration, masked_key=masked_key)
+
+    def update_status(
+        self,
+        tenant_id: UUID | None,
+        integration_id: UUID,
+        status: str,
+    ) -> dict[str, Any]:
+        """Update integration status (active, inactive, disabled, deleted)."""
+        return self.update_config(tenant_id=tenant_id, integration_id=integration_id, status=status)
+
+    def delete_config(
+        self,
+        tenant_id: UUID | None,
+        integration_id: UUID,
+    ) -> bool:
+        """Soft delete integration config by setting status to 'deleted'."""
+        self.update_config(tenant_id=tenant_id, integration_id=integration_id, status="deleted")
+        return True
 
     def get_config(self, tenant_id: UUID | None, integration_id: UUID) -> dict[str, Any] | None:
         """Retrieve a specific provider config by ID with strict tenant isolation."""

@@ -28,6 +28,7 @@ from packages.services.tenant_provisioning_service import (
     InitialAgentInput,
     TenantProvisioningRequest,
     TenantProvisioningService,
+    slugify_text,
 )
 
 
@@ -716,3 +717,191 @@ def test_initial_agent_capability_assignment_and_tool_isolation():
     assert len(agent_caps) == 1
     assert str(agent_caps[0].capability_id) == str(global_cap.id)
     db.close()
+
+
+# =========================================================================
+# 6. Arabic Company Name & Slug Generation Tests
+# =========================================================================
+
+def test_slugify_text_unit_cases():
+    """Verify slugify_text handles English, Arabic, mixed, numbers, and symbols."""
+    # English
+    assert slugify_text("Acme Innovations") == "acme-innovations"
+    assert slugify_text("Global Tech-2026") == "global-tech-2026"
+
+    # Arabic
+    arabic_slug = slugify_text("شركة الأفق الذكي")
+    assert arabic_slug == "shrkh-alafq-aldhky"
+    assert not arabic_slug.startswith("-")
+
+    # Mixed
+    assert slugify_text("شركة AI Solutions 2026") == "shrkh-ai-solutions-2026"
+
+    # Pure symbols / empty
+    assert slugify_text("   ") == ""
+    assert slugify_text("!@#$%^&*()") == ""
+    assert slugify_text("---") == ""
+
+
+def test_provisioning_arabic_company_name_auto_slug():
+    """Verify Arabic company name auto-generates a valid, non-empty, clean slug."""
+    client = TestClient(app)
+    _, admin_token = create_user_with_role(role="platform_admin")
+
+    res = client.post(
+        "/api/v1/tenants/provision",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "name": "شركة الأفق للتقنية المتقدمة",
+            "owner_name": "سعد الشمري",
+            "owner_email": f"saad-{uuid4().hex[:6]}@alofoq.sa",
+            "owner_password": "ValidPassword123!",
+        },
+    )
+
+    assert res.status_code == 201, res.text
+    data = res.json()
+    assert data["status"] == "provisioned"
+    assert data["tenant"]["name"] == "شركة الأفق للتقنية المتقدمة"
+
+    generated_slug = data["tenant"]["slug"]
+    assert generated_slug
+    assert not generated_slug.startswith("-")
+    assert "shrkh-alafq" in generated_slug
+    # Ensure slug contains only URL-safe lowercase alphanumeric and hyphens
+    import re
+    assert re.match(r"^[a-z0-9-]+$", generated_slug) is not None
+
+
+def test_provisioning_english_company_name_auto_slug():
+    """Verify English company name auto-generates clean slug with company prefix."""
+    client = TestClient(app)
+    _, admin_token = create_user_with_role(role="platform_admin")
+
+    res = client.post(
+        "/api/v1/tenants/provision",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "name": "Nexus Enterprise Systems",
+            "owner_name": "Edward Norton",
+            "owner_email": f"edward-{uuid4().hex[:6]}@nexus.com",
+            "owner_password": "ValidPassword123!",
+        },
+    )
+
+    assert res.status_code == 201, res.text
+    data = res.json()
+    generated_slug = data["tenant"]["slug"]
+    assert generated_slug.startswith("nexus-enterprise-systems-")
+
+
+def test_provisioning_empty_and_whitespace_slug_fallback():
+    """Verify whitespace-only slug or non-transliteratable name generates safe UUID fallback."""
+    client = TestClient(app)
+    _, admin_token = create_user_with_role(role="platform_admin")
+
+    # 1. Whitespace slug should fall back to auto-generating from name
+    res1 = client.post(
+        "/api/v1/tenants/provision",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "name": "Fallback Company",
+            "slug": "   ",
+            "owner_name": "Fallback Owner",
+            "owner_email": f"fb-{uuid4().hex[:6]}@example.com",
+            "owner_password": "ValidPassword123!",
+        },
+    )
+    assert res1.status_code == 201
+    assert res1.json()["tenant"]["slug"].startswith("fallback-company-")
+
+    # 2. Non-alphanumeric name (e.g. symbols only) should safely fall back to 'tenant-<uuid>'
+    res2 = client.post(
+        "/api/v1/tenants/provision",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "name": "⭐⭐⭐⭐⭐⭐",
+            "owner_name": "Stars Owner",
+            "owner_email": f"stars-{uuid4().hex[:6]}@example.com",
+            "owner_password": "ValidPassword123!",
+        },
+    )
+    assert res2.status_code == 201
+    slug2 = res2.json()["tenant"]["slug"]
+    assert slug2.startswith("tenant-")
+    assert not slug2.startswith("-")
+
+
+def test_provisioning_invalid_slug_input_rejected():
+    """Verify explicitly provided invalid slug (special characters or hyphens only) is rejected."""
+    client = TestClient(app)
+    _, admin_token = create_user_with_role(role="platform_admin")
+
+    # Only symbols
+    res1 = client.post(
+        "/api/v1/tenants/provision",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "name": "Symbol Corp",
+            "slug": "!@#$%^&*",
+            "owner_name": "Owner",
+            "owner_email": f"sym-{uuid4().hex[:6]}@example.com",
+            "owner_password": "ValidPassword123!",
+        },
+    )
+    assert res1.status_code == 400
+    assert "Invalid tenant slug" in res1.json()["detail"]
+
+    # Only hyphens
+    res2 = client.post(
+        "/api/v1/tenants/provision",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "name": "Hyphen Corp",
+            "slug": "---",
+            "owner_name": "Owner",
+            "owner_email": f"hyp-{uuid4().hex[:6]}@example.com",
+            "owner_password": "ValidPassword123!",
+        },
+    )
+    assert res2.status_code == 400
+    assert "Invalid tenant slug" in res2.json()["detail"]
+
+
+def test_provisioning_arabic_explicit_slug_and_duplicate_collision():
+    """Verify explicit Arabic slug transliterates safely and rejects duplicates."""
+    client = TestClient(app)
+    _, admin_token = create_user_with_role(role="platform_admin")
+
+    arabic_slug_input = f"شركة-الريادة-{uuid4().hex[:6]}"
+
+    # First tenant creation with Arabic slug
+    res1 = client.post(
+        "/api/v1/tenants/provision",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "name": "شركة الريادة الأولى",
+            "slug": arabic_slug_input,
+            "owner_name": "مالك الريادة",
+            "owner_email": f"riyada1-{uuid4().hex[:6]}@example.com",
+            "owner_password": "ValidPassword123!",
+        },
+    )
+    assert res1.status_code == 201
+    assert "shrkh-alryadh" in res1.json()["tenant"]["slug"]
+
+    # Second tenant creation attempting same slug must be rejected
+    res2 = client.post(
+        "/api/v1/tenants/provision",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "name": "شركة الريادة الثانية",
+            "slug": arabic_slug_input,
+            "owner_name": "مالك آخر",
+            "owner_email": f"riyada2-{uuid4().hex[:6]}@example.com",
+            "owner_password": "ValidPassword123!",
+        },
+    )
+    assert res2.status_code == 400
+    assert "already exists" in res2.json()["detail"]
+

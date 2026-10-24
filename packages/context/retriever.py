@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import or_, select
@@ -58,13 +59,20 @@ class ContextRetriever:
             )
 
         if customer_id is not None:
-            # Enforce customer privacy: only retrieve memories specific to this customer
-            # or general tenant memories that are not tied to any customer
+            # Enforce customer privacy & clear boundary:
+            # 1. Customer-specific memories for this customer.
+            # 2. General memories are ONLY included if they are not explicitly internal
+            #    and not internal task learnings.
             statement = statement.where(
                 or_(
                     Memory.metadata_json["customer_id"].as_string() == str(customer_id),
-                    Memory.metadata_json.is_(None),
-                    ~Memory.metadata_json.has_key("customer_id"),
+                    (
+                        or_(
+                            Memory.metadata_json.is_(None),
+                            ~Memory.metadata_json.has_key("customer_id"),
+                        )
+                        & (Memory.memory_type != "task_learning")
+                    ),
                 )
             )
         else:
@@ -81,20 +89,57 @@ class ContextRetriever:
         # not discard potentially relevant memories using a fixed limit.
         candidates = list(self.db.scalars(statement).all())
 
-        # Defense-in-depth: Python-level customer privacy isolation
+        # Defense-in-depth: Python-level customer privacy & operational isolation
         def _get_cust_id(m: Any) -> Any:
             meta = getattr(m, "metadata_json", None) or getattr(m, "metadata", None) or {}
             if isinstance(meta, dict):
                 return meta.get("customer_id")
             return None
 
+        def _is_customer_authorized(m: Any) -> bool:
+            meta = getattr(m, "metadata_json", None) or getattr(m, "metadata", None) or {}
+            if not isinstance(meta, dict):
+                meta = {}
+
+            # Strict exclusion of internal markings and task learnings
+            if meta.get("visibility") == "internal" or meta.get("is_internal") is True or meta.get("audience") == "internal":
+                return False
+            if getattr(m, "memory_type", None) == "task_learning":
+                return False
+
+            # Explicit customer/public visibility
+            if (
+                meta.get("visibility") in ("public", "customer")
+                or meta.get("is_customer_facing") is True
+                or meta.get("is_public") is True
+                or meta.get("audience") in ("customer", "public")
+            ):
+                return True
+
+            # General store policies, published operating rules or customer-facing facts
+            content_lower = (getattr(m, "content", "") or "").lower()
+            policy_keywords = ("policy", "سياسة", "ساعات العمل", "hours", "vat", "ضريبة", "إرجاع", "return", "شحن", "shipping", "توصيل", "delivery")
+            if any(k in content_lower for k in policy_keywords):
+                return True
+
+            # Any other general operational notes, internal margins, or decisions are blocked
+            return False
+
         if customer_id is not None:
             str_customer_id = str(customer_id)
-            candidates = [
-                m for m in candidates
-                if not _get_cust_id(m)
-                or str(_get_cust_id(m)).strip() in ("", str_customer_id)
-            ]
+            filtered_candidates: list[Memory] = []
+            for m in candidates:
+                cust_val = _get_cust_id(m)
+                if cust_val and str(cust_val).strip() == str_customer_id:
+                    # Customer's own memory (must not be marked internal)
+                    meta = getattr(m, "metadata_json", None) or getattr(m, "metadata", None) or {}
+                    if not isinstance(meta, dict) or (meta.get("visibility") != "internal" and not meta.get("is_internal")):
+                        filtered_candidates.append(m)
+                elif not cust_val or str(cust_val).strip() == "":
+                    # General tenant memory: only include if customer-authorized
+                    if _is_customer_authorized(m):
+                        filtered_candidates.append(m)
+            candidates = filtered_candidates
         else:
             candidates = [
                 m for m in candidates
@@ -162,8 +207,15 @@ class ContextRetriever:
             str_customer_id = str(customer_id)
             candidates = [
                 k for k in candidates
-                if not _get_cust_id(k)
-                or str(_get_cust_id(k)).strip() in ("", str_customer_id)
+                if (not _get_cust_id(k) or str(_get_cust_id(k)).strip() in ("", str_customer_id))
+                and not (
+                    isinstance(getattr(k, "metadata_json", None), dict)
+                    and (
+                        getattr(k, "metadata_json").get("visibility") == "internal"
+                        or getattr(k, "metadata_json").get("is_internal") is True
+                        or getattr(k, "metadata_json").get("audience") == "internal"
+                    )
+                )
             ]
         else:
             candidates = [
@@ -177,3 +229,4 @@ class ContextRetriever:
             limit=limit,
             query=query,
         )
+

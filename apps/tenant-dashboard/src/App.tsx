@@ -7,6 +7,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { AgentsPage } from './pages/AgentsPage';
 import { TasksPage } from './pages/TasksPage';
 import { ChannelsPage } from './pages/ChannelsPage';
+import { CampaignsPage } from './pages/CampaignsPage';
 import { UsageBudgetPage } from './pages/UsageBudgetPage';
 import { CompanySettingsPage } from './pages/CompanySettingsPage';
 import { LoadingState } from './components/common/LoadingState';
@@ -51,6 +52,7 @@ export const AppRoutes: React.FC = () => {
         <Route path="agents" element={<AgentsPage />} />
         <Route path="tasks" element={<TasksPage />} />
         <Route path="channels" element={<ChannelsPage />} />
+        <Route path="campaigns" element={<CampaignsPage />} />
         <Route path="usage" element={<UsageBudgetPage />} />
         <Route path="settings" element={<CompanySettingsPage />} />
       </Route>

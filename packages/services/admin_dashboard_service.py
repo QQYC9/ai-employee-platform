@@ -5,23 +5,28 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import distinct, func, select, text
+from sqlalchemy import distinct, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from packages.models.domain import (
     Agent,
     AIUsageLog,
     AuditEvent,
+    Capability,
+    CapabilityVersion,
     Channel,
+    ExecutionTrace,
     OutboxEvent,
     Task,
     TenantAIBudget,
     User,
 )
 from packages.models.tenant import Tenant
+from packages.services.ai_provider_service import AIProviderService
 from packages.services.ai_usage_service import AIUsageService
 from packages.services.audit_service import AuditService
 from packages.services.channel_service import ChannelService
+from packages.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,8 @@ class AdminDashboardService:
         self.ai_usage_service = AIUsageService(db)
         self.audit_service = AuditService(db)
         self.channel_service = ChannelService(db)
+        self.task_service = TaskService(db)
+        self.ai_provider_service = AIProviderService(db)
 
     # -------------------------------------------------------------------------
     # 1. Platform-Level Summaries (Platform Admin Only)
@@ -175,6 +182,7 @@ class AdminDashboardService:
         limit: int = 50,
         offset: int = 0,
         status: str | None = None,
+        search: str | None = None,
     ) -> dict[str, Any]:
         """
         Fetch paginated overview of all tenants with operational and usage stats.
@@ -185,10 +193,16 @@ class AdminDashboardService:
         query = select(Tenant)
         if status:
             query = query.where(Tenant.status == status.strip().lower())
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            query = query.where(or_(Tenant.name.ilike(term), Tenant.slug.ilike(term)))
 
         total_stmt = select(func.count(Tenant.id))
         if status:
             total_stmt = total_stmt.where(Tenant.status == status.strip().lower())
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            total_stmt = total_stmt.where(or_(Tenant.name.ilike(term), Tenant.slug.ilike(term)))
         total_count = self.db.scalar(total_stmt) or 0
 
         tenants = list(
@@ -639,6 +653,254 @@ class AdminDashboardService:
                 **budget_info,
                 "alert_level": alert_level,
             },
+        }
+
+    def get_tenant_tasks(
+        self,
+        tenant_id: UUID,
+        status: str | None = None,
+        agent_id: UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """
+        Fetch paginated tasks strictly scoped to a specific tenant.
+        """
+        clamped_limit = max(1, min(100, limit))
+        clamped_offset = max(0, offset)
+        tasks = self.task_service.list_tasks(
+            tenant_id=tenant_id,
+            status=status,
+            agent_id=agent_id,
+            limit=clamped_limit,
+            offset=clamped_offset,
+        )
+        total = self.task_service.count_tasks(
+            tenant_id=tenant_id,
+            status=status,
+            agent_id=agent_id,
+        )
+        return {
+            "total": total,
+            "limit": clamped_limit,
+            "offset": clamped_offset,
+            "tasks": [
+                {
+                    "id": str(t.id),
+                    "tenant_id": str(t.tenant_id),
+                    "agent_id": str(t.agent_id) if t.agent_id else None,
+                    "requested_by_user_id": str(t.requested_by_user_id) if t.requested_by_user_id else None,
+                    "title": t.title,
+                    "objective": t.objective,
+                    "status": t.status,
+                    "priority": t.priority,
+                    "plan": t.plan or {},
+                    "result": t.result or {},
+                    "error": t.error,
+                    "created_at": t.created_at.isoformat() if t.created_at else None,
+                    "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+                }
+                for t in tasks
+            ],
+        }
+
+    def get_tenant_capabilities(self, tenant_id: UUID) -> dict[str, Any]:
+        """
+        Fetch capabilities visible to this tenant with strict logical separation:
+        - tenant_capabilities: Custom capabilities belonging specifically to this tenant.
+        - shared_capabilities: Approved global library capabilities (tenant_id is None).
+        - self_development_versions: Evolved skills and self-development proposals for this tenant.
+        """
+        tenant_caps = list(
+            self.db.scalars(
+                select(Capability)
+                .where(Capability.tenant_id == tenant_id)
+                .order_by(Capability.name.asc())
+            ).all()
+        )
+
+        shared_caps = list(
+            self.db.scalars(
+                select(Capability)
+                .where(Capability.tenant_id.is_(None), Capability.is_active.is_(True))
+                .order_by(Capability.name.asc())
+            ).all()
+        )
+
+        versions = list(
+            self.db.scalars(
+                select(CapabilityVersion)
+                .where(CapabilityVersion.tenant_id == tenant_id)
+                .order_by(CapabilityVersion.version_number.desc())
+            ).all()
+        )
+
+        return {
+            "tenant_id": str(tenant_id),
+            "tenant_capabilities": [
+                {
+                    "id": str(c.id),
+                    "name": c.name,
+                    "slug": c.slug,
+                    "description": c.description,
+                    "config": c.config or {},
+                    "is_active": c.is_active,
+                    "scope": "tenant_custom",
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
+                }
+                for c in tenant_caps
+            ],
+            "shared_capabilities": [
+                {
+                    "id": str(c.id),
+                    "name": c.name,
+                    "slug": c.slug,
+                    "description": c.description,
+                    "config": c.config or {},
+                    "is_active": c.is_active,
+                    "scope": "global_shared",
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
+                }
+                for c in shared_caps
+            ],
+            "self_development_versions": [
+                {
+                    "id": str(v.id),
+                    "capability_id": str(v.capability_id) if v.capability_id else None,
+                    "request_id": str(v.request_id) if v.request_id else None,
+                    "version_number": v.version_number,
+                    "slug": v.slug,
+                    "name": v.name,
+                    "description": v.description,
+                    "risk_level": v.risk_level,
+                    "status": v.status,
+                    "approval_id": str(v.approval_id) if v.approval_id else None,
+                    "activated_at": v.activated_at.isoformat() if v.activated_at else None,
+                    "rolled_back_at": v.rolled_back_at.isoformat() if v.rolled_back_at else None,
+                    "rollback_reason": v.rollback_reason,
+                    "created_at": v.created_at.isoformat() if v.created_at else None,
+                }
+                for v in versions
+            ],
+        }
+
+    def get_tenant_integrations(self, tenant_id: UUID) -> list[dict[str, Any]]:
+        """
+        List AI integrations visible to this tenant:
+        Includes both tenant-specific configured integrations and platform global fallback.
+        API keys are always masked.
+        """
+        configs = self.ai_provider_service.list_configs(tenant_id=tenant_id)
+        for cfg in configs:
+            cfg["scope"] = "tenant" if cfg.get("tenant_id") else "platform_global"
+        return configs
+
+    def get_tenant_errors(self, tenant_id: UUID, limit: int = 50) -> dict[str, Any]:
+        """
+        Diagnostic center: aggregates real failure and error records across
+        tasks, execution traces, AI telemetry, and outbox delivery.
+        """
+        clamped_limit = max(1, min(100, limit))
+
+        failed_tasks = list(
+            self.db.scalars(
+                select(Task)
+                .where(
+                    Task.tenant_id == tenant_id,
+                    or_(Task.status == "failed", Task.error.is_not(None)),
+                )
+                .order_by(Task.updated_at.desc())
+                .limit(clamped_limit)
+            ).all()
+        )
+
+        failed_traces = list(
+            self.db.scalars(
+                select(ExecutionTrace)
+                .where(
+                    ExecutionTrace.tenant_id == tenant_id,
+                    or_(ExecutionTrace.status == "failed", ExecutionTrace.error_summary.is_not(None)),
+                )
+                .order_by(ExecutionTrace.started_at.desc())
+                .limit(clamped_limit)
+            ).all()
+        )
+
+        ai_errors = list(
+            self.db.scalars(
+                select(AIUsageLog)
+                .where(
+                    AIUsageLog.tenant_id == tenant_id,
+                    AIUsageLog.status == "error",
+                )
+                .order_by(AIUsageLog.created_at.desc())
+                .limit(clamped_limit)
+            ).all()
+        )
+
+        outbox_errors = list(
+            self.db.scalars(
+                select(OutboxEvent)
+                .where(
+                    OutboxEvent.tenant_id == tenant_id,
+                    OutboxEvent.status.in_(["dead_letter", "failed"]),
+                )
+                .order_by(OutboxEvent.created_at.desc())
+                .limit(clamped_limit)
+            ).all()
+        )
+
+        total_error_count = len(failed_tasks) + len(failed_traces) + len(ai_errors) + len(outbox_errors)
+
+        return {
+            "tenant_id": str(tenant_id),
+            "total_errors": total_error_count,
+            "tasks_errors": [
+                {
+                    "id": str(t.id),
+                    "task_title": t.title,
+                    "status": t.status,
+                    "error_message": t.error,
+                    "agent_id": str(t.agent_id) if t.agent_id else None,
+                    "occurred_at": t.updated_at.isoformat() if t.updated_at else None,
+                }
+                for t in failed_tasks
+            ],
+            "traces_errors": [
+                {
+                    "id": str(tr.id),
+                    "trace_id": str(tr.trace_id),
+                    "trigger_type": tr.trigger_type,
+                    "task_id": str(tr.task_id) if tr.task_id else None,
+                    "agent_id": str(tr.agent_id) if tr.agent_id else None,
+                    "error_summary": tr.error_summary,
+                    "occurred_at": tr.completed_at.isoformat() if tr.completed_at else tr.started_at.isoformat(),
+                }
+                for tr in failed_traces
+            ],
+            "ai_errors": [
+                {
+                    "id": str(log.id),
+                    "provider": log.provider,
+                    "model": log.model,
+                    "error_category": log.error_category,
+                    "error_message": log.error_message,
+                    "task_id": str(log.task_id) if log.task_id else None,
+                    "occurred_at": log.created_at.isoformat() if log.created_at else None,
+                }
+                for log in ai_errors
+            ],
+            "outbox_errors": [
+                {
+                    "id": str(oe.id),
+                    "event_type": oe.event_type,
+                    "status": oe.status,
+                    "retry_count": oe.attempt_count,
+                    "error_message": oe.error_message,
+                    "occurred_at": oe.created_at.isoformat() if oe.created_at else None,
+                }
+                for oe in outbox_errors
+            ],
         }
 
     # -------------------------------------------------------------------------

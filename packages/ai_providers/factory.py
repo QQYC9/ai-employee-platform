@@ -67,7 +67,11 @@ class AIProviderFactory:
         """
         from packages.ai_providers.resilient_provider import ResilientAIProvider
 
+        if primary_provider is None and getattr(settings, "ai_provider", None):
+            primary_provider = settings.ai_provider.strip().lower()
+
         provider_chain: list[tuple[str, AIProvider]] = []
+        seen_providers: set[str] = set()
 
         if db is not None:
             from packages.services.ai_provider_service import AIProviderService
@@ -80,8 +84,23 @@ class AIProviderFactory:
 
             if primary_provider:
                 matched_primary = [c for c in active_configs if c.get("provider") == primary_provider]
-                other_configs = [c for c in active_configs if c.get("provider") != primary_provider]
-                ordered_configs = matched_primary + other_configs
+                if matched_primary:
+                    ordered_configs = matched_primary + [c for c in active_configs if c.get("provider") != primary_provider]
+                else:
+                    # primary_provider requested/configured in settings but has no DB config; create directly
+                    if primary_provider in cls._registry:
+                        try:
+                            p_inst = cls.create_provider(
+                                provider_name=primary_provider,
+                                tenant_id=tenant_id,
+                                db=db,
+                                **kwargs,
+                            )
+                            provider_chain.append((primary_provider, p_inst))
+                            seen_providers.add(primary_provider)
+                        except Exception as exc:
+                            logger.warning("Could not instantiate primary provider '%s': %s", primary_provider, exc)
+                    ordered_configs = [c for c in active_configs if c.get("provider") != primary_provider]
             else:
                 tenant_default = [c for c in active_configs if c.get("is_default") and c.get("tenant_id")]
                 tenant_other = [c for c in active_configs if not c.get("is_default") and c.get("tenant_id")]
@@ -89,7 +108,6 @@ class AIProviderFactory:
                 global_other = [c for c in active_configs if not c.get("is_default") and not c.get("tenant_id")]
                 ordered_configs = tenant_default + tenant_other + global_default + global_other
 
-            seen_providers = set()
             for cfg in ordered_configs:
                 p_name = cfg.get("provider")
                 if p_name and p_name not in seen_providers:

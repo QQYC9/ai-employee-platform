@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from packages.services.audit_service import AuditService
 from packages.services.decision_engine import DecisionEngine
+from packages.services.execution_tracing_service import ExecutionTracingService
 from packages.services.idempotency_service import (
     ConcurrencyConflictError,
     IdempotencyService,
@@ -37,11 +38,13 @@ class ToolExecutor:
         db: Session,
         handlers: dict[str, Callable[..., Any]] | None = None,
         idempotency_service: IdempotencyService | None = None,
+        execution_tracing_service: ExecutionTracingService | None = None,
     ):
         self.db = db
         self.tool_service = ToolService(db)
         self.decision_engine = DecisionEngine(db)
         self.audit_service = AuditService(db)
+        self.tracing_service = execution_tracing_service or ExecutionTracingService(db)
         self.handlers = handlers or {}
         self._idempotency_cache: dict[str, Any] = {}
         try:
@@ -101,7 +104,17 @@ class ToolExecutor:
         task_id: UUID | None = None,
         parameters: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        trace_id: UUID | None = None,
     ) -> ToolExecutionResult:
+        from datetime import datetime, timezone
+        t_start = datetime.now(timezone.utc)
+
+        effective_trace_id = trace_id
+        if effective_trace_id is None and parameters:
+            ctx = parameters.get("_context")
+            if ctx and hasattr(ctx, "trace_id"):
+                effective_trace_id = ctx.trace_id
+
         tool = self.tool_service.get_tool(
             tenant_id=tenant_id,
             tool_id=tool_id,
@@ -120,6 +133,9 @@ class ToolExecutor:
             parameters=parameters,
         )
 
+        effective_idem_key = idempotency_key or (parameters.get("idempotency_key") if parameters else None)
+        cache_key = f"{tenant_id}:{tool.id}:{effective_idem_key}" if effective_idem_key else None
+
         if decision.decision != "ALLOW":
             self.audit_service.record_event(
                 tenant_id=tenant_id,
@@ -137,6 +153,23 @@ class ToolExecutor:
                 },
             )
 
+            if effective_trace_id:
+                try:
+                    self.tracing_service.record_step(
+                        tenant_id=tenant_id,
+                        trace_id=effective_trace_id,
+                        step_name=f"tool:{tool.slug}",
+                        step_type="tool_call",
+                        status="blocked",
+                        started_at=t_start,
+                        task_id=task_id,
+                        input_summary=parameters,
+                        error_info={"decision": decision.decision, "reason": decision.reason},
+                        idempotency_key=effective_idem_key,
+                    )
+                except Exception:
+                    pass
+
             return ToolExecutionResult(
                 status="blocked",
                 tool_id=tool.id,
@@ -144,18 +177,33 @@ class ToolExecutor:
                 decision=decision.decision,
                 reason=decision.reason,
             )
-        effective_idem_key = idempotency_key or (parameters.get("idempotency_key") if parameters else None)
-        cache_key = f"{tenant_id}:{tool.id}:{effective_idem_key}" if effective_idem_key else None
 
         if effective_idem_key:
             if cache_key in self._idempotency_cache:
+                cached_output = self._idempotency_cache[cache_key]
+                if effective_trace_id:
+                    try:
+                        self.tracing_service.record_step(
+                            tenant_id=tenant_id,
+                            trace_id=effective_trace_id,
+                            step_name=f"tool:{tool.slug}",
+                            step_type="tool_call",
+                            status="completed",
+                            started_at=t_start,
+                            task_id=task_id,
+                            input_summary=parameters,
+                            output_summary={"source": "idempotency_cache", "output": cached_output},
+                            idempotency_key=effective_idem_key,
+                        )
+                    except Exception:
+                        pass
                 return ToolExecutionResult(
                     status="executed",
                     tool_id=tool.id,
                     tool_slug=tool.slug,
                     decision=decision.decision,
                     reason="Result returned from idempotency cache",
-                    output=self._idempotency_cache[cache_key],
+                    output=cached_output,
                 )
 
             if self.idempotency_service is not None:
@@ -170,6 +218,22 @@ class ToolExecutor:
                 if status == "completed":
                     if cache_key:
                         self._idempotency_cache[cache_key] = cached_output
+                    if effective_trace_id:
+                        try:
+                            self.tracing_service.record_step(
+                                tenant_id=tenant_id,
+                                trace_id=effective_trace_id,
+                                step_name=f"tool:{tool.slug}",
+                                step_type="tool_call",
+                                status="completed",
+                                started_at=t_start,
+                                task_id=task_id,
+                                input_summary=parameters,
+                                output_summary={"source": "persistent_idempotency", "output": cached_output},
+                                idempotency_key=effective_idem_key,
+                            )
+                        except Exception:
+                            pass
                     return ToolExecutionResult(
                         status="executed",
                         tool_id=tool.id,
@@ -198,6 +262,22 @@ class ToolExecutor:
                     "status": "error",
                 },
             )
+            if effective_trace_id:
+                try:
+                    self.tracing_service.record_step(
+                        tenant_id=tenant_id,
+                        trace_id=effective_trace_id,
+                        step_name=f"tool:{tool.slug}",
+                        step_type="tool_call",
+                        status="failed",
+                        started_at=t_start,
+                        task_id=task_id,
+                        input_summary=parameters,
+                        error_info={"error": f"No execution handler registered for tool '{tool.slug}'"},
+                        idempotency_key=effective_idem_key,
+                    )
+                except Exception:
+                    pass
 
             raise ValueError(
                 f"No execution handler registered for tool '{tool.slug}'"
@@ -252,6 +332,23 @@ class ToolExecutor:
                 },
             )
 
+            if effective_trace_id:
+                try:
+                    self.tracing_service.record_step(
+                        tenant_id=tenant_id,
+                        trace_id=effective_trace_id,
+                        step_name=f"tool:{tool.slug}",
+                        step_type="tool_call",
+                        status="failed",
+                        started_at=t_start,
+                        task_id=task_id,
+                        input_summary=parameters,
+                        error_info={"error": str(exc), "error_type": type(exc).__name__},
+                        idempotency_key=effective_idem_key,
+                    )
+                except Exception:
+                    pass
+
             raise
 
         self.audit_service.record_event(
@@ -268,6 +365,23 @@ class ToolExecutor:
                 "status": "executed",
             },
         )
+
+        if effective_trace_id:
+            try:
+                self.tracing_service.record_step(
+                    tenant_id=tenant_id,
+                    trace_id=effective_trace_id,
+                    step_name=f"tool:{tool.slug}",
+                    step_type="tool_call",
+                    status="completed",
+                    started_at=t_start,
+                    task_id=task_id,
+                    input_summary=parameters,
+                    output_summary={"output": output},
+                    idempotency_key=effective_idem_key,
+                )
+            except Exception:
+                pass
 
         return ToolExecutionResult(
             status="executed",

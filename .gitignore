@@ -1,4 +1,5 @@
 .env
+.env.prod
 .venv/
 __pycache__/
 *.py[cod]
@@ -10,3 +11,6 @@ __pycache__/
 storage/
 node_modules/
 dist/
+backups/
+*.sql
+artifacts/

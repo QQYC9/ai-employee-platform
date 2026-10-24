@@ -568,6 +568,11 @@ def test_duplicate_reply_prevention(db: Session, tenant_a: Tenant, conversation_
     """
     conv_service = ConversationService(db)
     outbox_service = OutboxService(db)
+    db.query(OutboxEvent).filter(
+        OutboxEvent.tenant_id == tenant_a.id,
+        OutboxEvent.status.in_(["pending", "processing"]),
+    ).update({"status": "completed"})
+    db.commit()
 
     msg = conv_service.send_message(
         tenant_id=tenant_a.id,

@@ -76,6 +76,22 @@ def _require_admin(user: User):
         raise HTTPException(status_code=403, detail="Forbidden: Admin or Owner role required")
 
 
+def _require_memory_access(user: User, memory: Memory, action: str = "modify"):
+    user_role = (user.role or "").strip().lower()
+    is_admin = user_role in ("owner", "tenant_owner", "admin", "tenant_admin", "superadmin", "platform_admin")
+    if is_admin:
+        return
+
+    # Non-admin members can only modify/supersede/invalidate memories they explicitly created themselves
+    if memory.user_id is not None and str(memory.user_id) == str(user.id):
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail=f"Forbidden: Insufficient permissions to {action} this memory. Owner or Admin role required."
+    )
+
+
 @router.get("/status")
 def memories_status():
     return {
@@ -116,6 +132,9 @@ def create_memory(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to create memory")
 
 
 @router.get("")
@@ -170,8 +189,13 @@ def update_memory(
     current_user: User = Depends(get_current_user),
 ):
     service = MemoryService(db)
+    memory = service.get_memory(current_user.tenant_id, memory_id)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    _require_memory_access(current_user, memory, action="update")
+
     try:
-        memory = service.update_memory(
+        updated = service.update_memory(
             tenant_id=current_user.tenant_id,
             memory_id=memory_id,
             content=payload.content,
@@ -182,8 +206,8 @@ def update_memory(
             metadata_json=payload.metadata_json,
         )
         db.commit()
-        db.refresh(memory)
-        return serialize_memory(memory)
+        db.refresh(updated)
+        return serialize_memory(updated)
     except SecretDetectedError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
@@ -193,6 +217,9 @@ def update_memory(
         if "not found" in detail_msg.lower():
             raise HTTPException(status_code=404, detail=detail_msg)
         raise HTTPException(status_code=400, detail=detail_msg)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update memory")
 
 
 @router.post("/{memory_id}/supersede")
@@ -203,6 +230,11 @@ def supersede_memory(
     current_user: User = Depends(get_current_user),
 ):
     service = MemoryService(db)
+    memory = service.get_memory(current_user.tenant_id, memory_id)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    _require_memory_access(current_user, memory, action="supersede")
+
     try:
         new_memory = service.supersede_memory(
             tenant_id=current_user.tenant_id,
@@ -224,6 +256,9 @@ def supersede_memory(
         if "not found" in detail_msg.lower():
             raise HTTPException(status_code=404, detail=detail_msg)
         raise HTTPException(status_code=400, detail=detail_msg)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to supersede memory")
 
 
 @router.post("/{memory_id}/invalidate")
@@ -234,21 +269,29 @@ def invalidate_memory(
     current_user: User = Depends(get_current_user),
 ):
     service = MemoryService(db)
+    memory = service.get_memory(current_user.tenant_id, memory_id)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    _require_memory_access(current_user, memory, action="invalidate")
+
     try:
-        memory = service.invalidate_memory(
+        invalidated = service.invalidate_memory(
             tenant_id=current_user.tenant_id,
             memory_id=memory_id,
             reason=payload.reason,
         )
         db.commit()
-        db.refresh(memory)
-        return serialize_memory(memory)
+        db.refresh(invalidated)
+        return serialize_memory(invalidated)
     except ValueError as exc:
         db.rollback()
         detail_msg = str(exc)
         if "not found" in detail_msg.lower():
             raise HTTPException(status_code=404, detail=detail_msg)
         raise HTTPException(status_code=400, detail=detail_msg)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to invalidate memory")
 
 
 @router.delete("/{memory_id}")
