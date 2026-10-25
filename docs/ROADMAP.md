@@ -143,12 +143,46 @@ This document outlines the phased plan to evolve the Digital Employee platform f
 ---
 
 ## Phase 3: Adaptive Owner Onboarding Interview
-- **Status**: todo
-- **Objective**: Interactive onboarding dialogue when an owner links via connection code.
-- **Acceptance Criteria**:
-  - 4 foundational classification questions.
-  - Dynamic topic map based on business field.
-  - Coverage score gate preventing customer go-live until critical topics are answered.
+- **Status**: done
+- **Objective**: Interactive onboarding dialogue when an owner links via connection code, where the digital employee decides autonomously what it needs to know based on business classification, plans dynamic topics, executes structured extraction, tracks coverage, and gates customer go-live until critical knowledge is recorded.
+- **Verification**: Verified with 10 comprehensive tests in `tests/test_phase3_adaptive_interview.py` (9 passed, 1 live-model skipped when no API key set) through the REAL router -> engine path (`InboundMessage` -> `ChannelService` -> `ConversationalAgentEngine`). Full regression suite passing (43 passed, 2 skipped).
+
+### Work Items
+- **3.1 Schema & Non-Destructive Migration**:
+  - Alembic migration `f7a8b9c0d1e2_add_adaptive_interview_tables.py` creating `interview_topics` and `interview_states` with `tenant_id` foreign keys, cascades, unique constraints, and indexes.
+  - Added `interview_required` (Boolean, default `False`) and `interview_threshold` (Float, default `80.0`) to `tenants`.
+  - Executed pg_dump pre-migration backup (`backups/backup_ai_employee_pre_phase3.dump`, 816 KB), SQL dry-run, and full lifecycle (`upgrade -> downgrade -> upgrade`) on copy database before live DB migration.
+- **3.2 Flexible Entry Points**:
+  - Entry point A: Instant automatic interview greeting when an unlinked owner connects via connection code (`channel.config["connection_code"]`).
+  - Entry point B: Explicit Arabic triggers ("ابدأ التعارف", "كمّل التعارف").
+  - Entry point C: Progress overview query ("وش باقي؟").
+- **3.3 Stage 1 Conversational Classification**:
+  - 4 free-text conversational questions: Owner Name, Role, Entity Type, Country & Field of Activity.
+  - Multi-label business profile tagging (e.g. `{shop, honey, retail, delivery, Yemen}` or `{software, company, b2b, development, it, Yemen}`).
+  - Persisted as `profile.*` facts via Phase 2 `FactService` with clean read-back summary.
+- **3.4 Stage 2 Dynamic Topic Planning**:
+  - Topic planner with AI generation + deterministic domain synthesis yielding distinct topic sets for honey shops, software companies, restaurants, and retail without code changes per business.
+  - Universal topics (`identity`, `products_services_prices`, `ordering_payment`, `delivery_coverage`, `branches_hours`, `returns_warranty`, `authority_limits`, `tone_voice`, `unknown_questions_handling`).
+  - Field-specific topics (Honey: `honey_types`, `packaging_sizes`, `honey_storage`, `authenticity_guarantee`; Software: `target_clients`, `software_licenses`, `support_sla_policy`, `partnerships_certifications`).
+- **3.5 Stage 3 Conditional Follow-ups & Negative Closure**:
+  - Branching chains (e.g. Yemen delivery ladder: local governorate delivery -> inter-governorate shipping -> international shipping).
+  - Negative answer detection ("لا") closes dependent topic branches cleanly without re-asking.
+- **3.6 Deterministic Next-Question Selector**:
+  - Evaluates satisfied dependencies, selects candidate with highest criticality (1-5, tie-broken by dependency depth).
+  - Emits short Arabic questions with optional quick replies.
+  - Multi-topic answer coverage in a single owner turn.
+  - Skip and "لا ينطبق" handling.
+  - Off-topic owner inquiries during interview answered naturally without swallowing or losing interview state.
+- **3.7 Pause/Resume & Progress Reporting**:
+  - State persisted per tenant in `interview_states`. Resumes seamlessly across sessions.
+  - Progress summary ("وش باقي؟") returns covered count, critical coverage %, and open critical topics.
+- **3.8 Go-Live Gate**:
+  - For tenants with `interview_required=True` below threshold, customer inquiries receive a polite holding reply (`"نجهّز الخدمة حاليًا، سنتواصل معك قريبًا"`) and the owner is notified of missing critical topics.
+  - Existing tenants remain unaffected (`interview_required=False`). New tenants provisioned after Phase 3 default to `True`.
+- **3.9 Verbatim Product Extraction Regression Test**:
+  - Product names remain verbatim inside interview extraction, never storing invented descriptions.
+- **3.10 Tenant Isolation & Security**:
+  - Every interview table and query scoped to `tenant_id`. Tenant isolation verified by test.
 
 ---
 

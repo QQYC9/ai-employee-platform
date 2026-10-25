@@ -2180,4 +2180,87 @@ class CampaignRecipient(Base):
     )
 
 
+class InterviewTopic(Base):
+    __tablename__ = "interview_topics"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    label: Mapped[str] = mapped_column(String(500), nullable=False)
+    why_it_matters: Mapped[str | None] = mapped_column(Text, nullable=True)
+    criticality: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default=text("3"))
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    depends_on: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="unknown",
+        server_default="unknown",
+    )  # unknown, asked, answered, skipped, not_applicable
+    coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0.0"))
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    group_name: Mapped[str | None] = mapped_column(String(100), nullable=True, default="universal", server_default="universal")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slug", name="uq_interview_topics_tenant_slug"),
+        Index("ix_interview_topics_tenant_status", "tenant_id", "status"),
+        Index("ix_interview_topics_tenant_criticality", "tenant_id", "criticality"),
+    )
+
+
+class InterviewState(Base):
+    __tablename__ = "interview_states"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    stage: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="classification_1",
+        server_default="classification_1",
+    )
+    classification_answers: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    current_topic_slug: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    last_off_topic_reply: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_interaction_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+
 

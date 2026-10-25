@@ -18,6 +18,7 @@ from packages.ai_providers.base import AIProvider, AIProviderError, AIProviderTi
 from packages.context.builder import ContextBuilder
 from packages.context.models import AgentContext, TaskContext
 from packages.context.retriever import ContextRetriever
+from packages.models.tenant import Tenant
 from packages.models.domain import (
     Approval,
     Capability,
@@ -25,6 +26,8 @@ from packages.models.domain import (
     Conversation,
     Customer,
     Fact,
+    InterviewTopic,
+    InterviewState,
     Message,
     Tool,
     User,
@@ -383,6 +386,33 @@ class ConversationalAgentEngine:
         # -----------------------------------------------------------------
         # CUSTOMER SERVICE MODE
         # -----------------------------------------------------------------
+        # Phase 3: Coverage and Go-Live Gate for customer messages
+        try:
+            from packages.services.interview_service import InterviewService
+            tenant_obj = self.db.scalar(select(Tenant).where(Tenant.id == tenant_id))
+            if tenant_obj and getattr(tenant_obj, "interview_required", False):
+                interview_svc = InterviewService(self.db)
+                threshold = float(getattr(tenant_obj, "interview_threshold", 80.0) or 80.0)
+                is_ready, crit_pct, missing_crit = interview_svc.check_go_live_gate(tenant_id, threshold=threshold)
+                if not is_ready:
+                    neutral_reply = "نجهّز الخدمة حاليًا، سنتواصل معك قريبًا"
+                    interview_svc.notify_owner_of_unmet_gate(
+                        tenant_id=tenant_id,
+                        critical_pct=crit_pct,
+                        missing_critical=missing_crit,
+                        customer_message=message.content,
+                    )
+                    return self._persist_and_return_reply(
+                        tenant_id, conversation_id, message.id, neutral_reply, msg_meta, is_owner=False
+                    )
+        except Exception as gate_err:
+            logger.error(
+                "Error evaluating go-live interview gate for tenant_id=%s, message_id=%s: %s",
+                tenant_id,
+                message_id,
+                gate_err,
+                exc_info=True,
+            )
         customer_id = message.customer_id or conversation.customer_id
         customer = None
         if customer_id is not None:
@@ -750,11 +780,17 @@ class ConversationalAgentEngine:
             reply_metadata["guardrail_blocked"] = True
             reply_metadata["guardrail_reason"] = msg_meta.get("guardrail_reason")
 
+        effective_reply_text = reply_text
+        if msg_meta.get("interview_continuation_note"):
+            continuation_suffix = "\n\n(ملاحظة: محادثة التعارف قيد الانتظار، يمكنك المتابعة في أي وقت بكتابة \"كمّل التعارف\")"
+            if continuation_suffix.strip() not in effective_reply_text:
+                effective_reply_text = f"{effective_reply_text}{continuation_suffix}"
+
         reply_msg = self.conversation_service.send_message(
             tenant_id=tenant_id,
             conversation_id=conversation_id,
             sender_type="agent",
-            content=reply_text,
+            content=effective_reply_text,
             customer_id=customer_id,
             message_type="text",
             metadata_json=reply_metadata,
@@ -801,7 +837,7 @@ class ConversationalAgentEngine:
             conversation_id=conversation_id,
             tenant_id=tenant_id,
             reply_message_id=reply_msg.id,
-            reply_content=reply_text,
+            reply_content=effective_reply_text,
             trace_id=effective_trace_id,
         )
 
@@ -829,6 +865,78 @@ class ConversationalAgentEngine:
         msg_meta = dict(message.metadata_json or {})
         if trace_id:
             msg_meta["trace_id"] = str(trace_id)
+
+        # --- Phase 3: Adaptive Owner Onboarding Interview ---
+        try:
+            from packages.services.interview_service import InterviewService
+            interview_svc = InterviewService(self.db)
+
+            # Check if this message was triggered right after connection code link
+            just_linked = bool(msg_meta.get("just_linked_via_code"))
+
+            # Check for explicit triggers ("ابدأ التعارف", "كمّل التعارف", "وش باقي؟")
+            interview_trigger = interview_svc.detect_trigger(content)
+
+            # Check if interview is currently in progress
+            interview_active = interview_svc.is_interview_active(tenant_id)
+
+            if just_linked:
+                welcome_prefix = (
+                    "تم ربط حسابك كمالك رسمي للمنشأة بنجاح! 🎉\n"
+                    "أنا موظفك الرقمي الذكي، وسأقوم الآن بالتعرف على منشأتك لخدمة عملائك بأعلى دقة وبدون أي تخمين.\n\n"
+                )
+                start_res = interview_svc.start_interview(tenant_id)
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, f"{welcome_prefix}{start_res}", msg_meta, is_owner=True
+                )
+
+            if interview_trigger == "progress":
+                progress_reply = interview_svc.get_progress_summary(tenant_id)
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, progress_reply, msg_meta, is_owner=True
+                )
+
+            if interview_trigger in ("start", "resume"):
+                resume_reply = interview_svc.resume_interview(tenant_id)
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, resume_reply, msg_meta, is_owner=True
+                )
+
+            if interview_active:
+                state = interview_svc.get_or_create_state(tenant_id)
+                curr_topic = None
+                if state.current_topic_slug:
+                    curr_topic = self.db.scalar(
+                        select(InterviewTopic).where(
+                            InterviewTopic.tenant_id == tenant_id,
+                            InterviewTopic.slug == state.current_topic_slug,
+                        )
+                    )
+                curr_q = curr_topic.question if curr_topic else ""
+                is_off_topic = interview_svc.is_off_topic_message(content, curr_q)
+
+                if not is_off_topic:
+                    interview_reply, is_interview = interview_svc.process_interview_turn(
+                        tenant_id=tenant_id,
+                        message_id=message_id,
+                        content=content,
+                        ai_provider=provider,
+                    )
+                    if is_interview and interview_reply:
+                        return self._persist_and_return_reply(
+                            tenant_id, conversation_id, message_id, interview_reply, msg_meta, is_owner=True
+                        )
+                else:
+                    # Off-topic inquiry during active interview:
+                    msg_meta["interview_continuation_note"] = True
+        except Exception as interview_err:
+            logger.error(
+                "Error processing adaptive interview turn for tenant_id=%s, message_id=%s: %s",
+                tenant_id,
+                message_id,
+                interview_err,
+                exc_info=True,
+            )
 
         # --- Structured Owner Intent Router (Phase 2) ---
         if hasattr(self, "owner_intent_router") and self.owner_intent_router is not None:

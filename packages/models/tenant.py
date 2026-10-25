@@ -1,7 +1,7 @@
-﻿import uuid
+import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import Boolean, DateTime, Float, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from packages.core.database import Base
@@ -32,6 +32,20 @@ class Tenant(Base):
         nullable=False,
         default="active",
         server_default="active",
+    )
+
+    interview_required: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+
+    interview_threshold: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=80.0,
+        server_default=text("80.0"),
     )
 
     created_at: Mapped[datetime] = mapped_column(

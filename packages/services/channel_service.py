@@ -339,7 +339,7 @@ class ChannelService:
         owner_identifiers: list[str] = []
 
         # 1. Configured identifiers in channel config
-        raw_ids = config.get("owner_identifiers") or []
+        raw_ids = config.get("owner_identifiers") or config.get("owner_sender_ids") or []
         if isinstance(raw_ids, list):
             owner_identifiers.extend(str(x).strip() for x in raw_ids if x)
         elif isinstance(raw_ids, str):
@@ -408,6 +408,29 @@ class ChannelService:
 
         channel = self.get_channel(tenant_id, channel_id)
         is_owner = self.is_owner_sender(channel, inbound.sender_id)
+
+        # Connection Code Link Flow (Phase 3 Entry Point A)
+        just_linked_via_code = False
+        if not is_owner and channel and channel.config:
+            content_clean = (inbound.content or "").strip()
+            expected_code = channel.config.get("connection_code")
+            code_match = re.search(r"(?:/link|كود\s*الربط\s*:?|رمز\s*الربط\s*:?|link\s*:?)\s*([A-Za-z0-9_-]+)", content_clean, re.IGNORECASE)
+            extracted_code = code_match.group(1).strip() if code_match else content_clean
+
+            if expected_code and extracted_code.upper() == str(expected_code).strip().upper():
+                channel_cfg = dict(channel.config)
+                raw_owners = channel_cfg.get("owner_identifiers") or []
+                if isinstance(raw_owners, list):
+                    raw_owners.append(inbound.sender_id)
+                else:
+                    raw_owners = [str(raw_owners), inbound.sender_id]
+                channel_cfg["owner_identifiers"] = list(dict.fromkeys(raw_owners))
+                channel.config = channel_cfg
+                self.db.add(channel)
+                self.db.flush()
+                is_owner = True
+                just_linked_via_code = True
+
         owner_user = self.resolve_owner_user(tenant_id) if is_owner else None
 
         if is_owner:
@@ -443,6 +466,18 @@ class ChannelService:
                 self.db.flush()
 
             # Persist inbound owner message as sender_type="user"
+            owner_meta = {
+                "is_owner": True,
+                "external_message_id": inbound.external_message_id,
+                "channel_id": str(channel_id),
+                "channel_type": inbound.channel_type,
+                "sender_id": inbound.sender_id,
+                "recipient_id": inbound.recipient_id,
+                "raw_payload": inbound.raw_payload,
+            }
+            if just_linked_via_code:
+                owner_meta["just_linked_via_code"] = True
+
             message = Message(
                 tenant_id=tenant_id,
                 conversation_id=conversation.id,
@@ -451,15 +486,7 @@ class ChannelService:
                 customer_id=None,
                 content=inbound.content,
                 message_type=inbound.content_type,
-                metadata_json={
-                    "is_owner": True,
-                    "external_message_id": inbound.external_message_id,
-                    "channel_id": str(channel_id),
-                    "channel_type": inbound.channel_type,
-                    "sender_id": inbound.sender_id,
-                    "recipient_id": inbound.recipient_id,
-                    "raw_payload": inbound.raw_payload,
-                },
+                metadata_json=owner_meta,
             )
             self.db.add(message)
             self.db.flush()

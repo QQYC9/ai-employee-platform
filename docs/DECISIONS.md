@@ -207,3 +207,39 @@ This log records major design and implementation choices, including rationale an
   2. **Knowledge Snippet Suppression for Company Identity**:
      - In both customer (`_construct_prompt`) and owner (`_process_owner_message`) prompt builders, suppressed injection of knowledge snippets whose title starts with "اسم المنشأة" if a confirmed `company.identity` fact exists.
      - All database rows in the `knowledge` table remain preserved and untouched.
+
+
+---
+
+## Decision 3.1: Adaptive Owner Onboarding Interview, Dynamic Topic Planning & Go-Live Gate
+- **Context**:
+  Business owners connecting to the platform across diverse industries (e.g. honey shops, software companies, restaurants, retail outlets) require an intelligent, conversational onboarding interview. The assistant must decide autonomously what it needs to know based on business classification, without code modifications per business type, without asking fixed questionnaires, without swallowing off-topic owner questions, and without allowing customers to receive unverified answers before critical knowledge is acquired.
+- **Decision**:
+  1. **Seamless Entry Points**:
+     - *Connection Code Linking*: Hooked into the channel inbound path (`channel.config["connection_code"]`). When an unlinked owner provides the connection code, the system binds their sender ID to `owner_identifiers` and kicks off the interview immediately.
+     - *Conversational Commands*: Owners can initiate or resume anytime using `"ابدأ التعارف"` or `"كمّل التعارف"`.
+     - *Progress Reporting*: Querying `"وش باقي؟"` returns a structured progress report of completed topics, critical coverage percentage, and remaining critical topics.
+  2. **Stage 1 Conversational Classification**:
+     - Emits 4 conversational questions (Owner Name, Role, Entity Type, Country & Field).
+     - Free-text answers are parsed into multi-label business tags (e.g. `{shop, honey, retail, delivery, Yemen}` or `{software, company, b2b, development, it, Yemen}`).
+     - Persists profile tags as `profile.*` facts via Phase 2 `FactService` with human-readable read-back.
+  3. **Stage 2 Dynamic Topic Planning**:
+     - Synthesizes an interview topic plan (`InterviewPlanSchema`) mixing universal topics (`identity`, `products_services_prices`, `ordering_payment`, `delivery_coverage`, `branches_hours`, `returns_warranty`, `authority_limits`, `tone_voice`, `unknown_questions_handling`) with domain-specific topics (Honey: types, packaging sizes, storage, authenticity; Software: target clients, licenses, SLA policy, partnerships; Restaurant: menu, dine-in/takeaway).
+     - Persists topics into `interview_topics` with dependencies (`depends_on`), criticality (1-5), and initial status `unknown`.
+  4. **Stage 3 Conditional Follow-ups & Negative Closure**:
+     - Country-specific follow-up chains (Yemen delivery ladder: intra-city delivery -> inter-governorate shipping -> international shipping).
+     - Negative answer detection ("لا") immediately marks dependent topic branches as `not_applicable`, closing them cleanly without re-asking.
+  5. **Deterministic Next-Question Selector**:
+     - Non-model deterministic selector scans open topics whose dependencies are satisfied, picking the highest criticality candidate (tie-broken by dependency depth).
+     - Generates concise Arabic questions with optional quick replies.
+     - Multi-topic coverage in a single owner turn (an owner message covering products, prices, and cities marks all corresponding topics covered).
+     - Understands `"لا أعلم"`, `"تخطى"`, and `"لا ينطبق"`.
+     - Preserves interview state on off-topic questions: answers the owner's immediate inquiry and appends an offer to resume the interview.
+  6. **Go-Live Gate & Customer Path Protection**:
+     - Added `tenants.interview_required` (Boolean) and `tenants.interview_threshold` (Float, default 80.0%).
+     - Existing tenants default to `interview_required=False` (unblocked). New tenants provisioned after Phase 3 default to `interview_required=True`.
+     - For gated tenants below the critical coverage threshold, incoming customer messages receive a neutral Arabic reply (`"نجهّز الخدمة حاليًا، سنتواصل معك قريبًا"`), and the business owner is notified via their channel of the missing critical topics.
+  7. **Tenant Isolation & Safe Database Migration**:
+     - Pre-migration backup snapshot `backups/backup_ai_employee_pre_phase3.dump` (816 KB) created and verified.
+     - Migration `f7a8b9c0d1e2` verified on copy database through full lifecycle (`upgrade -> downgrade -> upgrade`) before live DB upgrade.
+     - Tables `interview_topics` and `interview_states` enforce `tenant_id` foreign keys with `ondelete="CASCADE"`. Tenant isolation confirmed by automated test.

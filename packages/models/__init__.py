@@ -26,6 +26,9 @@ from packages.models.domain import (
     ExecutionStep,
     Campaign,
     CampaignRecipient,
+    Fact,
+    InterviewTopic,
+    InterviewState,
 )
 
 __all__ = [
@@ -56,4 +59,7 @@ __all__ = [
     "ExecutionStep",
     "Campaign",
     "CampaignRecipient",
+    "Fact",
+    "InterviewTopic",
+    "InterviewState",
 ]

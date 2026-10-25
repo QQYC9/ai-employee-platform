@@ -203,6 +203,7 @@ class TenantProvisioningService:
                 name=clean_name,
                 slug=slug,
                 status="active",
+                interview_required=True,
             )
             self.db.add(tenant)
             self.db.flush()
@@ -365,6 +366,21 @@ class TenantProvisioningService:
                 })
             self.db.flush()
 
+            # Step G: Auto-Provision Continuous Learning Workflow
+            from packages.self_development.learning_engine import ContinuousLearningEngine
+            learning_engine = ContinuousLearningEngine(self.db)
+            learning_wf = learning_engine.ensure_scheduled_learning_workflow(
+                tenant_id=tenant.id,
+                agent_id=agent.id,
+            )
+            wf_info = {
+                "id": str(learning_wf.id),
+                "name": learning_wf.name,
+                "action_type": learning_wf.action_type,
+                "interval_seconds": learning_wf.interval_seconds,
+                "status": learning_wf.status,
+            }
+
             # Commit savepoint and top-level transaction
             sp.commit()
             self.db.commit()
@@ -425,6 +441,7 @@ class TenantProvisioningService:
                 },
                 "assigned_capabilities": assigned_caps,
                 "action_policies": created_policies,
+                "learning_workflow": wf_info,
             }
 
         except Exception:
