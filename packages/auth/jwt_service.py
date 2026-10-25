@@ -67,6 +67,41 @@ def create_access_token(
     return jwt.encode(payload, key, algorithm=settings.jwt_algorithm)
 
 
+def create_password_reset_token(
+    user_id: UUID | str,
+    tenant_id: UUID | str | None,
+    password_hash: str | None = None,
+    expires_delta: timedelta | None = None,
+    signing_key: str | None = None,
+) -> str:
+    """
+    Issue a single-use signed JWT password reset / activation token.
+    Fingerprinted with the user's current password hash to guarantee single-use.
+    """
+    import hashlib
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + (expires_delta or timedelta(hours=24))
+    pwh_sig = hashlib.sha256((password_hash or "").encode()).hexdigest()[:16]
+
+    payload: dict[str, Any] = {
+        "sub": str(user_id),
+        "tenant_id": str(tenant_id) if tenant_id is not None else None,
+        "token_type": "password_reset",
+        "pwh": pwh_sig,
+        "iss": settings.jwt_issuer,
+        "aud": settings.jwt_audience,
+        "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
+        "exp": int(expires_at.timestamp()),
+        "jti": str(uuid4()),
+    }
+
+    key = _get_signing_key(signing_key)
+    return jwt.encode(payload, key, algorithm=settings.jwt_algorithm)
+
+
+
 def create_refresh_token(
     user_id: UUID | str,
     tenant_id: UUID | str | None,

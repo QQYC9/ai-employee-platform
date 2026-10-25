@@ -262,12 +262,21 @@ class LinkCodeService:
             ).order_by(TenantLinkCode.created_at.desc())
         )
         if record is None:
-            return {"has_active": False, "code_prefix": None, "expires_at": None, "is_expired": False}
+            return {
+                "has_active": False,
+                "has_active_code": False,
+                "code_prefix": None,
+                "code_preview": None,
+                "expires_at": None,
+                "is_expired": False,
+            }
 
         is_expired = now > record.expires_at
         return {
             "has_active": not is_expired,
+            "has_active_code": not is_expired,
             "code_prefix": record.code_prefix,
+            "code_preview": f"{record.code_prefix}..." if record.code_prefix else None,
             "expires_at": record.expires_at.isoformat(),
             "is_expired": is_expired,
             "attempts_count": record.attempts_count,

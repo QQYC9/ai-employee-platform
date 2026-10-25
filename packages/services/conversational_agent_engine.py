@@ -133,6 +133,24 @@ class ConversationalAgentEngine:
             tool_registry=self.tool_registry,
             ai_provider=self.ai_provider,
         )
+        from packages.services.channel_service import ChannelService
+        self.channel_service = ChannelService(db)
+
+    def _build_customer_system_instruction(self, tenant_id: UUID) -> str:
+        """Helper to construct customer system instruction for tenant."""
+        tenant_obj = self.db.scalar(select(Tenant).where(Tenant.id == tenant_id))
+        company_name = tenant_obj.name if tenant_obj else "Our Company"
+        emp_name = (getattr(tenant_obj, "employee_name", None) or "").strip()
+        role = f"You are {emp_name}, the autonomous Digital Employee representing '{company_name}'." if emp_name else f"You are the autonomous Digital Employee representing '{company_name}'."
+        return role
+
+    def _build_owner_system_instruction(self, tenant_id: UUID) -> str:
+        """Helper to construct owner system instruction for tenant."""
+        tenant_obj = self.db.scalar(select(Tenant).where(Tenant.id == tenant_id))
+        company_name = tenant_obj.name if tenant_obj else "Our Company"
+        emp_name = (getattr(tenant_obj, "employee_name", None) or "").strip()
+        emp_title = emp_name if emp_name else "الموظف الرقمي الذكي"
+        return f"أنت {emp_title} والمساعد الإداري لمالك منشأة '{company_name}'."
 
     def load_tenant_active_capabilities(self, tenant_id: UUID) -> list[str]:
         """
@@ -898,7 +916,32 @@ class ConversationalAgentEngine:
             interview_active = interview_svc.is_interview_active(tenant_id)
 
             if just_linked:
-                welcome_prefix = "تم ربط حسابك كمالك رسمي للمنشأة بنجاح! 🎉\n\n"
+                tenant_obj = self.db.scalar(select(Tenant).where(Tenant.id == tenant_id))
+                emp_name = (getattr(tenant_obj, "employee_name", None) or "").strip()
+                intro_phrase = f"أنا {emp_name}، موظفتك الرقمية الذكية." if emp_name else "بصفتي موظفك الرقمي الذكي."
+
+                # Dashboard access details (Phase 3.2 Problem D & 4)
+                from packages.core.config import settings
+                owner_user = self.channel_service.resolve_owner_user(tenant_id)
+                owner_email = owner_user.email if owner_user else "owner@alofoq.sa"
+                dash_url = getattr(settings, "tenant_dashboard_url", "http://localhost:5173")
+                from packages.auth.jwt_service import create_password_reset_token
+                set_token = create_password_reset_token(
+                    user_id=owner_user.id if owner_user else uuid4(),
+                    tenant_id=tenant_id,
+                    password_hash=owner_user.password_hash if owner_user else None,
+                )
+                set_password_link = f"{dash_url}/set-password?token={set_token}"
+
+                welcome_prefix = (
+                    f"تم ربط حسابك كمالك رسمي للمنشأة بنجاح! 🎉\n"
+                    f"{intro_phrase}\n\n"
+                    f"🌐 **بيانات الدخول إلى لوحة التحكم:**\n"
+                    f"• رابط لوحة التحكم: {dash_url}\n"
+                    f"• البريد الإلكتروني: {owner_email}\n"
+                    f"• رابط تعيين كلمة المرور: {set_password_link}\n"
+                    f"(يمكنك الدخول وتعيين كلمة مرور قوية لحسابك دون إرسال كلمات مرور عبر المحادثة)\n\n"
+                )
                 start_res = interview_svc.start_interview(tenant_id)
                 return self._persist_and_return_reply(
                     tenant_id, conversation_id, message_id, f"{welcome_prefix}{start_res}", msg_meta, is_owner=True
@@ -2153,8 +2196,11 @@ class ConversationalAgentEngine:
                     continue
                 k_snippets.append(f"- [{k_title or 'Knowledge'}]: {k.get('content', '')}")
 
+            t_obj = self.db.scalar(select(Tenant).where(Tenant.id == tenant_id))
+            emp_name = (getattr(t_obj, "employee_name", None) or "").strip()
+            emp_title = emp_name if emp_name else "الموظف الرقمي الذكي"
             system_inst = (
-                f"أنت الموظف الرقمي الذكي والمساعد الإداري لمالك منشأة '{company_name}'.\n"
+                f"أنت {emp_title} والمساعد الإداري لمالك منشأة '{company_name}'.\n"
                 "تتواصل مباشرة مع صاحب العمل والمالك المعتمد للمنشأة.\n\n"
                 "قواعد الأمان ومنع الهلوسة الإلزامية (صارمة جداً):\n"
                 "1. الإجابة حصرياً استناداً إلى الحقائق الرسمية المعتمدة في عقل المنشأة (Business Brain) وقاعدة المعرفة (Knowledge Base) الواردة في السياق أدناه.\n"
@@ -3736,8 +3782,12 @@ class ConversationalAgentEngine:
 
         brand_voice = business.get("brand", {}).get("tone") or "helpful, professional, and clear"
 
+        tenant_obj = self.db.scalar(select(Tenant).where(Tenant.id == conversation.tenant_id))
+        emp_name = (getattr(tenant_obj, "employee_name", None) or "").strip()
+        role_declaration = f"You are {emp_name}, the autonomous Digital Employee representing '{company_name}'. Introduce yourself as {emp_name} when introducing yourself.\n" if emp_name else f"You are the autonomous Digital Employee representing '{company_name}'.\n"
+
         system_instruction = (
-            f"You are the autonomous Digital Employee representing '{company_name}'.\n"
+            f"{role_declaration}"
             f"Brand tone and personality: {brand_voice}.\n\n"
             "SECURITY & OPERATIONAL POLICIES (MANDATORY):\n"
             "1. You communicate directly with customers. Respond helpfully in their language.\n"

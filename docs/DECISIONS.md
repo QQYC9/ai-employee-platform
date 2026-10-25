@@ -266,3 +266,41 @@ This log records major design and implementation choices, including rationale an
   7. **Arabic Tags**: Profile tags displayed exclusively in clean Arabic (`ARABIC_TAG_LABELS`). Inferred tags are segregated from stated tags and omitted from topic planning unless confirmed.
   8. **Clean Greetings**: Eliminated greeting redundancy between link handler and Stage 1 Question 1.
 
+
+
+---
+
+## Decision 3.3: Phase 3.2 Tenant Onboarding, Cryptographic Link Codes, Employee Identity & Passwordless Activation
+- **Context**: The platform owner identified critical usability and security deficiencies in tenant onboarding and owner linking:
+  1. Creating a tenant in the admin UI pre-filled the same static email and password (`TemporaryPassword123!`), causing confusion and security risk.
+  2. The configured digital employee name (e.g. "سارة") was never used in conversations or system prompts.
+  3. No secure, single-use linking code mechanism existed; legacy setups relied on static plaintext config attributes without expiration, rate limiting, or audit events.
+  4. Linking flows lacked secure dashboard access: plaintext passwords in chat are unacceptable in enterprise environments.
+  5. Owner replies covering only part of a topic prematurely marked it answered without asking for missing details, and coverage evaluation required multiple round-trips.
+- **Decision**:
+  1. **Autofill Removal & Unique Generation**:
+     - Stripped browser autocomplete defaults (`autoComplete="off"`, `autoComplete="new-password"`) and removed hardcoded fallback passwords from dashboard client and backend.
+     - Optional password fields generate cryptographically secure passwords (`secrets.token_urlsafe(16)`).
+     - Enforced email uniqueness validation in `TenantProvisioningService`, rejecting duplicates with clear domain errors.
+  2. **Employee Name Personalization Across All Entry Points**:
+     - Stored `tenants.employee_name` in DB and propagated across all touchpoints:
+       - Chat welcome on linking: `"أنا {employee_name}، موظفتك الرقمية الذكية."`.
+       - Customer system prompt: `"You are {employee_name}, the autonomous Digital Employee..."`.
+       - Owner administrative prompt: `"أنت {employee_name} والمساعد الإداري..."`.
+       - Adaptive interview greeting: `"أنا {employee_name}، موظفتك الرقمية الذكية..."`.
+     - Supports live updates via `TenantService.update_current_tenant` and `PATCH /api/v1/tenants/me`.
+  3. **Cryptographic Link Code Lifecycle**:
+     - Dedicated table `tenant_link_codes` storing SHA-256 hashes of cryptographically random codes (`LINK-XXXX-XXXX`), scoped strictly to `tenant_id` and `channel_id`.
+     - Enforced single-use consumption (`is_used=True`, `used_at`, `used_by_sender_id`), short configurable expiry (default 24h), and brute-force protection (max 5 failed attempts locks code).
+     - Full audit trail recorded via `AuditService` (`link_code_generated`, `link_code_used`, `link_code_failed`, `link_code_revoked`, `link_code_rate_limited`).
+     - Regeneration API revokes existing active codes immediately.
+     - Neutral Arabic reply emitted for wrong, expired, or locked codes without leaking tenant status.
+  4. **Passwordless Dashboard Activation via Fingerprinted Tokens**:
+     - When an owner links via chat, the bot emits dashboard URL, owner login email, and a tokenized password setup link (`/set-password?token=...`). Plaintext passwords strictly prohibited from chat and logs.
+     - Token is signed with type `password_reset` and fingerprinted with `hash(user.password_hash)`.
+     - Resetting the password updates `user.password_hash`, which instantly invalidates the token, preventing reuse or replay attacks.
+  5. **Data Integrity & Unified LLM Coverage Call**:
+     - Introduced `status="partial"` with `coverage=0.5`. Topics with missing essential details remain open with follow-up prompts for missing specifics.
+     - Unified coverage evaluation and fact extraction into a single model call (`ReplyCoverageEvaluation` + `FactExtractionResponse`), reducing model roundtrips.
+     - Added exponential backoff retry loop (1s -> 2s -> 4s) on AI rate limit errors with polite delay notice on exhaustion.
+     - Automated live simulation reporting extracting actual database rows dynamically (`InterviewTopic.status`, `InterviewTopic.coverage`, and `Message.content` via `source_message_id`).

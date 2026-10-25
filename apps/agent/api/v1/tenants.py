@@ -29,10 +29,12 @@ class TenantResponse(BaseModel):
     name: str
     slug: str
     status: str
+    employee_name: str | None = None
 
 
 class TenantUpdateRequest(BaseModel):
     name: str | None = None
+    employee_name: str | None = None
 
 
 class BusinessBrainUpdateRequest(BaseModel):
@@ -250,6 +252,7 @@ def update_my_tenant(
             tenant = service.update_current_tenant(
                 tenant_id=current_user.tenant_id,
                 name=payload.name,
+                employee_name=payload.employee_name,
             )
             db.commit()
 

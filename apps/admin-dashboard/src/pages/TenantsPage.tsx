@@ -19,6 +19,7 @@ import {
   Bot,
   ListTodo,
   Activity,
+  CheckCircle2,
 } from 'lucide-react';
 import { TenantManagementHubModal } from '../components/tenants/TenantManagementHubModal';
 
@@ -59,6 +60,12 @@ export const TenantsPage: React.FC = () => {
 
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [createdLinkInfo, setCreatedLinkInfo] = useState<{
+    code: string;
+    tenantName: string;
+    expiresAt?: string;
+  } | null>(null);
+  const [copiedCode, setCopiedCode] = useState<boolean>(false);
 
   const fetchTenants = async () => {
     setIsLoading(true);
@@ -124,8 +131,9 @@ export const TenantsPage: React.FC = () => {
     setIsSubmitting(true);
     setActionError(null);
     try {
-      await adminApi.provisionTenant(provisionData);
+      const res = await adminApi.provisionTenant(provisionData);
       setIsProvisionOpen(false);
+      const savedTenantName = provisionData.tenant_name;
       setProvisionData({
         tenant_name: '',
         slug: '',
@@ -134,6 +142,13 @@ export const TenantsPage: React.FC = () => {
         owner_password: '',
         agent_name: '',
       });
+      if (res?.link_code) {
+        setCreatedLinkInfo({
+          code: res.link_code,
+          tenantName: res.tenant?.name || savedTenantName,
+          expiresAt: res.link_code_expires_at,
+        });
+      }
       await fetchTenants();
     } catch (err: any) {
       setActionError(err?.message || 'فشل إنشاء المستأجر الجديد');
@@ -520,6 +535,59 @@ export const TenantsPage: React.FC = () => {
         </div>
       </Modal>
 
+      {/* One-Time Link Code Modal (Phase 3.2 Problem C) */}
+      {createdLinkInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="relative w-full max-w-lg rounded-2xl border border-emerald-500/30 bg-slate-900 p-6 shadow-2xl shadow-emerald-950/50">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-400">
+                <CheckCircle2 className="h-6 w-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">تم إنشاء المنشأة بنجاح!</h3>
+                <p className="text-xs text-slate-400">كود ربط المالك الرسمي لمنشأة: {createdLinkInfo.tenantName}</p>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 mb-4">
+              <div className="text-[11px] text-slate-400 mb-2">
+                أرسل هذا الرمز لمالك المنشأة ليقوم بإرساله إلى بوت تيليجرام أو واتساب:
+              </div>
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-2.5">
+                <code className="text-sm font-mono font-bold text-emerald-300">
+                  /link {createdLinkInfo.code}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(`/link ${createdLinkInfo.code}`);
+                    setCopiedCode(true);
+                    setTimeout(() => setCopiedCode(false), 2000);
+                  }}
+                  className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-500 transition"
+                >
+                  {copiedCode ? 'تم النسخ!' : 'نسخ الأمر'}
+                </button>
+              </div>
+              <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
+                <span>⏱️ صلاحية الرمز: 24 ساعة</span>
+                <span>🔒 استخدام لمرة واحدة فقط</span>
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => setCreatedLinkInfo(null)}
+                className="rounded-lg bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700 transition"
+              >
+                إغلاق
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Provision New Tenant Modal */}
       <Modal
         isOpen={isProvisionOpen}
@@ -600,6 +668,7 @@ export const TenantsPage: React.FC = () => {
               <input
                 type="email"
                 required
+                autoComplete="off"
                 value={provisionData.owner_email}
                 onChange={(e) => setProvisionData({ ...provisionData, owner_email: e.target.value })}
                 placeholder="owner@alofoq.sa"
@@ -615,6 +684,7 @@ export const TenantsPage: React.FC = () => {
               </label>
               <input
                 type="password"
+                autoComplete="new-password"
                 value={provisionData.owner_password}
                 onChange={(e) => setProvisionData({ ...provisionData, owner_password: e.target.value })}
                 placeholder="•••••••• (اتركه لإنشاء كلمة قوية تلقائياً)"

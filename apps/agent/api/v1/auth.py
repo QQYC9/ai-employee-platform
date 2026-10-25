@@ -36,6 +36,10 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str = Field(min_length=1)
 
 
+class ResetPasswordWithTokenRequest(BaseModel):
+    token: str = Field(min_length=1)
+    new_password: str = Field(min_length=8)
+
 class SetPasswordRequest(BaseModel):
     password: str = Field(min_length=8)
 
@@ -262,6 +266,60 @@ def set_user_password(
         )
 
     current_user.password_hash = hash_password(payload.password)
+    db.commit()
+
+    return {"status": "ok", "message": "Password updated successfully"}
+
+
+@router.post("/reset-password-with-token")
+def reset_password_with_token(
+    payload: ResetPasswordWithTokenRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Sets or updates a user password using a single-use, short-lived signed token.
+    Used for dashboard access activation from bot invitation link without plaintext passwords.
+    """
+    import hashlib
+    try:
+        try:
+            claims = verify_token(payload.token, expected_type="password_reset")
+        except InvalidTokenError:
+            claims = verify_token(payload.token, expected_type="access")
+    except TokenExpiredError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password setup link has expired. Please request a new link.",
+        )
+    except (InvalidTokenError, TokenClaimsError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid password setup link: {str(exc)}",
+        )
+
+    sub = claims.get("sub")
+    if not sub:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token subject")
+
+    try:
+        user_id = UUID(sub)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user ID in token")
+
+    user = db.scalar(select(User).where(User.id == user_id, User.status == "active"))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found or inactive")
+
+    pwh_claim = claims.get("pwh")
+    if pwh_claim:
+        current_sig = hashlib.sha256((user.password_hash or "").encode()).hexdigest()[:16]
+        if pwh_claim != current_sig:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password setup link has already been used or is invalidated.",
+            )
+
+    user.password_hash = hash_password(payload.new_password)
     db.commit()
 
     return {"status": "ok", "message": "Password updated successfully"}

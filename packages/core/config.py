@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     rate_limit_login_per_minute: int = 10
     rate_limit_planning_per_minute: int = 30
 
+    # Frontend Dashboards
+    tenant_dashboard_url: str = "http://localhost:5173"
+    admin_dashboard_url: str = "http://localhost:5174"
+
     @property
     def effective_test_database_url(self) -> str:
         """

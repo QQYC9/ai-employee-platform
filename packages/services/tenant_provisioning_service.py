@@ -9,14 +9,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from packages.auth.security import hash_password
+import secrets
 from packages.models.domain import (
     ActionPolicy,
     Agent,
     AgentCapability,
     BusinessBrain,
     Capability,
+    Channel,
     User,
 )
+from packages.services.link_code_service import LinkCodeService
 from packages.models.tenant import Tenant
 
 ARABIC_CHAR_MAP: dict[str, str] = {
@@ -84,7 +87,8 @@ class TenantProvisioningRequest(BaseModel):
     slug: str | None = Field(default=None, max_length=100)
     owner_name: str = Field(min_length=1, max_length=255)
     owner_email: str = Field(min_length=3, max_length=320)
-    owner_password: str = Field(min_length=8)
+    owner_password: str | None = Field(default=None)
+    employee_name: str | None = Field(default=None, max_length=100)
     business_brain: BusinessBrainInput | None = None
     agent: InitialAgentInput | None = None
     default_action_policies: list[ActionPolicyInput] | None = None
@@ -98,6 +102,8 @@ class TenantProvisioningResponse(BaseModel):
     business_brain: dict[str, Any]
     assigned_capabilities: list[dict[str, Any]]
     action_policies: list[dict[str, Any]]
+    link_code: str | None = None
+    link_code_expires_at: str | None = None
 
 
 class TenantProvisioningService:
@@ -131,8 +137,12 @@ class TenantProvisioningService:
         if "@" not in clean_email or "." not in clean_email.split("@")[-1]:
             raise ValueError(f"Invalid email format: '{clean_email}'")
 
-        if len(request.owner_password) < 8:
-            raise ValueError("Owner password must be at least 8 characters")
+        if request.owner_password and request.owner_password.strip():
+            if len(request.owner_password.strip()) < 8:
+                raise ValueError("Owner password must be at least 8 characters")
+            raw_password = request.owner_password.strip()
+        else:
+            raw_password = secrets.token_urlsafe(16)
 
         # Uniqueness check for email
         existing_user = self.db.scalar(
@@ -199,17 +209,20 @@ class TenantProvisioningService:
         sp = self.db.begin_nested()
         try:
             # Step A: Create Tenant
+            agent_input = request.agent or InitialAgentInput()
+            emp_name = (request.employee_name or (agent_input.name if agent_input else None) or "").strip() or None
             tenant = Tenant(
                 name=clean_name,
                 slug=slug,
                 status="active",
                 interview_required=True,
+                employee_name=emp_name,
             )
             self.db.add(tenant)
             self.db.flush()
 
             # Step B: Create Tenant Owner User (hashed password, role='tenant_owner')
-            owner_pwd_hash = hash_password(request.owner_password)
+            owner_pwd_hash = hash_password(raw_password)
             owner = User(
                 tenant_id=tenant.id,
                 name=clean_owner_name,
@@ -381,6 +394,23 @@ class TenantProvisioningService:
                 "status": learning_wf.status,
             }
 
+            # Step G: Create Default Communication Channel & Single-Use Link Code
+            default_channel = Channel(
+                tenant_id=tenant.id,
+                name="Default Telegram Channel",
+                channel_type="telegram",
+                status="active",
+                config={},
+            )
+            self.db.add(default_channel)
+            self.db.flush()
+
+            link_svc = LinkCodeService(self.db)
+            raw_link_code, link_rec = link_svc.generate_link_code(
+                tenant_id=tenant.id,
+                channel_id=default_channel.id,
+            )
+
             # Commit savepoint and top-level transaction
             sp.commit()
             self.db.commit()
@@ -392,11 +422,15 @@ class TenantProvisioningService:
 
             return {
                 "status": "provisioned",
+                "link_code": raw_link_code,
+                "channel_id": str(default_channel.id),
+                "link_code_expires_at": link_rec.expires_at.isoformat(),
                 "tenant": {
                     "id": str(tenant.id),
                     "name": tenant.name,
                     "slug": tenant.slug,
                     "status": tenant.status,
+                    "employee_name": getattr(tenant, "employee_name", None),
                     "created_at": (
                         tenant.created_at.isoformat()
                         if tenant.created_at

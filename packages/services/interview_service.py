@@ -171,7 +171,16 @@ class InterviewService:
         state.last_interaction_at = datetime.now(timezone.utc)
         self.db.add(state)
         self.db.flush()
-        return CLASSIFICATION_QUESTIONS["classification_1"]
+
+        from packages.models.tenant import Tenant
+        tenant_obj = self.db.scalar(select(Tenant).where(Tenant.id == tenant_id))
+        emp_name = (getattr(tenant_obj, "employee_name", None) or "").strip()
+        intro = f"أنا {emp_name}، موظفتك الرقمية الذكية." if emp_name else "بصفتي موظفك الرقمي الذكي."
+        return (
+            f"مرحباً بك يا صاحب المنشأة! {intro} سأقوم بالتعرف على نشاطك لخدمة عملائك بدقة.\n\n"
+            "دعنا نبدأ بأربعة أسئلة سريعة:\n"
+            "1️⃣ ما هو اسمك الكريم؟ (الاسم الذي تحب أن أناديك به)"
+        )
 
     def resume_interview(self, tenant_id: UUID) -> str:
         """Resumes an interview in progress from where it stopped."""

@@ -218,6 +218,45 @@ This document outlines the phased plan to evolve the Digital Employee platform f
 
 ---
 
+## Phase 3.2: Tenant Onboarding, Owner Personalization, Secure Link Code & Dashboard Access
+- **Status**: done
+- **Objective**: Harden tenant creation and owner linking workflows: single-use hashed link codes, rate limiting, audit trail, dynamic employee name personalization, secure dashboard onboarding without plaintext passwords, and unified LLM coverage evaluation with partial state tracking.
+- **Verification**: Verified with 5 comprehensive tests in `tests/test_phase3_2_tenant_onboarding.py` (5/5 passed), 8 tests in `tests/test_link_code_security.py` (8/8 passed), 4 tests in `tests/test_phase3_1_addendum_x2_x4.py` (4/4 passed), 9 tests in `tests/test_phase3_1_review_fixes.py` (9/9 passed), and 9 tests in `tests/test_phase3_adaptive_interview.py` (9 passed, 1 skipped). Total 35 passing tests through the REAL router -> engine path. Frontend builds (`apps/admin-dashboard` and `apps/tenant-dashboard`) verified with 0 errors.
+
+### Work Items & Resolved Problems
+- **3.2.1 Problem A: Tenant Creation UI & API Hardening**:
+  - Removed misleading auto-fill in admin dashboard (`autoComplete="off"`, `autoComplete="new-password"`) and removed hardcoded default password (`TemporaryPassword123!`).
+  - Generates a strong random password (`secrets.token_urlsafe(16)`) if left empty.
+  - Enforced email uniqueness check in `TenantProvisioningService`, returning clear validation errors (`Email ... is already registered`).
+  - Automatically provisions default channel and returns a fresh single-use link code with copyable command modal in UI.
+- **3.2.2 Problem B: Employee Name Dynamic Personalization**:
+  - Persisted in `tenants.employee_name` and exposed via tenant update APIs (`TenantService.update_current_tenant` / `PATCH /api/v1/tenants/me`).
+  - Welcome greeting upon linking: `"أنا سارة، موظفتك الرقمية الذكية."`.
+  - Customer prompt: `"You are سارة, the autonomous Digital Employee..."`.
+  - Owner prompt: `"أنت سارة والمساعد الإداري لمالك منشأة..."`.
+  - Interview greeting: `"مرحباً بك يا صاحب المنشأة! أنا سارة، موظفتك الرقمية الذكية..."`.
+  - Verified instant propagation when `employee_name` is updated (e.g. from "سارة" to "نورة").
+- **3.2.3 Problem C & X1: Cryptographic Link Code Security & Regeneration**:
+  - Migration `b3c4d5e6f7a8_add_link_codes_and_employee_name.py` creating `tenant_link_codes` table with `tenant_id` foreign key, `code_hash` (SHA-256), `channel_id`, `attempts_count`, `max_attempts` (5), `expires_at` (24h default), `is_used`, and `is_revoked`.
+  - Scrubbed legacy plaintext `connection_code` from `channels.config`.
+  - Rate limiting: 5 consecutive invalid guesses lock the link code, emitting `link_code_rate_limited` audit event.
+  - APIs: `GET /api/v1/channels/{channel_id}/link-code` (status) and `POST /api/v1/channels/{channel_id}/link-code` (regeneration invalidating previous code).
+  - Linking via chat (`/link LINK-XXXX-XXXX`) elevates sender to `owner_identifiers`, records `used_at`, marks code used, and emits `link_code_used` audit event.
+  - Neutral Arabic error reply (`"تعذر إتمام عملية الربط. رمز الربط غير صحيح أو منتهي الصلاحية."`) emitted for wrong, expired, or locked codes without leaking tenant status.
+- **3.2.4 Problem D: Secure Dashboard Access Without Plaintext Passwords**:
+  - Employee bot sends dashboard URL, owner login email, and a single-use tokenized link (`/set-password?token=...`).
+  - Plaintext passwords strictly prohibited from chat, database logs, and audit entries.
+  - Password setup endpoint `POST /api/v1/auth/reset-password-with-token` verifies token type `password_reset` and validates single-use fingerprint `pwh` (SHA-256 signature of current password hash).
+  - Updating the password automatically invalidates the token, preventing replay attacks.
+- **3.2.5 Addendum X2-X4: Data Integrity, Partial Coverage & Unified LLM Call**:
+  - Implemented `status="partial"` with `coverage=0.5` in `TopicCoverageItem`. Keeps topic open and prompts for missing details.
+  - Unified coverage evaluation and fact extraction into a single model call (`ReplyCoverageEvaluation` + `FactExtractionResponse`).
+  - Added exponential backoff retry loop (1s -> 2s -> 4s) on `AIRateLimitError`, emitting neutral delay notice upon exhaustion.
+  - Capped open topics in LLM payload to prevent context window explosion.
+  - Updated simulations script to extract topic tables directly from live database state (`InterviewTopic.status`, `InterviewTopic.coverage`, and `Message.content` via `source_message_id`).
+
+---
+
 ## Phase 4: Simulated Customer Evaluation
 - **Status**: todo
 - **Objective**: Pre-deployment validation suite simulating 50 realistic customer queries against stored facts.

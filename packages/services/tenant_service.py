@@ -32,6 +32,7 @@ class TenantService:
         self,
         tenant_id: UUID,
         name: str | None = None,
+        employee_name: str | None = None,
     ) -> Tenant:
         """
         Update the current tenant.
@@ -51,6 +52,13 @@ class TenantService:
 
             tenant.name = name
 
+        if employee_name is not None:
+            clean_emp = employee_name.strip()
+            tenant.employee_name = clean_emp or None
+
         self.db.flush()
 
         return tenant
+
+    # Alias for convenience
+    update_tenant = update_current_tenant

@@ -93,12 +93,15 @@ export const adminApi = {
       name: data.tenant_name,
       owner_name: data.owner_name,
       owner_email: data.owner_email,
-      owner_password: data.owner_password || 'TemporaryPassword123!',
     };
+    if (data.owner_password?.trim()) {
+      payload.owner_password = data.owner_password.trim();
+    }
     if (data.slug?.trim()) {
       payload.slug = data.slug.trim();
     }
     if (data.agent_name?.trim()) {
+      payload.employee_name = data.agent_name.trim();
       payload.agent = {
         name: data.agent_name.trim(),
         agent_type: 'main',

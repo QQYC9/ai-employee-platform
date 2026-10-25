@@ -5,7 +5,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+from packages.services.link_code_service import LinkCodeService
 
 from packages.auth.dependencies import get_current_user, get_db
 from packages.models.domain import Channel, User
@@ -221,3 +223,59 @@ def send_channel_message(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/{channel_id}/link-code")
+def generate_channel_link_code(
+    channel_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Generates a new single-use link code for this channel (revoking previous active ones)."""
+    channel = db.scalar(
+        select(Channel).where(
+            Channel.id == channel_id,
+            Channel.tenant_id == current_user.tenant_id,
+        )
+    )
+    if not channel:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
+
+    link_svc = LinkCodeService(db)
+    raw_code, link_rec = link_svc.generate_link_code(
+        tenant_id=current_user.tenant_id,
+        channel_id=channel.id,
+        created_by_user_id=current_user.id,
+    )
+    db.commit()
+
+    return {
+        "status": "success",
+        "link_code": raw_code,
+        "expires_at": link_rec.expires_at.isoformat(),
+        "instructions": f"أرسل هذا الرمز إلى البوت في تيليجرام أو واتساب لتأكيد الملكية: /link {raw_code}",
+    }
+
+
+@router.get("/{channel_id}/link-code")
+def get_channel_link_code_status(
+    channel_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Retrieves active link code status for this channel."""
+    channel = db.scalar(
+        select(Channel).where(
+            Channel.id == channel_id,
+            Channel.tenant_id == current_user.tenant_id,
+        )
+    )
+    if not channel:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
+
+    link_svc = LinkCodeService(db)
+    status_info = link_svc.get_active_code_status(
+        tenant_id=current_user.tenant_id,
+        channel_id=channel.id,
+    )
+    return status_info
