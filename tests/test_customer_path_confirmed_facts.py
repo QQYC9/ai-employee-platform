@@ -92,7 +92,7 @@ def test_setup(db: Session):
         identity={"name": "المنذر للتقنية", "legal_name": "المنذر للتقنية"},
         products={
             "سيرو": {"description": "برنامج لإدارة الشبكات والتحكم الكامل"},
-            "الموظف الذكي": {"description": "برنامج للموظف الذكي"},
+            "الموظف الذكي": {"name": "الموظف الذكي"},
             "ناظم المحاسبي": {"description": "برنامج لإدارة المحاسبة"},
         },
         services={},
@@ -124,7 +124,7 @@ def test_setup(db: Session):
             tenant_id=tenant_id,
             subject="الموظف الذكي",
             topic="product.الموظف_الذكي",
-            value={"description": "برنامج للموظف الذكي"},
+            value={"name": "الموظف الذكي"},
             status="confirmed",
             visibility="public",
             source="owner",
@@ -206,10 +206,10 @@ def test_customer_products_question_answers_naturally(db: Session, test_setup: d
 
     # Natural model reply describing confirmed products
     natural_reply = (
-        "مرحبًا بك! نحن في المنذر للتقنية نقدم المنتجات التالية:\n"
-        "1. الموظف الذكي: برنامج يُسهل تنظيم أعمال الموظفين.\n"
-        "2. برنامج سيرو لإدارة الشبكات والتحكم الكامل بها: حل شامل لإدارة الشبكات.\n"
-        "3. برنامج ناظم المحاسبي: برنامج متكامل لإدارة المحاسبة وإصدار الفواتير.\n"
+        "مرحبًا بك! نحن في المنذر تكنولوجي نقدم المنتجات التالية:\n"
+        "1. الموظف الذكي\n"
+        "2. برنامج سيرو لإدارة الشبكات والتحكم الكامل بها: برنامج لإدارة الشبكات والتحكم الكامل\n"
+        "3. برنامج ناظم المحاسبي: برنامج لإدارة المحاسبة\n"
         "هل ترغب في معرفة تفاصيل إضافية؟"
     )
     mock_ai = NaturalMockAIProvider(reply=natural_reply)
@@ -548,3 +548,135 @@ def test_customer_verified_latin_product_name_allowed(db: Session, test_setup: d
     reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
     assert reply_msg.metadata_json.get("guardrail_blocked") is not True
 
+
+
+def test_precedence_confirmed_facts_win_over_business_brain(db: Session, test_setup: dict):
+    """
+    Phase 2.11 Item 1:
+    Precedence: when confirmed facts exist, they win over business_brain.
+    In the customer and owner prompts, remove or neutralize conflicting business_brain identity/products.
+    Brain has 'المنذر للتقنية', facts have confirmed 'المنذر تكنولوجي' -> both prompt and reply use 'المنذر تكنولوجي'.
+    """
+    tenant_id = test_setup["tenant_id"]
+    channel_id = test_setup["channel_id"]
+    non_owner_id = "967779999014"
+
+    # Confirmed fact in test_setup is "المنذر تكنولوجي", while BusinessBrain has "المنذر للتقنية"
+    mock_ai = NaturalMockAIProvider(reply="مرحبًا بك! نحن في المنذر تكنولوجي نقدم منتجات تقنية متميزة.")
+    engine = ConversationalAgentEngine(db=db, ai_provider=mock_ai)
+
+    inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "من أنتم؟")
+    res = engine.process_incoming_message(tenant_id, inbound_msg.id)
+    assert res.success is True
+
+    # 1. Verify prompt uses confirmed fact and does not contain obsolete business_brain identity
+    assert "المنذر تكنولوجي" in mock_ai.last_system_instruction
+    assert "المنذر للتقنية" not in mock_ai.last_system_instruction
+    assert "المنذر للتقنية" not in mock_ai.last_prompt
+
+    # 2. Verify reply uses the confirmed company name
+    assert "المنذر تكنولوجي" in res.reply_content
+    assert "المنذر للتقنية" not in res.reply_content
+
+    # 3. Verify owner guidance prompt also gives precedence to confirmed fact
+    owner_id = "967770000001"
+    owner_msg = _replay_inbound_message(db, tenant_id, channel_id, owner_id, "ايش اسم شركتنا؟")
+    res_owner = engine.process_incoming_message(tenant_id, owner_msg.id)
+    assert res_owner.success is True
+    assert "المنذر تكنولوجي" in mock_ai.last_system_instruction
+    assert "المنذر للتقنية" not in mock_ai.last_system_instruction
+    assert "المنذر للتقنية" not in mock_ai.last_prompt
+
+
+def test_anti_embellishment_blocks_embellished_raw_reply_and_replaces_with_safe_facts(db: Session, test_setup: dict):
+    """
+    Phase 2.11 Item 2:
+    The live reply to 'ما هي منتجاتكم؟' described the products with unrecorded capabilities
+    (أدوات ذكية لإدارة المهام اليومية، مراقبة الأداء وإدارة الأجهزة بسهولة، الفواتير والتقارير المالية).
+    Test with that exact raw reply: it must be blocked and replaced with a safe reply built from stored facts only.
+    A reply that only names the products with their stored text verbatim must pass.
+    """
+    tenant_id = test_setup["tenant_id"]
+    channel_id = test_setup["channel_id"]
+    non_owner_id = "967779999015"
+
+    # Exact embellished reply pattern observed in live Groq/gpt-oss-120b test
+    raw_embellished_reply = (
+        "نحن في المنذر تكنولوجي نقدم المنتجات التالية:\n"
+        "1. الموظف الذكي: أدوات ذكية لإدارة المهام اليومية وزيادة الإنتاجية.\n"
+        "2. برنامج سيرو: مراقبة الأداء وإدارة الأجهزة بسهولة والتحكم بالشبكات.\n"
+        "3. برنامج ناظم: الفواتير والتقارير المالية وإدارة المحاسبة."
+    )
+    mock_ai = NaturalMockAIProvider(reply=raw_embellished_reply)
+    engine = ConversationalAgentEngine(db=db, ai_provider=mock_ai)
+
+    inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "ما هي منتجاتكم؟")
+    res = engine.process_incoming_message(tenant_id, inbound_msg.id)
+    assert res.success is True
+
+    # Embellished reply must be blocked
+    reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
+    assert reply_msg.metadata_json.get("guardrail_blocked") is True
+    assert "Unsupported capability/benefit embellishment" in reply_msg.metadata_json.get("guardrail_reason", "")
+
+    # Must be replaced with safe reply built strictly from stored facts
+    safe_reply = res.reply_content
+    assert "المنذر تكنولوجي" in safe_reply
+    assert "الموظف الذكي" in safe_reply
+    # Verified stored fact texts must be present verbatim
+    assert "برنامج سيرو لإدارة الشبكات والتحكم الكامل بها" in safe_reply
+    assert "برنامج ناظم المحاسبي" in safe_reply
+    # Invented capability claims must NOT be present
+    assert "أدوات ذكية" not in safe_reply
+    assert "إدارة المهام" not in safe_reply
+    assert "مراقبة الأداء" not in safe_reply
+    assert "إدارة الأجهزة" not in safe_reply
+    assert "الفواتير والتقارير" not in safe_reply
+    assert "الإنتاجية" not in safe_reply
+
+    # Now verify that a reply only naming products with their stored text passes without blocking
+    verbatim_safe_reply = (
+        "مرحبًا بك! نحن في المنذر تكنولوجي نقدم المنتجات التالية:\n"
+        "1. الموظف الذكي\n"
+        "2. برنامج سيرو لإدارة الشبكات والتحكم الكامل بها: برنامج لإدارة الشبكات والتحكم الكامل\n"
+        "3. برنامج ناظم المحاسبي: برنامج لإدارة المحاسبة\n"
+        "هل ترغب في معرفة تفاصيل إضافية؟"
+    )
+    mock_ai_clean = NaturalMockAIProvider(reply=verbatim_safe_reply)
+    engine_clean = ConversationalAgentEngine(db=db, ai_provider=mock_ai_clean)
+
+    inbound_msg_clean = _replay_inbound_message(db, tenant_id, channel_id, "967779999016", "ما هي منتجاتكم؟")
+    res_clean = engine_clean.process_incoming_message(tenant_id, inbound_msg_clean.id)
+    assert res_clean.success is True
+    assert res_clean.reply_content == verbatim_safe_reply
+
+    clean_reply_msg = db.scalar(select(Message).where(Message.id == res_clean.reply_message_id))
+    assert clean_reply_msg.metadata_json.get("guardrail_blocked") is not True
+
+
+def test_extraction_product_names_verbatim_and_no_invented_descriptions(db: Session, test_setup: dict):
+    """
+    Phase 2.11 Item 3:
+    Fix extraction so product names stay verbatim ('الموظف الذكي' must not become 'برنامج للموظف الذكي'),
+    and stop storing invented descriptions for products where the owner gave none.
+    """
+    tenant_id = test_setup["tenant_id"]
+    from packages.services.fact_service import FactService
+    fact_svc = FactService(db)
+
+    owner_text = "نحن شركة المنذر تكنولوجي، نبيع الموظف الذكي وبرنامج سيرو وبرنامج ناظم المحاسبي."
+    extracted = fact_svc.extract_facts(tenant_id, owner_text)
+    assert len(extracted.facts) >= 1
+
+    smart_emp_facts = [f for f in extracted.facts if "الموظف الذكي" in f.subject or "smart_employee" in f.topic]
+    assert len(smart_emp_facts) == 1
+    sef = smart_emp_facts[0]
+
+    # Subject must be verbatim "الموظف الذكي"
+    assert sef.subject == "الموظف الذكي"
+    assert sef.subject != "برنامج للموظف الذكي"
+    if isinstance(sef.value, dict):
+        assert sef.value.get("name") == "الموظف الذكي"
+        # Must not store invented descriptions when none given by owner
+        assert not sef.value.get("description")
+        assert not sef.value.get("details")

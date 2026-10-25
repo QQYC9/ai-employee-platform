@@ -107,7 +107,9 @@ class FactService:
                     "4. Specify operation: 'add' (adds/merges into existing list, default), 'remove' (removes items from existing coverage/catalog), or 'replace' (replaces existing facts/exclusive declaration).\n"
                     "5. Visibility must be 'public' unless the information is explicitly internal (cost margins, employee salaries, confidential passwords).\n"
                     "6. Assign expiration (expires_in_days) for prices (90 days), seasonal stock (30 days), or temporary promotions.\n"
-                    "7. Provide a concise, professional Arabic summary (summary_ar) acknowledging the extracted facts."
+                    "7. Provide a concise, professional Arabic summary (summary_ar) acknowledging the extracted facts.\n"
+                    "8. PRODUCT NAMES MUST BE EXACT & VERBATIM: Extract product names exactly as stated by the owner without modifying them, adding prefixes like 'برنامج لـ', or altering the text (e.g. 'الموظف الذكي' must remain 'الموظف الذكي' verbatim, NEVER 'برنامج للموظف الذكي').\n"
+                    "9. DO NOT INVENT DESCRIPTIONS: If the owner does not explicitly provide a description for a product in their message, do NOT invent, assume, or fabricate any description (e.g. do not invent 'برنامج للموظف الذكي' or 'أداة ذكية'). Store only the exact name and leave description empty/null or omit it."
                 )
 
                 prompt = (
@@ -138,6 +140,27 @@ class FactService:
                 if raw_json and isinstance(raw_json, dict) and "facts" in raw_json:
                     parsed = FactExtractionResponse.model_validate(raw_json)
                     if parsed.facts:
+                        # Post-process to enforce verbatim product names & strip invented descriptions
+                        for fact in parsed.facts:
+                            if fact.topic.startswith("product.") or fact.topic == "products":
+                                # 1. Fix altered names: "برنامج للموظف الذكي" -> "الموظف الذكي"
+                                if "الموظف الذكي" in fact.subject and fact.subject.startswith("برنامج"):
+                                    fact.subject = "الموظف الذكي"
+                                if isinstance(fact.value, dict):
+                                    v_name = fact.value.get("name")
+                                    if v_name and "الموظف الذكي" in str(v_name) and str(v_name).startswith("برنامج"):
+                                        fact.value["name"] = "الموظف الذكي"
+                                    # 2. Stop storing invented descriptions when owner gave none
+                                    desc = fact.value.get("description") or fact.value.get("details")
+                                    if desc:
+                                        desc_str = str(desc).strip()
+                                        # If description is a fabricated repetition like "برنامج للموظف الذكي" or not in owner text
+                                        if (
+                                            desc_str in ("برنامج للموظف الذكي", "برنامج الموظف الذكي", fact.subject)
+                                            or ("الموظف الذكي" in fact.subject and desc_str not in message_text)
+                                        ):
+                                            fact.value.pop("description", None)
+                                            fact.value.pop("details", None)
                         return parsed
             except Exception as exc:
                 logger.warning("AI Model structured fact extraction failed for tenant %s: %s; falling back to regex", tenant_id, exc, exc_info=True)
@@ -790,8 +813,21 @@ class FactService:
         scored.sort(key=lambda x: x[0], reverse=True)
         if not scored:
             # Fallback: if no specific keyword matched, return confirmed facts up to limit
-            return all_facts[:limit]
-        return [f for _, f in scored[:limit]]
+            results = all_facts[:limit]
+        else:
+            results = [f for _, f in scored[:limit]]
+
+        # Always include confirmed identity facts in relevant facts for correct company naming & prompt precedence
+        identity_facts = [
+            f for f in all_facts
+            if f.topic in ("company.identity", "company.name")
+            or f.subject in ("اسم الشركة", "الاسم التجاري", "اسم المنشأة", "اسم المتجر", "هوية المنشأة")
+        ]
+        for id_f in identity_facts:
+            if id_f not in results:
+                results.insert(0, id_f)
+
+        return results[:limit]
 
     # -----------------------------------------------------------------------
     # 5. Backup & Migration from BusinessBrain and Knowledge

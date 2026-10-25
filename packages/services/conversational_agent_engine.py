@@ -648,6 +648,13 @@ class ConversationalAgentEngine:
             msg_meta["handoff"] = True
             msg_meta["handoff_question"] = message.content or ""
 
+            # Safe fallback: If unsupported embellishment of products, build safe reply from stored facts only
+            if violation_reason and "Unsupported capability/benefit embellishment" in violation_reason:
+                comp_name = agent_context.business.get("identity", {}).get("name") if agent_context.business else "منشأتنا"
+                reply_text = self._build_safe_products_reply(tenant_id=tenant_id, company_name=comp_name)
+            else:
+                reply_text = DEFAULT_HANDOFF_REPLY
+
             # Log handoff in queryable audit_events table for tenant owner
             self.audit_service.record_event(
                 tenant_id=tenant_id,
@@ -660,8 +667,8 @@ class ConversationalAgentEngine:
                     "customer_id": str(customer_id) if customer_id else None,
                     "question": message.content or "",
                     "violation_reason": violation_reason,
-                    "original_blocked_reply": reply_text,
-                    "handoff_reply": DEFAULT_HANDOFF_REPLY,
+                    "original_blocked_reply": msg_meta["original_blocked_reply"],
+                    "handoff_reply": reply_text,
                 },
             )
             self.audit_service.record_event(
@@ -696,8 +703,6 @@ class ConversationalAgentEngine:
                     )
                 except Exception:
                     pass
-
-            reply_text = DEFAULT_HANDOFF_REPLY
 
         # 9. Persist Agent Reply in Conversation
         return self._persist_and_return_reply(
@@ -1944,12 +1949,58 @@ class ConversationalAgentEngine:
                 s_label = "Owner" if h_msg.sender_type in ("user", "owner") else "Assistant"
                 owner_history_dialogue.append({"sender": s_label, "content": h_msg.content.strip()})
 
-            biz = owner_context.business or {}
-            company_name = (
-                biz.get("identity", {}).get("name")
-                or biz.get("identity", {}).get("company_name")
-                or "منشأتنا"
+            # Phase 2 Facts Store: Inject verified facts (including private facts for owner) FIRST (Precedence)
+            facts_lines: list[str] = []
+            owner_facts = []
+            try:
+                from packages.services.fact_service import FactService
+                fact_svc = FactService(self.db)
+                owner_facts = fact_svc.get_relevant_facts(
+                    tenant_id=tenant_id,
+                    query=content,
+                    include_private=True,
+                    limit=35,
+                )
+                for f in owner_facts:
+                    v_str = json.dumps(f.value, ensure_ascii=False)
+                    facts_lines.append(f"- [{f.subject}] ({f.topic}, visibility={f.visibility}): {v_str}")
+            except Exception as exc:
+                logger.error("Error retrieving relevant facts for owner prompt tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
+
+            biz = dict(owner_context.business or {})
+
+            # Precedence: Confirmed identity facts win over business_brain
+            confirmed_owner_company_name = None
+            for f in owner_facts:
+                if f.topic in ("company.identity", "company.name") or f.subject in ("اسم الشركة", "الاسم التجاري", "اسم المنشأة", "اسم المتجر", "هوية المنشأة"):
+                    if isinstance(f.value, dict):
+                        confirmed_owner_company_name = f.value.get("name") or f.value.get("identity")
+                    elif isinstance(f.value, str):
+                        confirmed_owner_company_name = f.value.strip('"')
+                    if confirmed_owner_company_name:
+                        break
+
+            if confirmed_owner_company_name:
+                company_name = confirmed_owner_company_name
+                biz["identity"] = {"name": company_name, "legal_name": company_name}
+                if owner_context.business is not None:
+                    owner_context.business["identity"] = {"name": company_name, "legal_name": company_name}
+            else:
+                company_name = (
+                    biz.get("identity", {}).get("name")
+                    or biz.get("identity", {}).get("company_name")
+                    or "منشأتنا"
+                )
+
+            # Precedence: Confirmed product facts win over business_brain products
+            has_confirmed_products = any(
+                f.topic.startswith("product.") or f.topic == "products"
+                for f in owner_facts
             )
+            if has_confirmed_products:
+                biz.pop("products", None)
+                if owner_context.business is not None:
+                    owner_context.business.pop("products", None)
 
             biz_sections: list[str] = []
             for k in ("identity", "products", "services", "pricing", "operations", "policies", "brand"):
@@ -1975,23 +2026,6 @@ class ConversationalAgentEngine:
                 "يُحظر عليك تماماً اختراع أو افتراض وصفه أو وظيفته أو ربطه بأنظمة أخرى. يجب أن تصرح بوضوح بأن هذه المعلومة غير مسجلة في قاعدة بيانات المنشأة، واعرض عليه تزويدك بتفاصيلها لحفظها وتوثيقها فوراً.\n"
                 "3. أجب باحترافية وإيجاز وموضوعية تامة باللغة العربية."
             )
-
-            # Phase 2 Facts Store: Inject verified facts (including private facts for owner)
-            facts_lines: list[str] = []
-            try:
-                from packages.services.fact_service import FactService
-                fact_svc = FactService(self.db)
-                owner_facts = fact_svc.get_relevant_facts(
-                    tenant_id=tenant_id,
-                    query=content,
-                    include_private=True,
-                    limit=30,
-                )
-                for f in owner_facts:
-                    v_str = json.dumps(f.value, ensure_ascii=False)
-                    facts_lines.append(f"- [{f.subject}] ({f.topic}, visibility={f.visibility}): {v_str}")
-            except Exception as exc:
-                logger.error("Error retrieving relevant facts for owner prompt tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
 
             owner_prompt_parts: list[str] = []
             if facts_lines:
@@ -2681,19 +2715,20 @@ class ConversationalAgentEngine:
             extracted_prods["nazim_accounting"] = {
                 "name": "برنامج ناظم المحاسبي",
                 "title": "برنامج ناظم المحاسبي",
-                "description": "نظام محاسبي وإدارة مالية متكامل للشركات",
             }
+            if "محاسب" in text:
+                extracted_prods["nazim_accounting"]["description"] = "برنامج لإدارة المحاسبة"
         if "سيرو" in text:
             extracted_prods["ciro_networks"] = {
                 "name": "برنامج سيرو لادارة الشبكات",
                 "title": "برنامج سيرو لادارة الشبكات",
-                "description": "نظام لإدارة الشبكات والاتصالات",
             }
+            if "شبكات" in text:
+                extracted_prods["ciro_networks"]["description"] = "برنامج لإدارة الشبكات والتحكم الكامل بها"
         if re.search(r"الموظف\s*الذكي|موظف\s*ذكي|موظف(?:ين|ون)?\s*رقمي(?:ين|ون)?", text):
             extracted_prods["smart_employee"] = {
                 "name": "الموظف الذكي",
                 "title": "الموظف الذكي",
-                "description": "وكيل ذكاء اصطناعي رقمي لأتمتة العمليات وخدمة العملاء",
             }
 
         for m in re.finditer(r"(?:برنامج|نظام|تطبيق)\s+([a-zA-Z0-9_\u0621-\u064A]+)(?:\s+(?:المحاسبي|لإدارة\s*الشبكات|لإدارة\s*المخزون|[a-zA-Z0-9_\u0621-\u064A]+))?", text):
@@ -3400,7 +3435,87 @@ class ConversationalAgentEngine:
                 if l_tok.lower() not in corpus_latin_words:
                     return False, f"Stray English/Latin word '{l_tok}' detected in Arabic customer reply"
 
+        # 12. Anti-embellishment & Capability/Benefit Check (Phase 2.11)
+        # Any capability/benefit phrase not present in that product's facts or knowledge
+        # (e.g. إدارة المهام، مراقبة، الفواتير، التقارير، الإنتاجية، الأجهزة) is unsupported
+        embellishment_patterns = [
+            r"إدارة\s*(?:المهام|الأجهزة)",
+            r"المهام\s*اليومية",
+            r"مراقبة\s*(?:الأداء|الأجهزة)?",
+            r"الفواتير\s*والتقارير",
+            r"التقارير\s*المالية",
+            r"زيادة\s*الإنتاجية",
+            r"أدوات\s*ذكية",
+            r"حلول\s*ذكية",
+            r"\bمراقبة\b",
+            r"\bالفواتير\b",
+            r"\bالتقارير\b",
+            r"\bالإنتاجية\b",
+            r"\bالأجهزة\b",
+        ]
+        for e_pat in embellishment_patterns:
+            m_emb = re.search(e_pat, reply_text)
+            if m_emb and not is_negated(m_emb, reply_text):
+                clean_emb = m_emb.group(0).strip()
+                if clean_emb.lower() not in corpus_text:
+                    return False, f"Unsupported capability/benefit embellishment detected in product reply: '{clean_emb}'"
+
         return True, None
+
+    def _build_safe_products_reply(self, tenant_id: UUID, company_name: str | None = None) -> str:
+        """
+        Builds a safe, deterministic product catalog reply derived exclusively
+        from confirmed facts, strictly using verbatim names and descriptions without embellishment.
+        Enforces precedence of confirmed facts over business_brain.
+        """
+        try:
+            from packages.services.fact_service import FactService
+            fact_svc = FactService(self.db)
+            all_facts = fact_svc.get_relevant_facts(tenant_id, include_private=False, limit=50)
+
+            # Identity precedence: confirmed fact wins over business_brain
+            confirmed_name = None
+            for f in all_facts:
+                if f.topic in ("company.identity", "company.name") or f.subject in ("اسم الشركة", "الاسم التجاري", "اسم المنشأة", "اسم المتجر", "هوية المنشأة"):
+                    if isinstance(f.value, dict):
+                        confirmed_name = f.value.get("name") or f.value.get("identity")
+                    elif isinstance(f.value, str):
+                        confirmed_name = f.value.strip('"')
+                    if confirmed_name:
+                        break
+            effective_company = confirmed_name or company_name or "منشأتنا"
+
+            product_facts = [
+                f for f in all_facts
+                if f.topic.startswith("product.") or f.topic == "products"
+            ]
+        except Exception:
+            product_facts = []
+            effective_company = company_name or "منشأتنا"
+
+        if not product_facts:
+            return f"مرحبًا بك! نحن في {effective_company} لم يتم تسجيل منتجات معتمدة حتى الآن."
+
+        lines = [f"مرحبًا بك! نحن في {effective_company} نقدم المنتجات التالية:"]
+        for idx, f in enumerate(product_facts, start=1):
+            name = f.subject.strip()
+            desc = ""
+            if isinstance(f.value, dict):
+                desc = (f.value.get("description") or f.value.get("details") or "").strip()
+            elif isinstance(f.value, str) and f.value.strip() != name:
+                desc = f.value.strip()
+
+            # Clean fabricated descriptions like "برنامج للموظف الذكي"
+            if desc in ("برنامج للموظف الذكي", "برنامج الموظف الذكي", name):
+                desc = ""
+
+            if desc:
+                lines.append(f"{idx}. {name}: {desc}")
+            else:
+                lines.append(f"{idx}. {name}")
+
+        lines.append("هل ترغب في معرفة تفاصيل إضافية حول أي من هذه المنتجات؟")
+        return "\n".join(lines)
 
     def _construct_prompt(
         self,
@@ -3412,13 +3527,64 @@ class ConversationalAgentEngine:
         """
         Build system instruction and user prompt with clear separation between
         system rules and untrusted data (customer input, memories, knowledge).
+        Enforces precedence of confirmed facts over business_brain.
         """
-        business = agent_context.business or {}
-        company_name = (
-            business.get("identity", {}).get("name")
-            or business.get("identity", {}).get("company_name")
-            or "Our Company"
+        # Retrieve relevant confirmed public facts from Phase 2 Facts Store FIRST (Precedence: Facts Win)
+        facts_lines: list[str] = []
+        confirmed_facts = []
+        try:
+            from packages.services.fact_service import FactService
+            fact_svc = FactService(self.db)
+            customer_query = incoming_message.content if incoming_message else None
+            confirmed_facts = fact_svc.get_relevant_facts(
+                tenant_id=conversation.tenant_id,
+                query=customer_query,
+                include_private=False,
+                limit=35,
+            )
+            for f in confirmed_facts:
+                val_str = json.dumps(f.value, ensure_ascii=False)
+                facts_lines.append(f"- [{f.subject}] ({f.topic}): {val_str}")
+        except Exception as exc:
+            logger.debug("Failed to retrieve from Facts Store: %s", exc)
+
+        business = dict(agent_context.business or {})
+
+        # 1. Identity Precedence: Confirmed identity fact wins over business_brain
+        confirmed_company_name = None
+        for f in confirmed_facts:
+            if f.topic in ("company.identity", "company.name") or f.subject in ("اسم الشركة", "الاسم التجاري", "اسم المنشأة", "اسم المتجر", "هوية المنشأة"):
+                if isinstance(f.value, dict):
+                    confirmed_company_name = f.value.get("name") or f.value.get("identity")
+                elif isinstance(f.value, str):
+                    confirmed_company_name = f.value.strip('"')
+                if confirmed_company_name:
+                    break
+
+        if confirmed_company_name:
+            company_name = confirmed_company_name
+            # Sync / neutralize business_brain identity
+            business["identity"] = {"name": company_name, "legal_name": company_name}
+            if agent_context.business is not None:
+                agent_context.business["identity"] = {"name": company_name, "legal_name": company_name}
+        else:
+            company_name = (
+                business.get("identity", {}).get("name")
+                or business.get("identity", {}).get("company_name")
+                or "Our Company"
+            )
+
+        # 2. Products Precedence: Confirmed product facts win over business_brain products
+        has_confirmed_products = any(
+            f.topic.startswith("product.") or f.topic == "products"
+            for f in confirmed_facts
         )
+        if has_confirmed_products:
+            # Remove conflicting products from business_brain sections so only Ground Truth facts are used
+            business.pop("products", None)
+            if agent_context.business is not None:
+                agent_context.business.pop("products", None)
+
         brand_voice = business.get("brand", {}).get("tone") or "helpful, professional, and clear"
 
         system_instruction = (
@@ -3441,7 +3607,8 @@ class ConversationalAgentEngine:
             "If a customer inquires about or requests any of these, clearly state in Arabic that you do not support this directly and use the approved handoff sentence: 'هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك.'\n"
             "8. NO FALSE PROMISES OR FORWARDING CLAIMS (CRITICAL): While the owner inquiry loop does not exist yet, you must NEVER say, imply, or promise that you have forwarded or will forward the request to a team (NEVER say 'سأنقل طلبك', 'سأقوم بتحويل طلبك', 'سيتواصل معك فريق', 'سيرد عليك أحد', or 'سنعود إليك بأسرع وقت'). If any requested information is missing from the verified facts, state that it is not recorded yet and use ONLY the single approved handoff sentence: 'هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك.' and nothing else.\n"
             "9. DO NOT OFFER UNRECORDED TOPICS: The reply must NEVER suggest or invite questions on unrecorded topics or features (such as 'مميزات البرنامج', 'المتطلبات التقنية', 'الخصائص التقنية', 'طرق الترخيص', 'طريقة الاستخدام', or 'الدعم الفني'). The only allowed follow-up invitation is asking the customer which of the stored products, services, or cities they are interested in.\n"
-            "10. STRICT ARABIC LANGUAGE REQUIREMENT: Your entire reply must be in Arabic with zero stray English words or Latin letters (do not use English customer names like 'Customer Replay', English headings, or English phrases). Only officially verified product names that are registered in Latin characters in the verified context are permitted."
+            "10. STRICT ARABIC LANGUAGE REQUIREMENT: Your entire reply must be in Arabic with zero stray English words or Latin letters (do not use English customer names like 'Customer Replay', English headings, or English phrases). Only officially verified product names that are registered in Latin characters in the verified context are permitted.\n"
+            "11. STRICT PRODUCT VERBATIM POLICY (NO EMBELLISHMENT): When listing, naming, or describing any product or service, you must describe each product ONLY using its exact stored fact text verbatim. You must NOT add, infer, or embellish any features, benefits, capabilities, or use-cases (for example, NEVER add 'أدوات ذكية', 'إدارة المهام اليومية', 'مراقبة الأداء', 'إدارة الأجهزة', 'الفواتير والتقارير المالية', 'زيادة الإنتاجية', or any other unrecorded descriptions). If a product has no description in the stored facts, state ONLY its name verbatim and add no description whatsoever."
         )
 
         # Assemble business facts - injecting all populated sections including operations, branches, hours (Item 0.3)
@@ -3481,24 +3648,6 @@ class ConversationalAgentEngine:
                 customer_info = f"Customer Profile: Name: {c_name}, Type: {c.get('customer_type')}"
             else:
                 customer_info = f"Customer Profile: Type: {c.get('customer_type')}"
-
-        # Retrieve relevant confirmed public facts from Phase 2 Facts Store (Requirement 6)
-        facts_lines: list[str] = []
-        try:
-            from packages.services.fact_service import FactService
-            fact_svc = FactService(self.db)
-            customer_query = incoming_message.content if incoming_message else None
-            facts_list = fact_svc.get_relevant_facts(
-                tenant_id=conversation.tenant_id,
-                query=customer_query,
-                include_private=False,
-                limit=25,
-            )
-            for f in facts_list:
-                val_str = json.dumps(f.value, ensure_ascii=False)
-                facts_lines.append(f"- [{f.subject}] ({f.topic}): {val_str}")
-        except Exception as exc:
-            logger.debug("Failed to retrieve from Facts Store: %s", exc)
 
         prompt_parts: list[str] = []
         if facts_lines:

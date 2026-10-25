@@ -124,13 +124,15 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - Logged every customer handoff event with `tenant_id`, `conversation_id`, and `question` into the queryable `audit_events` table for tenant owner visibility.
   - Verified with 9 comprehensive tests in `tests/test_customer_path_confirmed_facts.py` (9/9 passed) across products questions ("ما هي منتجاتكم؟", "ايش تبيعوا؟"), coverage question ("وين تخدموا؟"), branch questions, and unverified price/trial/VAT handoffs. 37/37 regression passing.
 
-- **2.11 Customer Path Addendum (Forwarding Promises, Topic Offers & Arabic Language Guardrails)**:
+- **2.11 Customer Path Addendum (Precedence, Anti-Embellishment, Verbatim Extraction & Guardrails)**:
   - **Status**: done
-  - Prohibited false forwarding promises: while the owner inquiry loop (Phase 1) is not active, customer replies must never say or imply that the request was forwarded to or will be answered by a team ("سأنقل طلبك", "سيرد عليك", "سنعود إليك بأسرع وقت"). Deterministic post-check Rule 9 intercepts all unapproved forwarding promises and replaces them with the approved handoff text: `"هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."`.
-  - Blocked unrecorded topic offers: Guardrail Rule 10 intercepts offers suggesting unrecorded topics or features ("مميزات البرنامج", "المتطلبات التقنية", "الخصائص التقنية", "طرق الترخيص", "طريقة الاستخدام", "الدعم الفني") when not present in confirmed facts.
-  - Enforced strict Arabic language: Guardrail Rule 11 extracts Latin tokens and blocks any stray English words (e.g. "Customer Replay", "Support") unless officially verified as Latin product/brand names in confirmed facts (e.g. "Ciro Networks").
-  - Sanitized customer prompt construction: omitted Latin placeholder names from customer context injection to avoid prompting the LLM to echo stray English names in greetings.
-  - Verified with 13 comprehensive tests in `tests/test_customer_path_confirmed_facts.py` (13/13 passed) and full regression (41 passing tests).
+  - Enforced confirmed facts precedence over `business_brain`: in both customer and owner prompts, confirmed identity and product facts override and neutralize stale or conflicting `business_brain` identity ("المنذر تكنولوجي" wins over "المنذر للتقنية") and omit conflicting `business_brain.products`. Confirmed identity facts are unconditionally included in context retrieval.
+  - Anti-embellishment & safe catalog replacement: instructed model in Policy 11 to describe each product ONLY using its exact stored fact text verbatim. Implemented deterministic post-check Rule 12 blocking unrecorded capability/benefit claims (`إدارة المهام`, `مراقبة الأداء`, `الفواتير والتقارير`, `زيادة الإنتاجية`, `إدارة الأجهزة`) when not present in verified facts, replacing embellished product replies with a safe catalog reply built strictly from confirmed facts.
+  - Verbatim product extraction: fixed fact extraction so product names remain verbatim (`"الموظف الذكي"` does not become `"برنامج للموظف الذكي"`), and stopped storing invented descriptions when none are provided by the business owner.
+  - Prohibited false forwarding promises: deterministic post-check Rule 9 intercepts unapproved forwarding promises (`"سأنقل طلبك"`, `"سيرد عليك"`, `"سنعود إليك بأسرع وقت"`) and replaces them with approved handoff text: `"هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."`.
+  - Blocked unrecorded topic offers: Guardrail Rule 10 intercepts offers suggesting unrecorded topics or features (`"مميزات البرنامج"`, `"المتطلبات التقنية"`, `"الخصائص التقنية"`, `"طرق الترخيص"`, `"طريقة الاستخدام"`, `"الدعم الفني"`).
+  - Enforced strict Arabic language: Guardrail Rule 11 blocks stray Latin words (e.g. `"Customer Replay"`, `"Support"`) unless verified as Latin product/brand names in confirmed facts (e.g. `"Ciro Networks"`). Sanitized prompt injection to omit Latin placeholder names.
+  - Verified with 16 comprehensive tests in `tests/test_customer_path_confirmed_facts.py` (16/16 passed) and full regression suite (44 passing tests).
 
 ---
 
