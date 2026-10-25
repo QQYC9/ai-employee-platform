@@ -24,6 +24,11 @@ from packages.services.fact_service import ExtractedFactItem, FactService
 logger = logging.getLogger(__name__)
 
 
+class ModelServiceError(Exception):
+    """Raised when AI model fails or is rate-limited during interview evaluation."""
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Pydantic Schemas for Structured Topic Planning & Evaluation
 # ---------------------------------------------------------------------------
@@ -809,8 +814,8 @@ class InterviewService:
                         logger.error("Rate limit exhausted after %s attempts in interview evaluation for tenant %s: %s", max_retries, tenant_id, rle)
                         raise
                 except Exception as exc:
-                    logger.warning("AI model coverage evaluation failed for tenant %s: %s; using semantic fallback", tenant_id, exc)
-                    break
+                    logger.warning("AI model coverage evaluation failed for tenant %s: %s", tenant_id, exc)
+                    raise ModelServiceError(f"AI model failure: {exc}") from exc
 
         # 2. Deterministic Semantic Fallback Evaluator
         evaluations: list[TopicCoverageItem] = []
@@ -824,7 +829,10 @@ class InterviewService:
         has_support = bool(re.search(r"(?:دعم\s*فني|صيانة|متابعة|مستمر|طوال\s*الأسبوع|خدمة\s*العملاء|sla)\b", c_lower))
         has_packaging = bool(re.search(r"(?:كيلو|نصف|ربع|جرام|عبوات|حجم|أحجام|علبة|علب)\b", c_lower))
         has_coverage = bool(re.search(r"(?:نخدم|نوصل|توصيل|التوصيل|فروعنا|تغطيتنا|نغطي|في\s*(?:صنعاء|عدن|الرياض|جدة|الخليج|المحافظات)|سحابيا|عالميا)\b", c_lower))
-        has_branches = bool(re.search(r"(?:فروعنا|فرع\s*في|ساعات\s*العمل|دوامنا|نفتح\s*من|مقرنا|مقر\s*رئيسي)", c_lower))
+        has_tone = bool(re.search(r"(?:نبرة|أسلوب|نفضل\s*نبرة|رسمي|رسمية|مهني|مهنية|ودية|لبقة|مختصرة|مرحة|لهجة)\b", c_lower))
+        has_branches = bool(
+            re.search(r"(?:فروعنا|فرع(?:\s*في|\s*لنا|\s*رئيسي)?|ساعات\s*العمل|أوقات\s*العمل|دوامنا|دوام|نفتح\s*من|مقرنا|مقر\s*رئيسي|محلنا|محل\s*في)\b", c_lower)
+        ) and not (has_tone and not any(w in c_lower for w in ("فرع", "دوام", "ساعات", "مقر", "محل")))
         has_warranty = bool(re.search(r"(?:استرجاع|استبدال|ضمان|كفالة|استرداد|مشكلات\s*فنية)", c_lower))
         has_authenticity = bool(re.search(r"(?:مفحوص|مخبريا|فحص|نقي|أصلي|مضمون|نقاوة|مختبر)", c_lower))
         has_identity = bool(re.search(r"(?:اسمنا|اسم\s*(?:الشركة|المنشأة|المتجر)|نحن\s*شركة|شركة\s+\w+|منشأة\s+\w+|متجر\s+\w+)", c_lower))
@@ -846,9 +854,11 @@ class InterviewService:
             "delivery_zones_yemen": has_coverage and ("صنعاء" in c_lower or "عدن" in c_lower),
             "between_governorates_yemen": has_coverage and any(w in c_lower for w in ("محافظات", "بين المحافظات", "شحن")),
             "branches_hours": has_branches,
+            "tone_voice": has_tone,
             "returns_warranty": has_warranty,
             "authenticity_guarantee": has_authenticity,
             "identity": has_identity,
+            "business_identity": has_identity,
             "products_services_prices": has_products,
         }
 
@@ -878,16 +888,16 @@ class InterviewService:
                         extracted_val = content_clean
                         missing_val = "أسعار المنتجات المذكورة"
                     else:
-                        status = "covered"
-                        coverage_val = 1.0
+                        status = "partial"
+                        coverage_val = 0.5
                         extracted_val = content_clean
                 else:
                     status = "not_covered"
                     coverage_val = 0.0
             else:
                 if trigger_map.get(t.slug) is True:
-                    status = "covered"
-                    coverage_val = 1.0
+                    status = "partial"
+                    coverage_val = 0.5
                     extracted_val = content_clean
 
             if status in ("covered", "partial"):
@@ -978,13 +988,34 @@ class InterviewService:
                     current_topic_slug=curr_slug,
                     ai_provider=ai_provider,
                 )
-            except AIRateLimitError:
-                logger.warning("AIRateLimitError in interview turn for tenant %s, returning neutral delay notice", tenant_id)
-                return "نواجه ضغطاً مؤقتاً في معالجة طلبك، يرجى المحاولة بعد لحظات.", True
+            except (AIRateLimitError, ModelServiceError) as exc:
+                logger.warning("AI model unavailable or failed in interview turn for tenant %s: %s", tenant_id, exc)
+                return "نعتذر، هناك تأخير مؤقت في معالجة إجابتك بسبب ضغط الخدمة، يرجى المحاولة بعد لحظات.", True
+
+            decided_by = getattr(evaluation, "decided_by", None) or "model"
+            if decided_by == "fallback":
+                for e in evaluation.evaluations:
+                    if e.status == "covered":
+                        e.status = "partial"
+                        e.coverage = 0.5
+
+            # Identity gating: business_identity / identity covered ONLY when company.identity fact extracted
+            extracted_facts_list = getattr(evaluation, "extracted_facts", None) or []
+            has_extracted_company_identity = any(
+                f.topic == "company.identity" and (
+                    (isinstance(f.value, dict) and bool(str(f.value.get("name") or "").strip()))
+                    or (isinstance(f.value, str) and bool(f.value.strip()))
+                )
+                for f in extracted_facts_list
+            )
+            for e in evaluation.evaluations:
+                if e.slug in ("identity", "business_identity") and e.status == "covered":
+                    if not has_extracted_company_identity:
+                        e.status = "not_covered"
+                        e.coverage = 0.0
 
             curr_eval = next((e for e in evaluation.evaluations if e.slug == curr_slug), None) if curr_slug else None
             curr_status = curr_eval.status if curr_eval else "not_covered"
-            decided_by = getattr(evaluation, "decided_by", None) or "model"
 
             # Check negative answer ("لا") on current topic
             if curr_status == "not_applicable" and curr_slug:
@@ -1053,17 +1084,27 @@ class InterviewService:
                     self.db.add(curr_topic)
                     self._save_covered_topic_facts(tenant_id, curr_slug, content_clean, message_id)
 
-                # Also mark other topics that were covered in this reply
+                # Also mark other topics that were covered or partially covered in this reply
                 for e in evaluation.evaluations:
-                    if e.slug != curr_slug and e.status == "covered":
-                        ot = next((t for t in open_topics if t.slug == e.slug), None)
-                        if ot:
-                            ot.status = "answered"
-                            ot.coverage = 1.0
-                            ot.source_message_id = message_id
-                            ot.decided_by = decided_by
-                            self.db.add(ot)
-                            self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
+                    if e.slug != curr_slug:
+                        if e.status == "covered":
+                            ot = next((t for t in open_topics if t.slug == e.slug), None)
+                            if ot:
+                                ot.status = "answered"
+                                ot.coverage = 1.0
+                                ot.source_message_id = message_id
+                                ot.decided_by = decided_by
+                                self.db.add(ot)
+                                self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
+                        elif e.status == "partial":
+                            ot = next((t for t in open_topics if t.slug == e.slug), None)
+                            if ot:
+                                ot.status = "partial"
+                                ot.coverage = 0.5
+                                ot.source_message_id = message_id
+                                ot.decided_by = decided_by
+                                self.db.add(ot)
+                                self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
                 self.db.flush()
 
                 # Save unified extracted facts or fallback extract
@@ -1115,13 +1156,23 @@ class InterviewService:
                     state.classification_answers = answers_copy
                     flag_modified(state, "classification_answers")
 
-                    # Mark other topics that WERE covered in this reply
+                    # Mark other topics that WERE covered or partially covered in this reply
                     covered_other = [e for e in evaluation.evaluations if e.slug != curr_slug and e.status == "covered"]
                     for e in covered_other:
                         ot = next((t for t in open_topics if t.slug == e.slug), None)
                         if ot:
                             ot.status = "answered"
                             ot.coverage = 1.0
+                            ot.source_message_id = message_id
+                            ot.decided_by = decided_by
+                            self.db.add(ot)
+                            self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
+                    partial_other = [e for e in evaluation.evaluations if e.slug != curr_slug and e.status == "partial"]
+                    for e in partial_other:
+                        ot = next((t for t in open_topics if t.slug == e.slug), None)
+                        if ot:
+                            ot.status = "partial"
+                            ot.coverage = 0.5
                             ot.source_message_id = message_id
                             ot.decided_by = decided_by
                             self.db.add(ot)
@@ -1152,14 +1203,15 @@ class InterviewService:
                             logger.warning("Fact extraction in not_covered turn failed: %s", err)
 
                     ack_text = ""
-                    if covered_other:
-                        labels = [next((t.label for t in open_topics if t.slug == e.slug), e.slug) for e in covered_other]
+                    matched_other = covered_other + partial_other
+                    if matched_other:
+                        labels = [next((t.label for t in open_topics if t.slug == e.slug), e.slug) for e in matched_other]
                         ack_text = f"✅ تم توثيق ما ذكرته بخصوص: {', '.join(labels)}.\n\n"
 
                     if attempts < 2:
                         curr_topic.status = "asked"
                         curr_topic.decided_by = decided_by
-                        curr_topic.source_message_id = message_id
+                        # source_message_id must be the message that actually produced coverage
                         self.db.add(curr_topic)
                         self.db.flush()
                         reask = f"ولكن بالنسبة لـ **{curr_topic.label}**:\n{curr_topic.question}"
@@ -1168,7 +1220,7 @@ class InterviewService:
                         # Park topic after 2 attempts
                         curr_topic.status = "unknown"
                         curr_topic.decided_by = decided_by
-                        curr_topic.source_message_id = message_id
+                        # source_message_id must be the message that actually produced coverage
                         self.db.add(curr_topic)
                         self.db.flush()
                         next_q = self.get_next_question(tenant_id)
@@ -1346,6 +1398,17 @@ class InterviewService:
                     topic="operations.coverage",
                     subject="نطاق التغطية والخدمة",
                     value={"coverage": c},
+                    visibility="public",
+                    is_direct_unambiguous=True,
+                )
+            )
+
+        elif slug == "tone_voice":
+            facts_to_save.append(
+                ExtractedFactItem(
+                    topic="company.tone",
+                    subject="نبرة وأسلوب التحدث",
+                    value={"tone": c},
                     visibility="public",
                     is_direct_unambiguous=True,
                 )

@@ -262,6 +262,7 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - Full test regression executed across all 961 tests in repository: 939 passed, 20 failed (legacy assertions / test mock differences), 2 skipped (optional live API key smoke tests). All 41 Phase 3, 3.1, 3.2, security, and part0 cleanup tests passing cleanly (1 skipped).
 - **3.2.7 Telegram Webhook Auto-Registration & Dual-Check Connection**: Auto-registers webhook on channel creation/update with per-channel secret token, dual-checks both credentials (getMe) and webhook status (getWebhookInfo), adds dashboard re-registration button, and bulk CLI re-registration script.
 - **3.2.8 Owner Welcome Message Hardening & Tenant Dashboard Tunnel**: Public tenant dashboard exposed with set-password page, plain-text welcome formatting without literal asterisks, fallback to 'موظفك الرقمي' when employee name is empty, and mandatory employee name validation on tenant creation.
+- **3.2.9 Adaptive Interview Resilience & Coverage Gating**: Fallback evaluator capped at partial (never covered/answered), business_identity gated by extracted company.identity fact, tone_voice mapped cleanly without branches_hours collision, source_message_id persisted only on covered topics, and model failure/429 emitting Arabic delay notices without fallback guessing.
 
 ---
 
