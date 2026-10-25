@@ -424,8 +424,11 @@ class ChannelService:
                     raw_owners.append(inbound.sender_id)
                 else:
                     raw_owners = [str(raw_owners), inbound.sender_id]
-                channel_cfg["owner_identifiers"] = list(dict.fromkeys(raw_owners))
+                clean_owners = list(dict.fromkeys(raw_owners))
+                channel_cfg["owner_identifiers"] = clean_owners
+                channel_cfg["owner_sender_ids"] = clean_owners
                 channel.config = channel_cfg
+                flag_modified(channel, "config")
                 self.db.add(channel)
                 self.db.flush()
                 is_owner = True

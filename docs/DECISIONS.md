@@ -243,3 +243,26 @@ This log records major design and implementation choices, including rationale an
      - Pre-migration backup snapshot `backups/backup_ai_employee_pre_phase3.dump` (816 KB) created and verified.
      - Migration `f7a8b9c0d1e2` verified on copy database through full lifecycle (`upgrade -> downgrade -> upgrade`) before live DB upgrade.
      - Tables `interview_topics` and `interview_states` enforce `tenant_id` foreign keys with `ondelete="CASCADE"`. Tenant isolation confirmed by automated test.
+
+---
+
+## Decision 3.2: Phase 3.1 Content-Driven Coverage, Verbatim Extraction, and Domain Adaptation
+- **Context**: The Phase 3 review accepted schema, migration safety, topic planning, gate, and pause/resume architecture, but identified defects in transcript analysis:
+  1. Asked topic was marked answered even if reply addressed a different topic.
+  2. Previously answered topics were re-asked.
+  3. Company identity was misclassified as description (`مجال النشاط`).
+  4. Product names had hardcoded brand fallbacks rewriting names to `"برنامج ناظم المحاسبي"`.
+  5. Universal topics were not dynamically adapted to business model (e.g. software offered COD / branch cash).
+  6. Answering "لا" marked topics as answered instead of not_applicable/skipped.
+  7. Internal English tags were shown in readbacks.
+  8. Duplicated greeting was emitted at interview start.
+- **Decision**:
+  1. **Content-Driven Coverage**: Evaluates each owner reply against all open topics using structured Pydantic model (`ReplyCoverageEvaluation`) with semantic fallback. A topic asked is never marked answered automatically. If off-target, acknowledged points are confirmed, attempt counter is incremented, the topic is re-asked briefly once (`attempts < 2`), and parked after 2 attempts (`attempts >= 2`).
+  2. **Never Re-Ask**: Covered topics are flagged `answered` with `coverage=1.0` and excluded from future questions.
+  3. **Verbatim Company Identity**: Exact names starting with entity keywords (`شركة`, `مؤسسة`, `متجر`) are strictly mapped to `company.identity`, preserving verbatim strings.
+  4. **Generic Product Extraction**: Removed all hardcoded product names (`ناظم`, `سيرو`, `الموظف الذكي`) across production code (`fact_service.py`, `conversational_agent_engine.py`). Tested verbatim extraction with unseen products (`منصة الأفق للمتاجر`).
+  5. **Domain Adaptation**: Universal topics adapt dynamically: software companies receive `service_coverage` (not physical delivery) and digital payment options without COD; physical shops receive delivery and COD options.
+  6. **Answer Semantics**: Negative replies ("لا") mark topics as `not_applicable` or `skipped`, closing dependent branches.
+  7. **Arabic Tags**: Profile tags displayed exclusively in clean Arabic (`ARABIC_TAG_LABELS`). Inferred tags are segregated from stated tags and omitted from topic planning unless confirmed.
+  8. **Clean Greetings**: Eliminated greeting redundancy between link handler and Stage 1 Question 1.
+

@@ -881,10 +881,7 @@ class ConversationalAgentEngine:
             interview_active = interview_svc.is_interview_active(tenant_id)
 
             if just_linked:
-                welcome_prefix = (
-                    "تم ربط حسابك كمالك رسمي للمنشأة بنجاح! 🎉\n"
-                    "أنا موظفك الرقمي الذكي، وسأقوم الآن بالتعرف على منشأتك لخدمة عملائك بأعلى دقة وبدون أي تخمين.\n\n"
-                )
+                welcome_prefix = "تم ربط حسابك كمالك رسمي للمنشأة بنجاح! 🎉\n\n"
                 start_res = interview_svc.start_interview(tenant_id)
                 return self._persist_and_return_reply(
                     tenant_id, conversation_id, message_id, f"{welcome_prefix}{start_res}", msg_meta, is_owner=True
@@ -896,7 +893,13 @@ class ConversationalAgentEngine:
                     tenant_id, conversation_id, message_id, progress_reply, msg_meta, is_owner=True
                 )
 
-            if interview_trigger in ("start", "resume"):
+            if interview_trigger == "start":
+                start_reply = interview_svc.start_interview(tenant_id)
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, start_reply, msg_meta, is_owner=True
+                )
+
+            if interview_trigger == "resume":
                 resume_reply = interview_svc.resume_interview(tenant_id)
                 return self._persist_and_return_reply(
                     tenant_id, conversation_id, message_id, resume_reply, msg_meta, is_owner=True
@@ -1928,12 +1931,7 @@ class ConversationalAgentEngine:
                         topic_slug = f.topic.split(".", 1)[1] if "." in f.topic else ""
                         if topic_slug:
                             b_updates["products"][topic_slug] = f.value
-                        if "ناظم" in f.subject:
-                            b_updates["products"]["nazim_accounting"] = f.value
-                        if "سيرو" in f.subject:
-                            b_updates["products"]["ciro_networks"] = f.value
-                        if "الموظف الذكي" in f.subject or "موظف ذكي" in f.subject:
-                            b_updates["products"]["smart_employee"] = f.value
+                        # Dynamic product entries indexed by subject and slug
                     else:
                         if f.topic == "company.identity":
                             confirmed_other.append(f"اسم الشركة: {clean_val}")
@@ -2143,7 +2141,7 @@ class ConversationalAgentEngine:
                 "تتواصل مباشرة مع صاحب العمل والمالك المعتمد للمنشأة.\n\n"
                 "قواعد الأمان ومنع الهلوسة الإلزامية (صارمة جداً):\n"
                 "1. الإجابة حصرياً استناداً إلى الحقائق الرسمية المعتمدة في عقل المنشأة (Business Brain) وقاعدة المعرفة (Knowledge Base) الواردة في السياق أدناه.\n"
-                "2. قاعدة صارمة لمنع التخمين والهلوسة: إذا سألك المالك عن أي منتج، خدمة، سعر، برنامج، فرع، أو تفصيل غير مسجل وغير مدون في البيانات المعتمدة أدناه (مثل السؤال عن 'ناظم' أو أي برنامج أو منتج غير موجود في السياق)، "
+                "2. قاعدة صارمة لمنع التخمين والهلوسة: إذا سألك المالك عن أي منتج، خدمة، سعر، برنامج، فرع، أو تفصيل غير مسجل وغير مدون في البيانات المعتمدة أدناه (مثل السؤال عن أي برنامج أو منتج غير موجود في السياق)، "
                 "يُحظر عليك تماماً اختراع أو افتراض وصفه أو وظيفته أو ربطه بأنظمة أخرى. يجب أن تصرح بوضوح بأن هذه المعلومة غير مسجلة في قاعدة بيانات المنشأة، واعرض عليه تزويدك بتفاصيلها لحفظها وتوثيقها فوراً.\n"
                 "3. أجب باحترافية وإيجاز وموضوعية تامة باللغة العربية."
             )
@@ -2832,32 +2830,12 @@ class ConversationalAgentEngine:
         extracted_prods: dict[str, Any] = {}
         extracted_servs: dict[str, Any] = {}
 
-        if "ناظم" in text:
-            extracted_prods["nazim_accounting"] = {
-                "name": "برنامج ناظم المحاسبي",
-                "title": "برنامج ناظم المحاسبي",
-            }
-            if "محاسب" in text:
-                extracted_prods["nazim_accounting"]["description"] = "برنامج لإدارة المحاسبة"
-        if "سيرو" in text:
-            extracted_prods["ciro_networks"] = {
-                "name": "برنامج سيرو لادارة الشبكات",
-                "title": "برنامج سيرو لادارة الشبكات",
-            }
-            if "شبكات" in text:
-                extracted_prods["ciro_networks"]["description"] = "برنامج لإدارة الشبكات والتحكم الكامل بها"
-        if re.search(r"الموظف\s*الذكي|موظف\s*ذكي|موظف(?:ين|ون)?\s*رقمي(?:ين|ون)?", text):
-            extracted_prods["smart_employee"] = {
-                "name": "الموظف الذكي",
-                "title": "الموظف الذكي",
-            }
-
-        for m in re.finditer(r"(?:برنامج|نظام|تطبيق)\s+([a-zA-Z0-9_\u0621-\u064A]+)(?:\s+(?:المحاسبي|لإدارة\s*الشبكات|لإدارة\s*المخزون|[a-zA-Z0-9_\u0621-\u064A]+))?", text):
-            p_name = m.group(1).strip()
+        for m in re.finditer(r"(?:برنامج|نظام|تطبيق|منصة|خدمة|أداة)\s+([a-zA-Z0-9_\u0621-\u064A]+)(?:\s+([a-zA-Z0-9_\u0621-\u064A]+))?", text):
             full_p_name = m.group(0).strip()
-            if p_name and p_name not in ("اسمه", "يدعى", "هو", "للشركات", "جديد", "في") and len(p_name) > 2:
+            p_name = m.group(1).strip()
+            if p_name and p_name not in ("اسمه", "يدعى", "هو", "للشركات", "جديد", "في", "الذي", "التي") and len(p_name) > 2:
                 p_slug = re.sub(r"[^\w]+", "_", p_name).strip("_").lower()
-                if p_slug not in extracted_prods and "nazim" not in p_slug and "ciro" not in p_slug:
+                if p_slug not in extracted_prods:
                     extracted_prods[p_slug] = {"name": full_p_name, "title": p_name}
 
         # 1.5. Business Identity & Commercial Name

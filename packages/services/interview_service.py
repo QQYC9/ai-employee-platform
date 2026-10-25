@@ -1,28 +1,20 @@
-"""
-Phase 3: Adaptive Owner Onboarding Interview Service.
-
-Enables the autonomous Digital Employee to conduct an adaptive onboarding
-interview with the business owner, dynamically deciding what it needs to know
-based on the owner's free-text answers.
-
-No hardcoded schemas per business domain: a honey shop, software company,
-electronics store, or restaurant produces an entirely distinct topic plan.
-"""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 import logging
 import re
-from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from packages.ai_providers.base import AIProvider
-from packages.models.domain import Fact, InterviewState, InterviewTopic, Message
+from packages.models.domain import Fact, InterviewState, InterviewTopic
 from packages.models.tenant import Tenant
 from packages.services.audit_service import AuditService
 from packages.services.fact_service import ExtractedFactItem, FactService
@@ -31,35 +23,46 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Pydantic Schemas for Structured Model Interaction
+# Pydantic Schemas for Structured Topic Planning & Evaluation
 # ---------------------------------------------------------------------------
 
 class TopicPlanItem(BaseModel):
-    slug: str = Field(description="Normalized lowercase slug, e.g. 'identity', 'honey_types', 'delivery_zones'")
-    label: str = Field(description="Human-readable Arabic label, e.g. 'أنواع العسل المتوفرة'")
-    why_it_matters: str | None = Field(default=None, description="Why this topic matters to customers")
-    criticality: int = Field(default=3, ge=1, le=5, description="Criticality rating from 1 to 5")
-    question: str = Field(description="Direct, polite Arabic question to ask the owner")
-    depends_on: list[str] = Field(default_factory=list, description="List of topic slugs this topic depends on")
-    group_name: str = Field(default="universal", description="'universal', 'field_specific', or 'follow_up'")
+    """Schema for a planned interview topic."""
+
+    slug: str
+    label: str
+    why_it_matters: str
+    criticality: int = Field(ge=1, le=5)
+    question: str
+    depends_on: list[str] = Field(default_factory=list)
+    condition: str | None = None
+    group_name: str = "universal"
 
 
 class InterviewPlanSchema(BaseModel):
-    business_tags: list[str] = Field(default_factory=list, description="Multi-label tags describing the business")
-    topics: list[TopicPlanItem] = Field(default_factory=list, description="List of planned interview topics")
+    """Schema for the complete onboarding interview topic plan."""
+
+    business_tags: list[str] = Field(default_factory=list)
+    topics: list[TopicPlanItem] = Field(default_factory=list)
 
 
-class ClassificationParseResult(BaseModel):
-    owner_name: str | None = None
-    owner_role: str | None = None
-    entity_type: str | None = None
-    country: str | None = None
-    field_of_activity: str | None = None
-    tags: list[str] = Field(default_factory=list)
+class TopicCoverageItem(BaseModel):
+    """Model evaluation for a single open topic against owner reply."""
+
+    slug: str
+    status: Literal["covered", "partial", "not_covered", "skipped", "not_applicable"]
+    extracted_details: str | None = None
+
+
+class ReplyCoverageEvaluation(BaseModel):
+    """Structured response from the LLM evaluating owner message coverage."""
+
+    evaluations: list[TopicCoverageItem] = Field(default_factory=list)
+    acknowledged_summary: str | None = None
 
 
 # ---------------------------------------------------------------------------
-# Default Classification Questions (Stage 1: Exactly 4 Questions)
+# Stage 1: Fixed Foundational Classification Questions
 # ---------------------------------------------------------------------------
 
 CLASSIFICATION_QUESTIONS = {
@@ -82,21 +85,46 @@ CLASSIFICATION_QUESTIONS = {
     ),
 }
 
+ARABIC_TAG_LABELS: dict[str, str] = {
+    "yemen": "اليمن",
+    "saudi arabia": "السعودية",
+    "shop": "متجر فعلي",
+    "store": "متجر",
+    "company": "شركة",
+    "honey": "عسل طبيعي ومناحل",
+    "natural_products": "منتجات طبيعية",
+    "retail": "تجارة تجزئة",
+    "software": "برمجيات وأنظمة",
+    "b2b": "خدمات أعمال (B2B)",
+    "development": "تطوير حلول",
+    "it": "تقنية معلومات",
+    "restaurant": "مطعم",
+    "food": "أغذية ومأكولات",
+    "hospitality": "ضيافة",
+    "delivery": "خدمات توصيل",
+}
+
 
 class InterviewService:
     """
-    Manages the adaptive onboarding interview lifecycle:
-    Stage 1: 4 classification questions -> multi-label profile facts.
-    Stage 2: Dynamic topic planning based on profile tags.
-    Stage 3: Conditional follow-up proposal.
-    Deterministic next-question selector, multi-topic answer matching,
-    pause/resume, and go-live gate enforcement.
+    Core engine for Phase 3: Adaptive Owner Onboarding Interview.
+    Autonomously guides the business owner through onboarding, classifies business profile,
+    plans industry-specific topics, evaluates answer coverage, selects deterministic next questions,
+    and gates customer go-live until critical knowledge is satisfied.
     """
+
+    ARABIC_TAG_LABELS = ARABIC_TAG_LABELS
 
     def __init__(self, db: Session):
         self.db = db
-        self.audit_service = AuditService(db)
         self.fact_service = FactService(db)
+        self.audit_service = AuditService(db)
+
+    def format_question_with_quick_replies(self, topic: Any, tags: list[str]) -> str:
+        """Returns the polite question text including dynamic quick-replies tailored to business profile."""
+        if hasattr(topic, "question"):
+            return topic.question
+        return str(topic)
 
     # -----------------------------------------------------------------------
     # State Management & Helpers
@@ -129,7 +157,7 @@ class InterviewService:
         return bool(state.is_active and state.stage != "completed")
 
     def start_interview(self, tenant_id: UUID) -> str:
-        """Starts a fresh interview for the tenant from Stage 1 Question 1."""
+        """Starts a fresh interview for the tenant from Stage 1 Question 1 without duplicate greetings."""
         state = self.get_or_create_state(tenant_id)
         state.stage = "classification_1"
         state.is_active = True
@@ -138,18 +166,36 @@ class InterviewService:
         self.db.flush()
         return CLASSIFICATION_QUESTIONS["classification_1"]
 
+    def resume_interview(self, tenant_id: UUID) -> str:
+        """Resumes an interview in progress from where it stopped."""
+        state = self.get_or_create_state(tenant_id)
+        owner_name = (state.classification_answers or {}).get("owner_name", "صاحب المنشأة")
+
+        if state.stage == "classification_1":
+            # Starting fresh: do not duplicate greeting!
+            return self.start_interview(tenant_id)
+
+        if state.stage in CLASSIFICATION_QUESTIONS:
+            template = CLASSIFICATION_QUESTIONS[state.stage]
+            return f"مرحباً بك مجدداً يا {owner_name}! لنواصل التعارف:\n\n{template.format(owner_name=owner_name)}"
+
+        if state.stage == "interviewing":
+            next_q = self.get_next_question(tenant_id)
+            if next_q:
+                return f"مرحباً بك مجدداً! لنواصل التعارف من حيث توقفنا:\n\n{next_q}"
+
+        if state.stage == "completed":
+            return f"مرحباً بك يا {owner_name}! جلسة التعارف مكتملة وموظفك الرقمي جاهز للعمل. يمكنك السؤال عن أي تفصيل في أي وقت."
+
+        return self.start_interview(tenant_id)
+
     # -----------------------------------------------------------------------
     # Entry Point Triggers Detection
     # -----------------------------------------------------------------------
 
     @staticmethod
     def detect_trigger(content: str) -> str | None:
-        """
-        Detects explicit interview conversational triggers:
-        - 'start': 'ابدأ التعارف', 'ابدأ تعارف', 'تعارف'
-        - 'resume': 'كمّل التعارف', 'كمل التعارف', 'متابعة التعارف', 'استئناف'
-        - 'progress': 'وش باقي؟', 'ايش باقي؟', 'كم باقي؟', 'ماذا تبقى؟'
-        """
+        """Detects explicit interview conversational triggers."""
         c = (content or "").strip().lower()
         if re.search(r"(?:وش|ايش|إيش|كم|ماذا)\s*(?:باقي|متبقي|تبقى|فاضل)", c):
             return "progress"
@@ -161,17 +207,22 @@ class InterviewService:
 
     @staticmethod
     def is_skip_or_na(content: str) -> str | None:
-        """
-        Checks if owner reply indicates skipping or not applicable:
-        - 'not_applicable': 'لا ينطبق', 'غير منطبق', 'ما ينطبق', 'لا يوجد لدينا'
-        - 'skip': 'تخطى', 'تخطي', 'لا أعلم', 'لا اعلم', 'ما أعرف', 'بعدين', 'لاحقاً', 'skip'
-        """
+        """Checks if owner reply indicates skipping or not applicable."""
         c = (content or "").strip().lower()
         if re.search(r"(?:لا\s*ينطبق|غير\s*منطبق|ما\s*ينطبق|لا\s*ينطبق\s*علينا|ما\s*عندنا\s*هذا|لا\s*ينطبق\s*على\s*نشاطنا)", c):
             return "not_applicable"
         if re.search(r"(?:تخطى|تخطي|تجاوز|لا\s*أعلم|لا\s*اعلم|ما\s*أعرف|ما\s*اعرف|مش\s*عارف|لست\s*متأكد|بعدين|لاحقاً|لاحقا|skip)", c):
             return "skip"
         return None
+
+    @classmethod
+    def format_tags_arabic(cls, tags: list[str]) -> str:
+        """Translates internal tags to clean Arabic labels for the owner."""
+        arabic_labels = []
+        for t in tags:
+            clean_t = t.lower().strip()
+            arabic_labels.append(cls.ARABIC_TAG_LABELS.get(clean_t, t))
+        return "، ".join(dict.fromkeys(arabic_labels))
 
     # -----------------------------------------------------------------------
     # Stage 1: Classification Turn Handler (Exactly 4 Questions)
@@ -185,16 +236,11 @@ class InterviewService:
         message_id: UUID,
         ai_provider: AIProvider | None = None,
     ) -> str:
-        """
-        Processes answers for Stage 1 classification (4 conversational questions).
-        Stores extracted values in state.classification_answers and persists
-        profile facts once classification completes.
-        """
+        """Processes answers for Stage 1 classification."""
         answers = dict(state.classification_answers or {})
         stage = state.stage
 
         if stage == "classification_1":
-            # Parsing Owner Name
             name = self._clean_name_answer(content)
             answers["owner_name"] = name
             state.classification_answers = answers
@@ -205,7 +251,6 @@ class InterviewService:
             return CLASSIFICATION_QUESTIONS["classification_2"].format(owner_name=name)
 
         if stage == "classification_2":
-            # Parsing Owner Role
             role = self._clean_role_answer(content)
             answers["owner_role"] = role
             state.classification_answers = answers
@@ -216,7 +261,6 @@ class InterviewService:
             return CLASSIFICATION_QUESTIONS["classification_3"]
 
         if stage == "classification_3":
-            # Parsing Entity Type
             etype = self._clean_entity_type_answer(content)
             answers["entity_type"] = etype
             state.classification_answers = answers
@@ -227,20 +271,20 @@ class InterviewService:
             return CLASSIFICATION_QUESTIONS["classification_4"]
 
         if stage == "classification_4":
-            # Parsing Country & Field of Activity
             country, field = self._clean_country_field_answer(content)
             answers["country"] = country
             answers["field_of_activity"] = field
 
-            # Derive multi-label tags
-            tags = self._derive_profile_tags(answers)
-            answers["tags"] = tags
+            # Derive stated tags without unstated assumptions
+            stated_tags, inferred_tags = self._derive_profile_tags(answers)
+            answers["tags"] = stated_tags
+            answers["inferred_tags"] = inferred_tags
             state.classification_answers = answers
 
             # Persist profile facts via FactService
             self._persist_profile_facts(tenant_id, answers)
 
-            # Move to Stage 2: Topic Planning
+            # Move to Stage 2: Topic Planning (plan ONLY from stated facts)
             plan = self.generate_topic_plan(tenant_id, answers, ai_provider=ai_provider)
             self.store_planned_topics(tenant_id, plan.topics)
 
@@ -249,8 +293,9 @@ class InterviewService:
             self.db.add(state)
             self.db.flush()
 
-            # Read-back of profile + smoothly transition to first topic question
+            # Read-back with clean Arabic tags (NO raw English tags)
             owner_name = answers.get("owner_name", "صاحب المنشأة")
+            arabic_tags_str = self.format_tags_arabic(stated_tags)
             readback = (
                 f"سعدت بالتعرف عليك يا {owner_name}! 🎉\n"
                 f"تم توثيق بيانات ملف المنشأة الأولي:\n"
@@ -258,7 +303,7 @@ class InterviewService:
                 f"• الكيان: {answers.get('entity_type')}\n"
                 f"• الدولة: {answers.get('country')}\n"
                 f"• النشاط: {answers.get('field_of_activity')}\n"
-                f"• التصنيفات: {', '.join(tags)}\n\n"
+                f"• التصنيفات: {arabic_tags_str}\n\n"
                 "والآن، لنبدأ بالأسئلة التفصيلية الخاصة بنشاطكم:\n"
             )
 
@@ -270,7 +315,7 @@ class InterviewService:
         return "المرحلة غير معروفة."
 
     # -----------------------------------------------------------------------
-    # Stage 2: Dynamic Topic Planning (Model + Deterministic Domain Fallback)
+    # Stage 2: Dynamic Topic Planning (Model + Domain Fallback)
     # -----------------------------------------------------------------------
 
     def generate_topic_plan(
@@ -279,11 +324,7 @@ class InterviewService:
         profile: dict[str, Any],
         ai_provider: AIProvider | None = None,
     ) -> InterviewPlanSchema:
-        """
-        Generates structured interview topics tailored to the business profile.
-        Uses AI provider with Pydantic validation if available; falls back to
-        deterministic domain topic synthesis.
-        """
+        """Generates structured interview topics tailored to the business profile."""
         tags = [str(t).lower() for t in profile.get("tags", [])]
         field_text = str(profile.get("field_of_activity", "")).lower()
         country_text = str(profile.get("country", "")).lower()
@@ -295,11 +336,9 @@ class InterviewService:
                     "You are the Adaptive Onboarding Topic Planner for an enterprise digital assistant.\n"
                     "Given the business profile (owner role, entity type, country, field of activity, tags), "
                     "generate a strict JSON listing of interview topics.\n"
-                    "Requirements:\n"
-                    "1. Include universal topics: identity, products_services_prices, ordering_payment, delivery_coverage, "
-                    "branches_hours, returns_warranty, authority_limits, tone_voice, unknown_questions_handling.\n"
-                    "2. Include field-specific topics (e.g. honey: types, origin, packaging, storage, authenticity; "
-                    "software: goals, target clients, licenses, support SLA, partnerships; restaurant: menu, dine-in/takeaway, allergies).\n"
+                    "CRITICAL RULES:\n"
+                    "1. Adapt topics to business field: software/cloud companies must get service-coverage topics and digital payment options (NO cash on delivery or physical delivery zones!).\n"
+                    "2. Physical stores / honey shops get delivery coverage, local governorate delivery zones, and COD/cash payment options.\n"
                     "3. Assign criticality 1-5, short clear Arabic questions, normalized lowercase slugs, and depends_on slugs."
                 )
                 user_prompt = f"Business Profile:\n{json.dumps(profile, ensure_ascii=False)}"
@@ -326,8 +365,13 @@ class InterviewService:
     ) -> InterviewPlanSchema:
         """Deterministic topic generator tailored to honey, software, retail, or service domains."""
         topics: list[TopicPlanItem] = []
+        combined = f"{' '.join(tags)} {field_text}".lower()
 
-        # 1. Universal Foundations
+        is_software = any(s in combined for s in ("software", "برمج", "تقني", "أنظمة", "شبكات", "it", "سحابي", "cloud"))
+        is_honey = any(h in combined for h in ("honey", "عسل", "مناحل", "نحل"))
+        is_restaurant = any(r in combined for r in ("restaurant", "مطعم", "أغذية", "كافيه", "مقهى"))
+
+        # 1. Universal Identity
         topics.append(TopicPlanItem(
             slug="identity",
             label="هوية المنشأة والاسم التجاري",
@@ -338,56 +382,83 @@ class InterviewService:
             group_name="universal",
         ))
 
+        # 2. Products / Services & Prices
+        prod_q = "ما هي أهم الأنظمة والحلول البرمجية التي تقدمونها وباقات أسعارها؟" if is_software else "ما هي أهم المنتجات أو الخدمات التي تقدمونها وقائمتها وأسعارها؟"
         topics.append(TopicPlanItem(
             slug="products_services_prices",
             label="المنتجات والخدمات والأسعار",
             why_it_matters="الإجابة على استفسارات الأسعار والمبيعات اليومية للعملاء",
             criticality=5,
-            question="ما هي أهم المنتجات أو الخدمات التي تقدمونها وقائمتها وأسعارها؟",
+            question=prod_q,
             depends_on=["identity"],
             group_name="universal",
         ))
+
+        # 3. Ordering & Payment (Adaptive Quick Replies!)
+        if is_software:
+            payment_q = "كيف يتم التعاقد والاشتراك في أنظمتكم وما هي وسائل الدفع والسداد المعتمدة؟\n(خيارات سريعة: تحويل بنكي | سداد إلكتروني | عقد سنوي / فواتير)"
+        else:
+            payment_q = "كيف يمكن للعميل تقديم الطلب وما هي طرق الدفع المعتمدة لديكم؟\n(خيارات سريعة: تحويل بنكي | دفع عند الاستلام | كاش بالفرع)"
 
         topics.append(TopicPlanItem(
             slug="ordering_payment",
             label="طرق الطلب والدفع المعتمدة",
             why_it_matters="توضيح آلية إتمام الشراء ووسائل السداد المتاحة",
             criticality=4,
-            question="كيف يمكن للعميل تقديم الطلب وما هي طرق الدفع المعتمدة لديكم؟ (كاش، تحويل بنكي، عند الاستلام...)",
+            question=payment_q,
             depends_on=["products_services_prices"],
             group_name="universal",
         ))
 
-        topics.append(TopicPlanItem(
-            slug="delivery_coverage",
-            label="نطاق التوصيل والمدن المخدومة",
-            why_it_matters="معرفة ما إذا كان العميل داخل نطاق التغطية والشحن",
-            criticality=4,
-            question="ما هي المدن والمناطق التي تغطيها خدماتكم أو توصيلكم؟",
-            depends_on=["identity"],
-            group_name="universal",
-        ))
+        # 4. Delivery vs Service Coverage (Adaptive Domain Transformation!)
+        if is_software:
+            cov_q = "ما هي الدول والمناطق التي تغطيها خدماتكم السحابية والتقنية؟\n(خيارات سريعة: اليمن وكافة دول الخليج | عالمياً عبر السحابة | اليمن فقط)"
+            topics.append(TopicPlanItem(
+                slug="service_coverage",
+                label="نطاق تقديم الخدمة والتغطية السحابية",
+                why_it_matters="معرفة ما إذا كان العميل داخل نطاق تقديم الخدمة والدعم",
+                criticality=4,
+                question=cov_q,
+                depends_on=["identity"],
+                group_name="universal",
+            ))
+        else:
+            cov_q = "ما هي المدن والمناطق التي تغطيها خدماتكم أو توصيلكم؟\n(خيارات سريعة: صنعاء وعدن وباقي المحافظات | داخل المدينة فقط | شحن لجميع المحافظات)"
+            topics.append(TopicPlanItem(
+                slug="delivery_coverage",
+                label="نطاق التوصيل والمدن المخدومة",
+                why_it_matters="معرفة ما إذا كان العميل داخل نطاق التغطية والشحن",
+                criticality=4,
+                question=cov_q,
+                depends_on=["identity"],
+                group_name="universal",
+            ))
 
+        # 5. Branches & Working Hours
+        branches_q = "هل لديكم مقر رئيسي أو فروع يمكن للعملاء زيارتها، وما هي ساعات العمل؟" if is_software else "هل لديكم فروع أو محلات فعلية، وما هي ساعات وأيام العمل الرسمية؟"
         topics.append(TopicPlanItem(
             slug="branches_hours",
             label="الفروع وساعات العمل",
             why_it_matters="توجيه العملاء لمواقع الفروع ومواعيد الاستقبال الرسمية",
             criticality=3,
-            question="هل لديكم فروع أو محلات فعلية، وما هي ساعات وأيام العمل الرسمية؟",
+            question=branches_q,
             depends_on=["identity"],
             group_name="universal",
         ))
 
+        # 6. Returns & Warranty / Support Policy
+        warranty_q = "ما هي سياسة الضمان وحل المشكلات الفنية أو استرداد الاشتراك؟" if is_software else "ما هي سياسة الاستبدال، الاسترجاع، والضمان على منتجاتكم؟"
         topics.append(TopicPlanItem(
             slug="returns_warranty",
             label="سياسة الاسترجاع والضمان",
-            why_it_matters="بناء ثقة العميل وحل أي اعتراضات أو رغبة في الإرجاع",
+            why_it_matters="بناء ثقة العميل وحل أي اعتراضات",
             criticality=3,
-            question="ما هي سياسة الاستبدال، الاسترجاع، والضمان على منتجاتكم وخدماتكم؟",
+            question=warranty_q,
             depends_on=["products_services_prices"],
             group_name="universal",
         ))
 
+        # 7. Authority Limits & Tone
         topics.append(TopicPlanItem(
             slug="authority_limits",
             label="حدود صلاحيات الموظف الرقمي",
@@ -418,11 +489,7 @@ class InterviewService:
             group_name="universal",
         ))
 
-        # 2. Field-Specific Enhancements
-        is_honey = any(h in tags or h in field_text for h in ("honey", "عسل", "مناحل", "نحل"))
-        is_software = any(s in tags or s in field_text for s in ("software", "برمجيات", "تقنية", "أنظمة", "شبكات", "it"))
-        is_restaurant = any(r in tags or r in field_text for r in ("restaurant", "مطعم", "أغذية", "كافيه", "مقهى"))
-
+        # Field-Specific Topics:
         if is_honey:
             topics.append(TopicPlanItem(
                 slug="honey_types",
@@ -443,6 +510,15 @@ class InterviewService:
                 group_name="field_specific",
             ))
             topics.append(TopicPlanItem(
+                slug="authenticity_guarantee",
+                label="ضمان النقاوة والفحص المخبري",
+                why_it_matters="تأكيد جودة العسل وخلوه من التغذية السكرية",
+                criticality=4,
+                question="هل العسل مفحوص مخبريًا وما هو ضمانكم المعتمد للعملاء في حال التشكيك بالنقاوة؟",
+                depends_on=["honey_types"],
+                group_name="field_specific",
+            ))
+            topics.append(TopicPlanItem(
                 slug="honey_storage",
                 label="إرشادات حفظ وتخزين العسل",
                 why_it_matters="توعية العميل بطريقة الحفظ لضمان عدم التبلور والتلف",
@@ -451,21 +527,12 @@ class InterviewService:
                 depends_on=["honey_types"],
                 group_name="field_specific",
             ))
-            topics.append(TopicPlanItem(
-                slug="authenticity_guarantee",
-                label="ضمان النقاوة والفحص المخبري",
-                why_it_matters="أهم عامل حاسم لشراء العسل هو التأكد من خلوه من التغذية السكرية",
-                criticality=4,
-                question="هل العسل مفحوص مخبريًا وما هو ضمانكم المعتمد للعملاء في حال التشكيك بالنقاوة؟",
-                depends_on=["honey_types"],
-                group_name="field_specific",
-            ))
 
         elif is_software:
             topics.append(TopicPlanItem(
                 slug="target_clients",
                 label="العملاء والقطاعات المستهدفة",
-                why_it_matters="تحديد ما إذا كان البرنامج يناسب نشاط العميل وحجم أعماله",
+                why_it_matters="تحديد نوع المنشآت التي تخدمها الحلول البرمجية",
                 criticality=4,
                 question="من هم العملاء أو القطاعات المستهدفة بحلولكم البرمجية؟ (شركات، متاجر، مصانع...)",
                 depends_on=["products_services_prices"],
@@ -474,54 +541,34 @@ class InterviewService:
             topics.append(TopicPlanItem(
                 slug="software_licenses",
                 label="أنواع التراخيص ونماذج الاشتراك",
-                why_it_matters="توضيح الفروق بين الاشتراكات السحابية والشراء الدائم",
+                why_it_matters="شرح باقات الترخيص للعملاء (سنوي، شهري، ترخيص دائم)",
                 criticality=4,
-                question="كيف يتم ترخيص البرامج لديكم؟ (اشتراك سنوي/شهري، شراء رخصة دائمة، تكلفة المستخدمين...)",
-                depends_on=["products_services_prices"],
+                question="ما هي نماذج الترخيص المتاحة لأنظمتكم؟ (اشتراك سنوي سحابي، ترخيص دائم...)",
+                depends_on=["target_clients"],
                 group_name="field_specific",
             ))
             topics.append(TopicPlanItem(
                 slug="support_sla_policy",
                 label="سياسة الدعم الفني واتفاقيات الخدمة (SLA)",
-                why_it_matters="حاجة العملاء لمعرفة سرعة التجاوب وآلية حل المشاكل التقنية",
+                why_it_matters="طرق وقنوات المساعدة الفنية للعملاء بعد البيع",
                 criticality=4,
-                question="ما هي سياسة الدعم الفني المتبعة وأوقات استجابة الفريق للعملاء وحل المشاكل؟",
-                depends_on=["products_services_prices"],
+                question="ما هي قنوات وأوقات الدعم الفني المتاحة للعملاء، وهل يشمل ذلك التحديثات المستمرة؟",
+                depends_on=["software_licenses"],
                 group_name="field_specific",
             ))
             topics.append(TopicPlanItem(
                 slug="partnerships_certifications",
                 label="الشهادات والشراكات والاعتمادات",
-                why_it_matters="تعزيز موثوقية الحلول التقنية في بيئات الأعمال المتقدمة",
+                why_it_matters="تعزيز موثوقية الشركة وحلولها التقنية",
                 criticality=2,
-                question="هل تمتلك المنشأة اعتمادات أو شهادات أو شراكات تقنية تحب إبرازها للعملاء؟",
+                question="هل تمتلكون شهادات اعتماد تقنية أو شراكات مع مزودي خدمات سحابية معتمدين؟",
                 depends_on=["identity"],
                 group_name="field_specific",
             ))
 
-        elif is_restaurant:
-            topics.append(TopicPlanItem(
-                slug="menu_categories",
-                label="أقسام وتصنيفات المنيو",
-                why_it_matters="مساعدة العميل على تصفح المنيو واختيار وجبته",
-                criticality=5,
-                question="ما هي الأقسام والأصناف الرئيسية في قائمة الطعام لديكم؟",
-                depends_on=["products_services_prices"],
-                group_name="field_specific",
-            ))
-            topics.append(TopicPlanItem(
-                slug="dine_in_takeaway",
-                label="الطلبات الداخلية والسفري والتوصيل",
-                why_it_matters="تحديد خيارات تناول الوجبات أو استلامها",
-                criticality=4,
-                question="هل الخدمة متاحة داخل المطعم، سفري، وتوصيل منازل؟",
-                depends_on=["menu_categories"],
-                group_name="field_specific",
-            ))
-
-        # 3. Country-Specific Branching (e.g. Yemen delivery ladder)
+        # Country-Specific Follow-ups (Yemen for physical goods):
         is_yemen = any(y in tags or y in country_text for y in ("yemen", "اليمن"))
-        if is_yemen:
+        if is_yemen and not is_software:
             topics.append(TopicPlanItem(
                 slug="delivery_zones_yemen",
                 label="مناطق وتكلفة التوصيل داخل المحافظة",
@@ -601,15 +648,11 @@ class InterviewService:
         self.db.flush()
 
     # -----------------------------------------------------------------------
-    # Next-Question Selector (Deterministic, NOT the model)
+    # Next-Question Selector (Deterministic Highest Criticality)
     # -----------------------------------------------------------------------
 
     def get_next_question_topic(self, tenant_id: UUID) -> InterviewTopic | None:
-        """
-        Deterministic topic selector:
-        Among topics with status 'unknown' whose depends_on prerequisites are all satisfied
-        (answered, skipped, or not_applicable), selects highest criticality (tie-break by dependency depth).
-        """
+        """Determines the next best topic to ask based on dependencies and criticality."""
         all_topics = self.db.scalars(
             select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id)
         ).all()
@@ -617,151 +660,176 @@ class InterviewService:
         if not all_topics:
             return None
 
-        status_by_slug = {t.slug: t.status for t in all_topics}
-        SATISFIED_STATUSES = {"answered", "skipped", "not_applicable"}
+        status_map = {t.slug: t.status for t in all_topics}
+        candidates = []
 
-        candidates: list[InterviewTopic] = []
         for t in all_topics:
             if t.status != "unknown":
                 continue
-            deps = t.depends_on or []
-            if all(status_by_slug.get(d) in SATISFIED_STATUSES for d in deps):
+
+            deps_satisfied = True
+            for d in (t.depends_on or []):
+                dep_status = status_map.get(d, "unknown")
+                if dep_status not in ("answered", "not_applicable", "skipped"):
+                    deps_satisfied = False
+                    break
+
+            if deps_satisfied:
                 candidates.append(t)
 
         if not candidates:
             return None
 
-        # Sort: criticality descending, then dependency depth descending, then created_at ascending
+        # Sort: highest criticality first, then dependency depth
         candidates.sort(
-            key=lambda t: (
-                t.criticality,
-                len(t.depends_on or []),
-                -t.created_at.timestamp() if t.created_at else 0,
-            ),
+            key=lambda item: (item.criticality, len(item.depends_on or [])),
             reverse=True,
         )
         return candidates[0]
 
     def get_next_question(self, tenant_id: UUID) -> str | None:
-        """Returns the formatted Arabic question for the next selected topic."""
-        topic = self.get_next_question_topic(tenant_id)
-        if topic is None:
+        """Emits the next single Arabic question."""
+        best_topic = self.get_next_question_topic(tenant_id)
+        if best_topic is None:
             return None
 
-        # Update topic status to 'asked'
-        topic.status = "asked"
-        self.db.add(topic)
-
-        # Update current topic in interview state
         state = self.get_or_create_state(tenant_id)
-        state.current_topic_slug = topic.slug
+        state.current_topic_slug = best_topic.slug
+        best_topic.status = "asked"
         self.db.add(state)
+        self.db.add(best_topic)
         self.db.flush()
 
-        # Add suggested options if relevant
-        options = self._suggest_options(topic.slug)
-        if options:
-            opts_str = " | ".join(options)
-            return f"{topic.question}\n(خيارات سريعة: {opts_str})"
-        return topic.question
-
-    @staticmethod
-    def _suggest_options(slug: str) -> list[str]:
-        """Provides quick-reply suggestions for common topics."""
-        mapping = {
-            "ordering_payment": ["تحويل بنكي", "دفع عند الاستلام", "كاش بالفرع"],
-            "returns_warranty": ["استرجاع خلال 3 أيام", "استبدال فقط", "لا يوجد استرجاع"],
-            "branches_hours": ["لدينا فروع ومحلات", "متجر إلكتروني فقط"],
-            "international_shipping": ["نعم نوفر شحن دولي", "لا، شحن محلي فقط"],
-            "authority_limits": ["صلاحيات كاملة للاستفسارات والأسعار", "يلزم تأكيد المالك للخصومات"],
-            "tone_voice": ["رسمية واحترافية", "ودية وترحيبية", "مختصرة ومباشرة"],
-            "unknown_questions_handling": ["إبلاغ العميل بمراجعة الفريق", "إحالة فورية للمالك"],
-        }
-        return mapping.get(slug, [])
+        return best_topic.question
 
     # -----------------------------------------------------------------------
-    # Multi-Topic Extraction & Status Update
+    # Content-Driven Topic Coverage Evaluation (AI Model + Semantic Fallback)
     # -----------------------------------------------------------------------
 
-    def mark_covered_topics_from_reply(
+    def evaluate_reply_coverage(
         self,
         tenant_id: UUID,
         content: str,
-        message_id: UUID,
+        open_topics: list[InterviewTopic],
         current_topic_slug: str | None = None,
-        extracted_facts: list[ExtractedFactItem] | None = None,
-    ) -> list[str]:
+        ai_provider: AIProvider | None = None,
+    ) -> ReplyCoverageEvaluation:
         """
-        Marks every topic covered by the owner's message.
-        An owner may answer multiple topics in a single turn.
-        Returns list of newly answered topic slugs.
+        Evaluates owner reply content against open topics via strict model call
+        with deterministic semantic fallback.
         """
-        newly_covered: list[str] = []
-        c_lower = content.lower()
+        content_clean = (content or "").strip()
+        c_lower = content_clean.lower()
 
-        # Map extracted facts topics to interview topic slugs
-        fact_topics = {f.topic for f in (extracted_facts or [])}
+        # Check skip and not_applicable first, then negative rejection
+        is_skip = bool(self.is_skip_or_na(content_clean) == "skip")
+        is_na = bool(self.is_skip_or_na(content_clean) == "not_applicable")
+        is_negative = not is_skip and bool(re.search(r"^\s*(?:لا(?!\s*(?:أعلم|اعلم|أعرف|اعرف|أدري|ادري))\b|لا\s*نوفر|غير\s*متاح|ما\s*في|ليس\s*لدينا|ما\s*عندنا|لا\s*يوجد)\b", content_clean))
 
-        has_identity = any(t in fact_topics for t in ("company.identity", "company.name")) or bool(
-            re.search(r"اسم\s*(?:شركتنا|الشركة|المتجر|المحل|منشأتنا)", c_lower)
-        )
-        has_products = any(t.startswith("product.") or t == "products" for t in fact_topics) or bool(
-            re.search(r"(?:نبيع|نوفر|نقدم|منتجاتنا|خدماتنا|سعر|بسعر)\b", c_lower)
-        )
-        has_coverage = any(t.startswith("operations.") or "coverage" in t or "delivery" in t for t in fact_topics) or bool(
-            re.search(r"(?:نخدم|نوصل|فروعنا|تغطيتنا|نغطي|في\s*(?:صنعاء|عدن|الرياض|جدة))\b", c_lower)
-        )
-        has_payment = any("payment" in t or "pricing" in t for t in fact_topics) or bool(
-            re.search(r"(?:تحويل\s*بنكي|دفع\s*عند\s*الاستلام|كاش|سداد|فيزا|مدى)\b", c_lower)
-        )
-        has_branches = bool(re.search(r"(?:فروعنا|فرع\s*في|ساعات\s*العمل|دوامنا|نفتح\s*من)", c_lower))
-        has_honey_types = any("honey" in t for t in fact_topics) or bool(re.search(r"(?:سدر|دوعني|سمر|صال|مراعي|عسل\s*\w+)", c_lower))
+        # 1. Attempt Live AI Provider evaluation if available and not a simple negative/skip
+        if ai_provider is not None and not (is_negative or is_skip or is_na):
+            try:
+                system_instruction = (
+                    "You are the Adaptive Onboarding Topic Evaluation Engine.\n"
+                    "Analyze the owner's message and determine coverage status for each open interview topic.\n"
+                    "Status options: 'covered', 'partial', 'not_covered', 'skipped', 'not_applicable'.\n"
+                    "CRITICAL RULES:\n"
+                    "1. Answering one topic does NOT cover another (e.g. stating honey types does NOT cover payment methods; stating target clients does NOT cover payment methods).\n"
+                    "2. If the currently asked topic was NOT directly addressed by the owner, its status MUST be 'not_covered'.\n"
+                    "3. Extract exact verbatim details into extracted_details."
+                )
+                topics_payload = [
+                    {"slug": t.slug, "label": t.label, "question": t.question}
+                    for t in open_topics
+                ]
+                user_prompt = (
+                    f"Owner Message Content:\n\"\"\"{content_clean}\"\"\"\n\n"
+                    f"Currently Asked Topic Slug: {current_topic_slug or 'none'}\n\n"
+                    f"Open Topics:\n{json.dumps(topics_payload, ensure_ascii=False, indent=2)}"
+                )
+                res = ai_provider.generate_json(
+                    user_prompt,
+                    schema=ReplyCoverageEvaluation,
+                    system_instruction=system_instruction,
+                )
+                if isinstance(res, dict) and "evaluations" in res:
+                    parsed = ReplyCoverageEvaluation.model_validate(res)
+                    if parsed.evaluations:
+                        return parsed
+            except Exception as exc:
+                logger.warning("AI model coverage evaluation failed for tenant %s: %s; using semantic evaluator", tenant_id, exc)
 
-        slug_triggers = {
+        # 2. Deterministic Semantic Fallback Evaluator
+        evaluations: list[TopicCoverageItem] = []
+        acknowledged_points: list[str] = []
+
+        # Content detection triggers
+        has_payment = bool(re.search(r"(?:تحويل\s*بنكي|دفع\s*عند\s*الاستلام|كاش|سداد|فيزا|مدى|فواتير|عقد\s*سنوي|شيك|طرق\s*الدفع)\b", c_lower))
+        has_honey_types = bool(re.search(r"(?:سدر|دوعني|سمر|صال|مراعي|زهور|جبلي|عسل\s*\w+)", c_lower)) and "عسل" in c_lower
+        has_target_clients = bool(re.search(r"(?:مؤسسات|شركات|قطاعات|جهات|أفراد|تجار|عملاء|مصانع|متاجر)\b", c_lower)) and any(w in c_lower for w in ("موجهة", "نستهدف", "عملاؤنا", "للمؤسسات", "للشركات", "للمتاجر"))
+        has_software_licenses = bool(re.search(r"(?:تراخيص|ترخيص|اشتراك|سنوي|شهري|مدى\s*الحياة|سحابي|باقات)\b", c_lower)) and any(w in c_lower for w in ("ترخيص", "تراخيص", "اشتراك", "سنوية", "شهرية"))
+        has_support = bool(re.search(r"(?:دعم\s*فني|صيانة|متابعة|مستمر|طوال\s*الأسبوع|خدمة\s*العملاء|sla)\b", c_lower))
+        has_packaging = bool(re.search(r"(?:كيلو|نصف|ربع|جرام|عبوات|حجم|أحجام|علبة|علب)\b", c_lower))
+        has_coverage = bool(re.search(r"(?:نخدم|نوصل|فروعنا|تغطيتنا|نغطي|في\s*(?:صنعاء|عدن|الرياض|جدة|الخليج|المحافظات)|سحابيا|عالميا)\b", c_lower))
+        has_branches = bool(re.search(r"(?:فروعنا|فرع\s*في|ساعات\s*العمل|دوامنا|نفتح\s*من|مقرنا|مقر\s*رئيسي)", c_lower))
+        has_warranty = bool(re.search(r"(?:استرجاع|استبدال|ضمان|كفالة|استرداد|مشكلات\s*فنية)", c_lower))
+        has_authenticity = bool(re.search(r"(?:مفحوص|مخبريا|فحص|نقي|أصلي|مضمون|نقاوة|مختبر)", c_lower))
+        has_identity = bool(re.search(r"(?:اسمنا|اسم\s*(?:الشركة|المنشأة|المتجر)|نحن\s*شركة|شركة\s+\w+|منشأة\s+\w+|متجر\s+\w+)", c_lower))
+        has_products = bool(re.search(r"(?:نبيع|نوفر|نقدم|منتجنا|منتجاتنا|أنظمتنا|حلولنا|برامجنا|خدماتنا|سعر|بسعر|باقاتنا)\b", c_lower))
+
+        trigger_map = {
+            "ordering_payment": has_payment,
+            "honey_types": has_honey_types,
+            "target_clients": has_target_clients,
+            "software_licenses": has_software_licenses,
+            "support_sla_policy": has_support,
+            "packaging_sizes": has_packaging,
+            "delivery_coverage": has_coverage,
+            "service_coverage": has_coverage,
+            "delivery_zones_yemen": has_coverage and ("صنعاء" in c_lower or "عدن" in c_lower),
+            "between_governorates_yemen": has_coverage and any(w in c_lower for w in ("محافظات", "بين المحافظات", "شحن")),
+            "branches_hours": has_branches,
+            "returns_warranty": has_warranty,
+            "authenticity_guarantee": has_authenticity,
             "identity": has_identity,
             "products_services_prices": has_products,
-            "delivery_coverage": has_coverage,
-            "delivery_zones_yemen": has_coverage and "اليمن" in c_lower or ("صنعاء" in c_lower or "عدن" in c_lower),
-            "between_governorates_yemen": has_coverage and any(w in c_lower for w in ("محافظات", "بين المحافظات", "شحن")),
-            "ordering_payment": has_payment,
-            "branches_hours": has_branches,
-            "honey_types": has_honey_types,
         }
 
-        # Check each open topic
-        topics = self.db.scalars(
-            select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id)
-        ).all()
+        for t in open_topics:
+            status = "not_covered"
+            extracted_val = None
 
-        for t in topics:
-            if t.status in ("answered", "not_applicable"):
-                continue
-
-            should_mark = False
-            # If this was the explicitly asked current topic
             if current_topic_slug and t.slug == current_topic_slug:
-                should_mark = True
-            # Or if content covered its domain
-            elif slug_triggers.get(t.slug) is True:
-                should_mark = True
+                if is_skip:
+                    status = "skipped"
+                elif is_na or is_negative:
+                    status = "not_applicable"
+                elif trigger_map.get(t.slug) is True:
+                    status = "covered"
+                    extracted_val = content_clean
+                else:
+                    # Current topic not answered by this content!
+                    status = "not_covered"
+            else:
+                if trigger_map.get(t.slug) is True:
+                    status = "covered"
+                    extracted_val = content_clean
 
-            if should_mark:
-                t.status = "answered"
-                t.coverage = 1.0
-                t.source_message_id = message_id
-                self.db.add(t)
-                newly_covered.append(t.slug)
+            if status == "covered":
+                acknowledged_points.append(t.label)
 
-        self.db.flush()
-        return newly_covered
+            evaluations.append(TopicCoverageItem(slug=t.slug, status=status, extracted_details=extracted_val))
+
+        ack_summary = "، ".join(dict.fromkeys(acknowledged_points)) if acknowledged_points else None
+        return ReplyCoverageEvaluation(evaluations=evaluations, acknowledged_summary=ack_summary)
 
     def handle_branch_closure(self, tenant_id: UUID, closed_slug: str) -> None:
-        """When an owner answers negatively (e.g. 'لا' to international shipping), closes dependent topics."""
+        """When an owner answers negatively (e.g. 'لا'), marks dependent topics as not_applicable."""
         all_topics = self.db.scalars(
             select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id)
         ).all()
         for t in all_topics:
-            if t.depends_on and closed_slug in t.depends_on and t.status == "unknown":
+            if t.depends_on and closed_slug in t.depends_on and t.status in ("unknown", "asked"):
                 t.status = "not_applicable"
                 t.coverage = 0.0
                 self.db.add(t)
@@ -778,78 +846,58 @@ class InterviewService:
         content: str,
         ai_provider: AIProvider | None = None,
     ) -> tuple[str, bool]:
-        """
-        Processes an incoming owner message during the adaptive interview.
-        Returns (reply_text, is_interview_response).
-        If message is off-topic, returns (reply_text, False) so conversational engine
-        answers the query while preserving interview state.
-        """
+        """Processes an incoming owner message during the adaptive interview."""
         state = self.get_or_create_state(tenant_id)
         content_clean = (content or "").strip()
 
-        # 1. Check for Progress Query ("وش باقي؟")
+        # 1. Progress Query ("وش باقي؟")
         trigger = self.detect_trigger(content_clean)
         if trigger == "progress":
             return self.get_progress_summary(tenant_id), True
 
-        # 2. Check for Start / Resume Explicit Commands
+        # 2. Start / Resume Commands
         if trigger in ("start", "resume"):
             return self.resume_interview(tenant_id), True
 
-        # 3. Check for Off-Topic Inquiry during topic interview
-        if state.stage == "interviewing" and state.current_topic_slug:
-            curr_topic = self.db.scalar(
-                select(InterviewTopic).where(
-                    InterviewTopic.tenant_id == tenant_id,
-                    InterviewTopic.slug == state.current_topic_slug,
-                )
-            )
-            curr_q = curr_topic.question if curr_topic else ""
-            if self.is_off_topic_message(content_clean, curr_q):
-                # Don't swallow off-topic question! Return False to allow engine to answer.
-                return "", False
-
-        # 4. Handle Stage 1: Classification Turn
+        # 3. Handle Stage 1: Classification Turn
         if state.stage.startswith("classification_"):
             reply = self.handle_classification_step(
                 tenant_id, state, content_clean, message_id, ai_provider=ai_provider
             )
             return reply, True
 
-        # 5. Handle Stage 3: Topic Interview Turn
+        # 4. Handle Stage 3: Topic Interview Turn
         if state.stage == "interviewing":
             curr_slug = state.current_topic_slug
 
-            # Check skip or not applicable
-            skip_type = self.is_skip_or_na(content_clean)
-            if skip_type:
-                if curr_slug:
-                    curr_topic = self.db.scalar(
-                        select(InterviewTopic).where(
-                            InterviewTopic.tenant_id == tenant_id,
-                            InterviewTopic.slug == curr_slug,
-                        )
-                    )
-                    if curr_topic:
-                        curr_topic.status = "not_applicable" if skip_type == "not_applicable" else "skipped"
-                        curr_topic.source_message_id = message_id
-                        self.db.add(curr_topic)
-                        self.db.flush()
-                        # If not applicable, close dependent branch
-                        if skip_type == "not_applicable":
-                            self.handle_branch_closure(tenant_id, curr_slug)
+            # Fetch open topics
+            open_topics = self.db.scalars(
+                select(InterviewTopic).where(
+                    InterviewTopic.tenant_id == tenant_id,
+                    InterviewTopic.status.in_(["unknown", "asked", "partial"]),
+                )
+            ).all()
 
-                ack = "تم تخطي الموضوع." if skip_type == "skip" else "تم تسجيل أن هذا الموضوع لا ينطبق على منشأتكم."
-                next_q = self.get_next_question(tenant_id)
-                if next_q:
-                    return f"{ack}\n\n{next_q}", True
+            if not open_topics and not curr_slug:
                 state.stage = "completed"
                 self.db.add(state)
                 self.db.flush()
-                return f"{ack}\n\n🎉 تم استكمال جلسة التعارف بنجاح! موظفك الرقمي جاهز الآن لخدمة العملاء.", True
+                return "🎉 تم استكمال جلسة التعارف بنجاح! موظفك الرقمي جاهز الآن لخدمة العملاء.", True
 
-            # Negative closure detection (e.g. "لا" to international shipping or branches)
-            if re.search(r"^\s*(?:لا|لا\s*نوفر|غير\s*متاح|ما\s*في|ليس\s*لدينا)\b", content_clean) and curr_slug:
+            # Evaluate content coverage across all open topics
+            evaluation = self.evaluate_reply_coverage(
+                tenant_id=tenant_id,
+                content=content_clean,
+                open_topics=open_topics,
+                current_topic_slug=curr_slug,
+                ai_provider=ai_provider,
+            )
+
+            curr_eval = next((e for e in evaluation.evaluations if e.slug == curr_slug), None) if curr_slug else None
+            curr_status = curr_eval.status if curr_eval else "not_covered"
+
+            # Check negative answer ("لا") on current topic
+            if curr_status == "not_applicable" and curr_slug:
                 curr_topic = self.db.scalar(
                     select(InterviewTopic).where(
                         InterviewTopic.tenant_id == tenant_id,
@@ -857,13 +905,14 @@ class InterviewService:
                     )
                 )
                 if curr_topic:
-                    curr_topic.status = "answered"
+                    curr_topic.status = "not_applicable"
+                    curr_topic.coverage = 0.0
                     curr_topic.source_message_id = message_id
                     self.db.add(curr_topic)
                     self.db.flush()
                     self.handle_branch_closure(tenant_id, curr_slug)
 
-                ack = "تم تسجيل ذلك."
+                ack = "تم تسجيل ذلك كـ (لا ينطبق)."
                 next_q = self.get_next_question(tenant_id)
                 if next_q:
                     return f"{ack}\n\n{next_q}", True
@@ -872,7 +921,131 @@ class InterviewService:
                 self.db.flush()
                 return f"{ack}\n\n🎉 تم استكمال جلسة التعارف بنجاح!", True
 
-            # Substantive Answer: Run Phase 2 Structured Fact Extraction
+            # Check skip
+            if curr_status == "skipped" and curr_slug:
+                curr_topic = self.db.scalar(
+                    select(InterviewTopic).where(
+                        InterviewTopic.tenant_id == tenant_id,
+                        InterviewTopic.slug == curr_slug,
+                    )
+                )
+                if curr_topic:
+                    curr_topic.status = "skipped"
+                    curr_topic.coverage = 0.0
+                    curr_topic.source_message_id = message_id
+                    self.db.add(curr_topic)
+                    self.db.flush()
+
+                ack = "تم تسجيل تخطي هذا الموضوع."
+                next_q = self.get_next_question(tenant_id)
+                if next_q:
+                    return f"{ack}\n\n{next_q}", True
+                state.stage = "completed"
+                self.db.add(state)
+                self.db.flush()
+                return f"{ack}\n\n🎉 تم استكمال جلسة التعارف بنجاح!", True
+
+            # Check if currently asked topic was NOT covered by the reply
+            if curr_status == "not_covered" and curr_slug:
+                curr_topic = self.db.scalar(
+                    select(InterviewTopic).where(
+                        InterviewTopic.tenant_id == tenant_id,
+                        InterviewTopic.slug == curr_slug,
+                    )
+                )
+                if curr_topic:
+                    answers_copy = dict(state.classification_answers or {})
+                    topic_attempts = dict(answers_copy.get("topic_attempts", {}))
+                    attempts = topic_attempts.get(curr_slug, 0) + 1
+                    topic_attempts[curr_slug] = attempts
+                    answers_copy["topic_attempts"] = topic_attempts
+                    state.classification_answers = answers_copy
+                    flag_modified(state, "classification_answers")
+
+                    # Mark other topics that WERE covered in this reply
+                    covered_other = [e for e in evaluation.evaluations if e.slug != curr_slug and e.status == "covered"]
+                    for e in covered_other:
+                        ot = next((t for t in open_topics if t.slug == e.slug), None)
+                        if ot:
+                            ot.status = "answered"
+                            ot.coverage = 1.0
+                            ot.source_message_id = message_id
+                            self.db.add(ot)
+                            self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
+                    self.db.flush()
+
+                    # Also extract products & general facts from this reply
+                    try:
+                        ext_res = self.fact_service.extract_facts(
+                            tenant_id=tenant_id,
+                            message_text=content_clean,
+                            provider=ai_provider,
+                        )
+                        if ext_res and ext_res.facts:
+                            self.fact_service.save_extracted_facts(
+                                tenant_id=tenant_id,
+                                extracted_facts=ext_res.facts,
+                                auto_confirm_direct=True,
+                            )
+                    except Exception as err:
+                        logger.warning("Fact extraction in not_covered turn failed: %s", err)
+
+                    ack_text = ""
+                    if covered_other:
+                        labels = [next((t.label for t in open_topics if t.slug == e.slug), e.slug) for e in covered_other]
+                        ack_text = f"✅ تم توثيق ما ذكرته بخصوص: {', '.join(labels)}.\n\n"
+
+                    if attempts < 2:
+                        curr_topic.status = "asked"
+                        self.db.add(curr_topic)
+                        self.db.flush()
+                        reask = f"ولكن بالنسبة لـ **{curr_topic.label}**:\n{curr_topic.question}"
+                        return f"{ack_text}{reask}".strip(), True
+                    else:
+                        # Park topic after 2 attempts
+                        curr_topic.status = "unknown"
+                        self.db.add(curr_topic)
+                        self.db.flush()
+                        next_q = self.get_next_question(tenant_id)
+                        if next_q:
+                            return f"{ack_text}سننتقل للموضوع التالي وسنعود لهذا لاحقاً:\n\n{next_q}".strip(), True
+
+            # If current topic was covered
+            if curr_status == "covered" and curr_slug:
+                curr_topic = self.db.scalar(
+                    select(InterviewTopic).where(
+                        InterviewTopic.tenant_id == tenant_id,
+                        InterviewTopic.slug == curr_slug,
+                    )
+                )
+                if curr_topic:
+                    curr_topic.status = "answered"
+                    curr_topic.coverage = 1.0
+                    curr_topic.source_message_id = message_id
+                    self.db.add(curr_topic)
+                    self._save_covered_topic_facts(tenant_id, curr_slug, content_clean, message_id)
+
+            # Mark all other topics that were covered or not applicable in this reply
+            for e in evaluation.evaluations:
+                if e.slug == curr_slug:
+                    continue
+                if e.status == "covered":
+                    ot = next((t for t in open_topics if t.slug == e.slug), None)
+                    if ot:
+                        ot.status = "answered"
+                        ot.coverage = 1.0
+                        ot.source_message_id = message_id
+                        self.db.add(ot)
+                        self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
+                elif e.status == "not_applicable":
+                    ot = next((t for t in open_topics if t.slug == e.slug), None)
+                    if ot:
+                        ot.status = "not_applicable"
+                        ot.coverage = 0.0
+                        self.db.add(ot)
+                        self.handle_branch_closure(tenant_id, e.slug)
+
+            # Also extract products & general facts via FactService
             extraction_res = self.fact_service.extract_facts(
                 tenant_id=tenant_id,
                 message_text=content_clean,
@@ -886,25 +1059,17 @@ class InterviewService:
                 message_text=content_clean,
             )
             saved_facts = list(save_result.get("confirmed", [])) + list(save_result.get("pending", []))
-            conflicts = list(save_result.get("conflicts", []))
-
-            # Mark all topics covered by this reply
-            covered = self.mark_covered_topics_from_reply(
-                tenant_id=tenant_id,
-                content=content_clean,
-                message_id=message_id,
-                current_topic_slug=curr_slug,
-                extracted_facts=extracted_items,
-            )
 
             # Build read-back acknowledgment
-            saved_labels = [f.subject for f in saved_facts]
+            saved_labels = [f.subject for f in saved_facts if hasattr(f, "subject")]
             if saved_labels:
                 ack_lines = [f"✅ تم حفظ وتأكيد: {', '.join(saved_labels)}"]
+            elif evaluation.acknowledged_summary:
+                ack_lines = [f"✅ تم توثيق ما ذكرته بخصوص: {evaluation.acknowledged_summary}"]
             else:
-                ack_lines = ["✅ تم حفظ وتوثيق إجابتك بنجاح."]
+                ack_lines = ["✅ تم توثيق إجابتك بنجاح."]
 
-            # Select Next Question
+            # Select Next Question (covered topics will NEVER be asked again!)
             next_q = self.get_next_question(tenant_id)
             if next_q:
                 ack_lines.append(f"\n{next_q}")
@@ -915,22 +1080,105 @@ class InterviewService:
             state.last_interaction_at = datetime.now(timezone.utc)
             self.db.add(state)
             self.db.flush()
-            ack_lines.append("\n🎉 تم استكمال جلسة التعارف بنجاح! موظفك الرقمي جاهز لخدمة العملاء بكامل طاقته.")
+            ack_lines.append("\n🎉 تم استكمال كافة مواضيع التعارف بنجاح! موظفك الرقمي جاهز لخدمة العملاء بكامل طاقته.")
             return "\n".join(ack_lines), True
 
         return "محادثة التعارف مكتملة. يمكنك السؤال عن أي تفصيل في أي وقت.", True
+
+    def _save_covered_topic_facts(
+        self,
+        tenant_id: UUID,
+        slug: str,
+        content: str,
+        message_id: UUID,
+    ) -> None:
+        """Stores structured confirmed facts for domain-specific topics."""
+        c = content.strip()
+        facts_to_save: list[ExtractedFactItem] = []
+
+        if slug == "identity":
+            # Extract verbatim company name
+            clean_name = re.sub(r"^(?:اسمنا|اسم\s*(?:الشركة|المنشأة|المتجر)|الاسم\s*الرسمي)\s*[:—\-=]?\s*", "", c).strip()
+            clean_name = re.sub(r"^(?:الرسمي|المعتمد)\s+", "", clean_name).strip()
+            facts_to_save.append(
+                ExtractedFactItem(
+                    topic="company.identity",
+                    subject="اسم المنشأة",
+                    value={"name": clean_name or c},
+                    visibility="public",
+                    is_direct_unambiguous=True,
+                )
+            )
+
+        elif slug == "target_clients":
+            facts_to_save.append(
+                ExtractedFactItem(
+                    topic="company.target_clients",
+                    subject="العملاء المستهدفون",
+                    value={"target_clients": c},
+                    visibility="public",
+                    is_direct_unambiguous=True,
+                )
+            )
+
+        elif slug == "software_licenses":
+            facts_to_save.append(
+                ExtractedFactItem(
+                    topic="software.licenses",
+                    subject="نماذج التراخيص",
+                    value={"licenses": c},
+                    visibility="public",
+                    is_direct_unambiguous=True,
+                )
+            )
+
+        elif slug == "support_sla_policy":
+            facts_to_save.append(
+                ExtractedFactItem(
+                    topic="operations.support",
+                    subject="سياسة الدعم الفني",
+                    value={"support_policy": c},
+                    visibility="public",
+                    is_direct_unambiguous=True,
+                )
+            )
+
+        elif slug == "honey_types":
+            facts_to_save.append(
+                ExtractedFactItem(
+                    topic="honey.types",
+                    subject="أنواع العسل المتوفرة",
+                    value={"types": c},
+                    visibility="public",
+                    is_direct_unambiguous=True,
+                )
+            )
+
+        elif slug in ("service_coverage", "delivery_coverage"):
+            facts_to_save.append(
+                ExtractedFactItem(
+                    topic="operations.coverage",
+                    subject="نطاق التغطية والخدمة",
+                    value={"coverage": c},
+                    visibility="public",
+                    is_direct_unambiguous=True,
+                )
+            )
+
+        if facts_to_save:
+            self.fact_service.save_extracted_facts(
+                tenant_id=tenant_id,
+                extracted_facts=facts_to_save,
+                auto_confirm_direct=True,
+                message_text=c,
+            )
 
     # -----------------------------------------------------------------------
     # Progress Summary ("وش باقي؟")
     # -----------------------------------------------------------------------
 
     def get_progress_summary(self, tenant_id: UUID) -> str:
-        """
-        Returns a clear progress report:
-        - Covered count vs Total count
-        - Critical coverage percentage
-        - List of open critical topics
-        """
+        """Returns progress report."""
         topics = self.db.scalars(
             select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id)
         ).all()
@@ -961,68 +1209,34 @@ class InterviewService:
             lines.append("\n⚠️ **المواضيع الحرجة المتبقية:**")
             for t in open_critical[:5]:
                 lines.append(f"- {t.label} (أهمية: {t.criticality}/5)")
-            lines.append("\nيمكنك إكمالها في أي وقت بالرد على السؤال أو كتابة 'كمّل التعارف'.")
-        else:
-            lines.append("\n✅ تم تغطية جميع المواضيع الحرجة بنجاح! المنشأة جاهزة لخدمة العملاء.")
 
         return "\n".join(lines)
 
     # -----------------------------------------------------------------------
-    # Resume / Restart Interview
+    # Go-Live Gate Evaluation
     # -----------------------------------------------------------------------
 
-    def resume_interview(self, tenant_id: UUID) -> str:
-        """Resumes the interview where it paused, returning the appropriate question."""
-        state = self.get_or_create_state(tenant_id)
-        state.is_active = True
-        state.last_interaction_at = datetime.now(timezone.utc)
-        self.db.add(state)
-        self.db.flush()
-
-        # If still in classification
-        if state.stage.startswith("classification_"):
-            q_key = state.stage
-            owner_name = (state.classification_answers or {}).get("owner_name", "صاحب المنشأة")
-            template = CLASSIFICATION_QUESTIONS.get(q_key, CLASSIFICATION_QUESTIONS["classification_1"])
-            return f"مرحباً بك مجدداً! لنواصل التعارف:\n\n{template.format(owner_name=owner_name)}"
-
-        # If in topic interview
-        next_q = self.get_next_question(tenant_id)
-        if next_q:
-            return f"مرحباً بك مجدداً! لنواصل التعارف من حيث توقفنا:\n\n{next_q}"
-
-        return "🎉 جميع مواضيع التعارف مكتملة! المنشأة جاهزة للعمل بالكامل."
-
-    # -----------------------------------------------------------------------
-    # Go-Live Gate Verification
-    # -----------------------------------------------------------------------
-
-    def check_go_live_gate(
-        self,
-        tenant_id: UUID,
-        threshold: float = 80.0,
-    ) -> tuple[bool, float, list[str]]:
-        """
-        Evaluates the go-live gate for customer queries:
-        Returns (is_ready, critical_percentage, missing_critical_labels).
-        """
-        critical_topics = self.db.scalars(
-            select(InterviewTopic).where(
-                InterviewTopic.tenant_id == tenant_id,
-                InterviewTopic.criticality >= 4,
-            )
+    def check_go_live_gate(self, tenant_id: UUID, threshold: float = 80.0) -> tuple[bool, float, list[str]]:
+        """Evaluates whether the tenant's critical interview coverage meets go-live threshold."""
+        topics = self.db.scalars(
+            select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id)
         ).all()
 
+        if not topics:
+            return False, 0.0, ["لم يتم بدء المقابلة التكيفية"]
+
+        critical_topics = [t for t in topics if t.criticality >= 4]
         if not critical_topics:
             return True, 100.0, []
 
-        total_crit = len(critical_topics)
-        answered_crit = sum(1 for t in critical_topics if t.status in ("answered", "not_applicable"))
-        crit_pct = (answered_crit / total_crit) * 100.0
+        total_critical = len(critical_topics)
+        answered_critical = sum(1 for t in critical_topics if t.status in ("answered", "not_applicable"))
+        critical_pct = (answered_critical / total_critical) * 100.0
 
         missing = [t.label for t in critical_topics if t.status not in ("answered", "not_applicable")]
-        is_ready = crit_pct >= threshold
-        return is_ready, crit_pct, missing
+        is_ready = bool(critical_pct >= threshold)
+
+        return is_ready, critical_pct, missing
 
     def notify_owner_of_unmet_gate(
         self,
@@ -1031,7 +1245,18 @@ class InterviewService:
         missing_critical: list[str],
         customer_message: str | None = None,
     ) -> None:
-        """Records audit event and alert for tenant owner regarding blocked customer query."""
+        """Sends an urgent reminder to the tenant owner when customer messages are held by the gate."""
+        missing_str = "\n".join(f"- {m}" for m in missing_critical[:4])
+        cust_clause = f"\n📩 رسالة العميل المعلقة:\n\"{customer_message}\"" if customer_message else ""
+        notification_text = (
+            f"⚠️ **تنبيه الموظف الرقمي:**\n"
+            f"وصلت رسالة من عميل ولكن تم الرد عليها برسالة انتظار مؤقتة؛ نظراً لعدم اكتمال جلسة التعارف الأساسية.\n"
+            f"• نسبة تغطية المواضيع الحرجة: {critical_pct:.0f}%\n"
+            f"• المواضيع الحرجة المتبقية المطلوبة:\n{missing_str}\n"
+            f"{cust_clause}\n\n"
+            f"يرجى إرسال 'كمّل التعارف' للإجابة وتفعيل الردود التلقائية الكاملة لعملائك."
+        )
+
         missing_str = ", ".join(missing_critical[:3]) if missing_critical else "البيانات الأساسية"
         self.audit_service.record_event(
             tenant_id=tenant_id,
@@ -1074,39 +1299,29 @@ class InterviewService:
         return any(bool(re.search(p, c)) for p in off_topic_patterns)
 
     # -----------------------------------------------------------------------
-    # Private Cleaning & Parsing Helpers
+    # Cleaning & Helper Methods
     # -----------------------------------------------------------------------
 
     @staticmethod
     def _clean_name_answer(content: str) -> str:
-        c = content.strip()
-        m = re.search(r"(?:اسمي|أنا|انا|معك|الاسم\s*:?)\s*([^\n,.،]+)", c)
-        if m:
-            clean = m.group(1).strip()
-            clean = re.sub(r"^(?:الأخ|السيد|المهندس|الدكتور|الشيخ)\s+", "", clean)
-            if clean:
-                return clean
-        parts = [p for p in c.split() if p not in ("اسمي", "أنا", "انا", "هو", "الاسم", "حياك", "الله")]
-        return " ".join(parts[:3]) if parts else c
+        c = re.sub(r"^(?:أنا|اسمي|الاسم|معكم|حياك\s*الله\s*أنا|أنا\s*المهندس|المهندس|الأخ|أخوك)\s+", "", content).strip()
+        m = re.match(r"([^،,.\n]+)", c)
+        return m.group(1).strip() if m else c
 
     @staticmethod
     def _clean_role_answer(content: str) -> str:
-        c = content.strip()
-        m = re.search(r"(?:صفتي|دوري|أنا|انا|بصفتي|عملي)\s*(?:هو|هي|يكون)?\s*[:—\-]?\s*([^\n,.،]+)", c)
-        if m:
-            return m.group(1).strip()
-        return c
+        return content.split("،")[0].split(",")[0].strip()
 
     @staticmethod
     def _clean_entity_type_answer(content: str) -> str:
-        c = content.strip().lower()
+        c = content.lower()
         if "شركة" in c:
-            return "شركة تجارية"
-        if "محل" in c or "متجر فعلي" in c or "دكان" in c:
-            return "متجر فعلي"
-        if "إلكتروني" in c or "الكتروني" in c or "أونلاين" in c or "اونلاين" in c:
+            return "شركة"
+        if "إلكتروني" in c or "اونلاين" in c or "أونلاين" in c:
             return "متجر إلكتروني"
-        if "خدم" in c or "مؤسسة خدمات" in c:
+        if "محل" in c or "متجر" in c or "معرض" in c:
+            return "متجر فعلي"
+        if "خدمات" in c or "مزود" in c:
             return "مزود خدمات"
         return content.strip()
 
@@ -1114,9 +1329,9 @@ class InterviewService:
     def _clean_country_field_answer(content: str) -> tuple[str, str]:
         c = content.strip()
         country = "اليمن"
-        if any(w in c.lower() for w in ("السعودية", "المملكة", "saudi", "ksa")):
+        if any(w in c.lower() for w in ("السعودية", "saudi", "ksa", "الرياض", "جدة")):
             country = "المملكة العربية السعودية"
-        elif any(w in c.lower() for w in ("الإمارات", "دبي", "ابوظبي", "uae")):
+        elif any(w in c.lower() for w in ("الإمارات", "دبي", "أبوظبي", "uae")):
             country = "الإمارات العربية المتحدة"
         elif any(w in c.lower() for w in ("مصر", "egypt")):
             country = "مصر"
@@ -1130,34 +1345,54 @@ class InterviewService:
         return country, field
 
     @staticmethod
-    def _derive_profile_tags(answers: dict[str, Any]) -> list[str]:
-        """Derives clean lowercase tags describing the business domain."""
-        tags = set()
+    def _derive_profile_tags(answers: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """
+        Derives profile tags, separating stated tags from inferred tags.
+        Only stated tags are used for topic planning.
+        """
+        stated = set()
+        inferred = set()
         c = answers.get("country", "")
         f = answers.get("field_of_activity", "")
         e = answers.get("entity_type", "")
         combined = f"{c} {f} {e}".lower()
 
+        # Stated Country
         if "اليمن" in combined or "yemen" in combined:
-            tags.add("Yemen")
+            stated.add("Yemen")
         if "السعودية" in combined or "saudi" in combined:
-            tags.add("Saudi Arabia")
+            stated.add("Saudi Arabia")
 
-        if any(w in combined for w in ("عسل", "honey", "مناحل")):
-            tags.update(["honey", "retail", "natural_products", "delivery"])
-        if any(w in combined for w in ("برمج", "software", "أنظمة", "تقني", "شبكات")):
-            tags.update(["software", "company", "b2b", "development", "it"])
-        if any(w in combined for w in ("مطعم", "restaurant", "أغذية", "وجبات")):
-            tags.update(["restaurant", "food", "hospitality"])
+        # Stated Entity Type
         if any(w in combined for w in ("متجر", "محل", "shop", "store")):
-            tags.add("shop")
+            stated.add("shop")
         if any(w in combined for w in ("شركة", "company")):
-            tags.add("company")
+            stated.add("company")
 
-        return sorted(list(tags)) or ["general_business"]
+        # Stated Domain
+        if any(w in combined for w in ("عسل", "honey", "مناحل", "نحل")):
+            stated.add("honey")
+            stated.add("natural_products")
+        if any(w in combined for w in ("برمج", "software", "أنظمة", "تقني", "شبكات")):
+            stated.add("software")
+            stated.add("development")
+            stated.add("it")
+        if any(w in combined for w in ("مطعم", "restaurant", "أغذية", "وجبات")):
+            stated.add("restaurant")
+            stated.add("food")
+
+        # Inferred by association (only if NOT stated)
+        if "honey" in stated and not any(w in combined for w in ("توصيل", "شحن")):
+            inferred.add("delivery")
+        if "shop" in stated and "تجزئة" not in combined:
+            inferred.add("retail")
+        if "software" in stated and "شركات" not in combined:
+            inferred.add("b2b")
+
+        return sorted(list(stated)) or ["general_business"], sorted(list(inferred))
 
     def _persist_profile_facts(self, tenant_id: UUID, answers: dict[str, Any]) -> None:
-        """Stores Stage 1 profile answers into the FactService ledger with topic 'profile.*'."""
+        """Stores Stage 1 profile answers into FactService ledger with topic 'profile.*'."""
         facts_to_save = [
             ExtractedFactItem(topic="profile.owner_name", subject="اسم المالك", value={"name": answers.get("owner_name")}),
             ExtractedFactItem(topic="profile.owner_role", subject="صفة المالك", value={"role": answers.get("owner_role")}),

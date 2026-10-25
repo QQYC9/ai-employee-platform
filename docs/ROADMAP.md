@@ -186,6 +186,38 @@ This document outlines the phased plan to evolve the Digital Employee platform f
 
 ---
 
+## Phase 3.1: Adaptive Interview Review Hardening & Verbatim Extraction
+- **Status**: done
+- **Objective**: Fix review-identified interview logic defects: content-driven coverage, verbatim extraction, domain adaptation, negative answer semantics, and clean greetings.
+- **Verification**: Verified with 9 comprehensive tests in `tests/test_phase3_1_review_fixes.py` (9/9 passed) + 10 tests in `tests/test_phase3_adaptive_interview.py` (9 passed, 1 skipped) through the REAL router -> engine path (`InboundMessage` -> `ChannelService` -> `ConversationalAgentEngine`). Full regression suite passing.
+
+### Work Items & Resolved Defects
+- **3.1.1 Content-Driven Topic Coverage & Re-asking**:
+  - After every owner reply, evaluated against open topics via structured model call (`ReplyCoverageEvaluation`) with deterministic semantic fallback.
+  - Asked topic is NOT automatically answered. If reply addresses different topics, acknowledges what was understood, increments attempt counter, re-asks briefly once (`attempts < 2`), and parks topic after 2 attempts (`attempts >= 2`).
+  - Tested: honey payment answered with honey types -> payment re-asked; software payment answered with target clients/licenses -> payment re-asked.
+- **3.1.2 Never Re-Ask Covered Topics**:
+  - Once a topic is covered (e.g. multi-topic reply covering target clients, software licenses, support SLA), its status is updated to `answered` and omitted from future selector picks.
+- **3.1.3 Company Identity Verbatim Extraction**:
+  - Replies like "شركة المنذر للحلول البرمجية الذكية" stored strictly under `company.identity` with verbatim name, NOT misclassified as `company.description` ("مجال النشاط").
+- **3.1.4 Product Names Verbatim & Hardcoded String Removal**:
+  - Eliminated all hardcoded brand/product names (`ناظم`, `سيرو`, `الموظف الذكي`) and rewriting fallbacks from production code in `fact_service.py` and `conversational_agent_engine.py`.
+  - Verified verbatim extraction for "نظام الموظف الذكي السحابي" and "برنامج ناظم لإدارة الشركات" without appending "المحاسبي" or stripping "السحابي", plus verified extraction on unseen products ("منصة الأفق للمتاجر").
+- **3.1.5 Domain-Adapted Universal Topics & Dynamic Quick Replies**:
+  - Cloud software topics adapted dynamically from profile: physical `delivery_coverage` transformed to `service_coverage`, and payment quick replies tailored to digital methods (invoicing, bank transfer, annual contracts; NO cash or COD). Honey shops get physical delivery and COD options.
+- **3.1.6 Negative Answer Semantics**:
+  - Answering "لا" to an optional or yes/no topic marks it `not_applicable` or `skipped`, NEVER `answered`.
+- **3.1.7 Profile Tags Presentation & Stated/Inferred Isolation**:
+  - Display tags to owners in clean Arabic. Unstated tags (such as inferred delivery or B2B) are separated into `inferred` and never stored as stated profile facts or used in topic planning unless confirmed.
+- **3.1.8 Single Non-Duplicated Greeting**:
+  - Eliminated chained welcoming messages upon starting interview ("ابدأ التعارف" or after linking).
+- **3.1.9 Connection Code Link Mechanism**:
+  - Documented and verified `ChannelService.process_inbound_message` connection code matching (`/link <connection_code>`) linking sender to `channel.config["owner_identifiers"]` with `flag_modified` and triggering immediate Stage 1 onboarding interview.
+- **3.1.10 Live Groq Model Simulations**:
+  - Executed full live simulations for both Honey Shop and Software Company via Groq provider (`openai/gpt-oss-120b`). Handled Groq rate limit (429) gracefully with fallback; verified full transcripts and topic tables in `scratch/simulation_report.md`.
+
+---
+
 ## Phase 4: Simulated Customer Evaluation
 - **Status**: todo
 - **Objective**: Pre-deployment validation suite simulating 50 realistic customer queries against stored facts.

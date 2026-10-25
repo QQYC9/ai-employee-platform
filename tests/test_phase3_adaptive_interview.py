@@ -303,7 +303,7 @@ def test_yemen_follow_up_chain_and_negative_branch_closure(db: Session):
     t_intl_det = db.scalar(
         select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id, InterviewTopic.slug == "international_shipping_details")
     )
-    assert t_intl.status == "answered"
+    assert t_intl.status in ("not_applicable", "skipped")
     assert t_intl_det.status == "not_applicable", "Answering 'لا' must close the whole dependent branch"
 
 
@@ -353,7 +353,7 @@ def test_single_owner_message_covers_multiple_topics_and_advances(db: Session):
     db.expire_all()
     t_identity = db.scalar(select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id, InterviewTopic.slug == "identity"))
     t_products = db.scalar(select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id, InterviewTopic.slug == "products_services_prices"))
-    t_coverage = db.scalar(select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id, InterviewTopic.slug == "delivery_coverage"))
+    t_coverage = db.scalar(select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id, InterviewTopic.slug.in_(["delivery_coverage", "service_coverage"])))
 
     # All 3 topics must be marked answered!
     assert t_identity.status == "answered"

@@ -176,102 +176,87 @@ class FactService:
         facts: list[ExtractedFactItem] = []
         summary_lines: list[str] = []
 
-        # 1. Company Name Extraction
+        # 1. Company Name Extraction (Generic & Verbatim)
         name_match = re.search(
-            r"(?:(?:ال)?اسم\s*(?:الشركة|المنشأة|المحل|المتجر|المؤسسة|شركتنا|منشأتنا|التجاري(?:\s*(?:الرسمي|المعتمد|لمنشأتنا|لشركتنا))?)|نحن|معكم)\s*[:—\-=]?\s*([^\n،,.]+)",
+            r'(?:(?:(?:ال)?اسم\s*(?:الشركة|المنشأة|المحل|المتجر|المؤسسة|شركتنا|منشأتنا|التجاري(?:\s*(?:الرسمي|المعتمد|لمنشأتنا|لشركتنا))?)|نحن|معكم)\s*[:—\-=]?\s*([^\n،,.]+)|^(?:شركة|مؤسسة|منشأة|متجر|محلات?|مكتب)\s+([^\n،,.]+))',
             text,
             re.IGNORECASE,
         )
         cleaned_name = None
         if name_match:
-            raw_name = name_match.group(1).strip()
+            raw_name = (name_match.group(1) or name_match.group(2) or '').strip()
+            if name_match.group(2) and not name_match.group(1):
+                raw_name = text.split('\n')[0].split('،')[0].split(',')[0].strip()
             cleaned_name = re.sub(
-                r"^(?:الرسمي|المعتمد|الرسمية|المعتمدة|لدينا|لمنشأتنا|لشركتنا|لمتجرنا|الخاص\s*بنا|الخاص|هو|يكون)\s+",
-                "",
+                r'^(?:الرسمي|المعتمد|الرسمية|المعتمدة|لدينا|لمنشأتنا|لشركتنا|لمتجرنا|الخاص\s*بنا|الخاص|هو|يكون)\s+',
+                '',
                 raw_name,
             ).strip()
-            # Stop before verbs like "نبيع" or "نخدم" or "شركة"
-            cleaned_name = re.split(r"\s+(?:نبيع|نخدم|نوفر|نقدم|لدينا)\b", cleaned_name)[0].strip()
-            if cleaned_name:
+            cleaned_name = re.split(r'\s+(?:نبيع|نخدم|نوفر|نقدم|لدينا)\b', cleaned_name)[0].strip()
+            if cleaned_name and not re.search(r'^(?:متخصصون|نعمل|مجالنا)', cleaned_name):
                 facts.append(
                     ExtractedFactItem(
-                        topic="company.identity",
-                        subject="اسم المنشأة",
-                        value={"name": cleaned_name},
-                        visibility="public",
+                        topic='company.identity',
+                        subject='اسم المنشأة',
+                        value={'name': cleaned_name},
+                        visibility='public',
                         is_direct_unambiguous=True,
                     )
                 )
-                summary_lines.append(f"🏢 اسم المنشأة: {cleaned_name}")
+                summary_lines.append(f'🏢 اسم المنشأة: {cleaned_name}')
 
         # 1.5. Company Activity / Description
         desc_match = re.search(
-            r"(?:شركة|مؤسسة|منشأة|متجر|متخصصون\s*في|مجالنا)\s+([^\n.]+?)(?=\.|\n|نبيع|نوفر|نقدم|نخدم|$)",
+            r'(?:متخصصون\s*في|مجالنا\s*(?:هو)?|نعمل\s*في\s*مجال)\s+([^\n.]+?)(?=\.|\n|نبيع|نوفر|نقدم|نخدم|$)',
             text,
             re.IGNORECASE,
         )
         if desc_match:
             raw_desc = desc_match.group(0).strip()
-            # Only add if it's descriptive and not just the company name itself
-            if raw_desc and len(raw_desc) > 8 and "نبيع" not in raw_desc and raw_desc != cleaned_name:
+            if raw_desc and len(raw_desc) > 8 and 'نبيع' not in raw_desc and raw_desc != cleaned_name:
                 facts.append(
                     ExtractedFactItem(
-                        topic="company.description",
-                        subject="مجال النشاط",
-                        value={"description": raw_desc},
-                        visibility="public",
+                        topic='company.description',
+                        subject='مجال النشاط',
+                        value={'description': raw_desc},
+                        visibility='public',
                         is_direct_unambiguous=True,
                     )
                 )
-                summary_lines.append(f"📋 مجال النشاط: {raw_desc}")
+                summary_lines.append(f'📋 مجال النشاط: {raw_desc}')
 
-        # 2. Product Catalog Extraction
-        # Match sentences declaring selling products (e.g. "نبيع الموظف الذكي وبرنامج ناظم المحاسبي وبرنامج سيرو لإدارة الشبكات")
+        # 2. Product Catalog Extraction (Completely Generic & Verbatim)
         sell_match = re.search(
-            r"(?:نبيع|نوفر|نقدم|منتجاتنا(?:\s*هي)?|منتجنا(?:\s*(?:المعتمد|الرئيسي))?(?:\s*هو)?|لدينا\s*(?:منتجات)?)\s*[:—\-=]?\s*(.+?)(?=(?:\.?\s*(?:نخدم|فروعنا|ونوصل|ساعات)|\n|$))",
+            r'(?:نبيع|نوفر|نقدم|منتجاتنا(?:\s*هي)?|منتجنا(?:\s*(?:المعتمد|الرئيسي))?(?:\s*هو)?|لدينا\s*(?:منتجات)?)\s*[:—\-=]?\s*(.+?)(?=(?:\.?\s*(?:نخدم|فروعنا|ونوصل|ساعات)|\n|$))',
             text,
             re.IGNORECASE,
         )
         if sell_match:
             prods_clause = sell_match.group(1).strip()
-            # Strip trailing period if present
-            prods_clause = re.sub(r"\.+$", "", prods_clause).strip()
-            # Strip introductory quantifiers like "ثلاثة منتجات:" or "قائمة المنتجات:"
+            prods_clause = re.sub(r'\.+$', '', prods_clause).strip()
             prods_clause = re.sub(
-                r"^(?:ثلاثة|أربعة|خمسة|ستة|عدة|\d+)?\s*منتجات\s*[:\s]*",
-                "",
+                r'^(?:ثلاثة|أربعة|خمسة|ستة|عدة|\d+)?\s*منتجات\s*[:\s]*',
+                '',
                 prods_clause,
                 flags=re.IGNORECASE,
             ).strip()
-            # Split items on comma or 'و' followed by a product indicator
-            raw_items = re.split(r"[،,]+|\s+و(?=(?:برنامج|الموظف|نظام|تطبيق|خدمة)\b)", prods_clause)
+            raw_items = re.split(r'[،,]+|\s+و(?=(?:برنامج|نظام|تطبيق|منصة|أداة|خدمة|عسل|منتج)\b)', prods_clause)
             for item in raw_items:
                 clean_item = item.strip()
-                # Clean trailing periods or conjunctions
-                clean_item = re.sub(r"[\.،,]+$", "", clean_item).strip()
-                if clean_item and len(clean_item) > 2 and not clean_item.startswith("نخدم"):
+                clean_item = re.sub(r'[\.،,]+$', '', clean_item).strip()
+                if clean_item and len(clean_item) > 2 and not clean_item.startswith('نخدم'):
                     prod_name = clean_item
+                    prod_val: dict[str, Any] = {'name': prod_name, 'type': 'product'}
+                    price_m = re.search(r'(?:بسعر|سعر(?:ه)?|بـ)\s*([\d,]+(?:\.\d+)?)\s*(ريال|ر\.ي|SAR|\$)?', clean_item)
+                    if price_m:
+                        try:
+                            prod_val['price'] = float(price_m.group(1).replace(',', ''))
+                            if price_m.group(2):
+                                prod_val['unit'] = price_m.group(2).strip()
+                        except (ValueError, TypeError):
+                            pass
+                    slug = re.sub(r'[^\w]+', '_', clean_item.lower()).strip('_') or f'product_{len(facts)}'
                     prod_details = None
-
-                    if "ناظم" in clean_item:
-                        slug = "nazim_accounting"
-                        prod_name = "برنامج ناظم المحاسبي"
-                    elif "سيرو" in clean_item:
-                        slug = "ciro_networks"
-                        if "والتحكم" in clean_item or "تحكم" in clean_item:
-                            prod_name = "برنامج سيرو (إدارة الشبكات والتحكم الكامل بها)"
-                        else:
-                            prod_name = clean_item
-                    elif "الموظف الذكي" in clean_item or "موظف ذكي" in clean_item:
-                        slug = "smart_employee"
-                        prod_name = "الموظف الذكي"
-                    else:
-                        slug = re.sub(r"[^\w]+", "_", clean_item.lower()).strip("_")
-                        prod_name = clean_item
-
-                    prod_val: dict[str, Any] = {"name": prod_name, "type": "product"}
-                    if prod_details:
-                        prod_val["details"] = prod_details
 
                     facts.append(
                         ExtractedFactItem(
