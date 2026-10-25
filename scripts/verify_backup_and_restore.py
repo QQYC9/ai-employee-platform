@@ -1,6 +1,10 @@
 import os
+import sys
 import subprocess
+import re
 from sqlalchemy import create_engine, text
+
+sys.path.insert(0, os.path.abspath("."))
 
 def run_backup_and_restore_verification():
     os.makedirs("backups", exist_ok=True)
@@ -36,7 +40,8 @@ def run_backup_and_restore_verification():
 
     # 3. Create scratch database for restore test
     scratch_db_name = "ai_employee_backup_restore_scratch"
-    maint_url = "postgresql+psycopg://ai_employee:change_me_local@127.0.0.1:5433/postgres"
+    from packages.core.config import settings
+    maint_url = re.sub(r"/ai_employee$", "/postgres", settings.database_url)
     maint_engine = create_engine(maint_url, isolation_level="AUTOCOMMIT")
 
     print(f"\n3. CREATING scratch database '{scratch_db_name}'...")
@@ -65,7 +70,7 @@ def run_backup_and_restore_verification():
 
     # 5. INSPECT restored database row counts
     print(f"\n5. RESTORED DATABASE ROW COUNTS IN '{scratch_db_name}':")
-    scratch_url = f"postgresql+psycopg://ai_employee:change_me_local@127.0.0.1:5433/{scratch_db_name}"
+    scratch_url = re.sub(r"/ai_employee$", f"/{scratch_db_name}", settings.database_url)
     scratch_engine = create_engine(scratch_url)
 
     tables_to_check = [

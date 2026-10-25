@@ -36,6 +36,10 @@ class ExtractedFactItem(BaseModel):
         ...,
         description="Fact value (structured dictionary, list, string, number, or boolean)",
     )
+    operation: Literal["add", "replace", "remove"] = Field(
+        default="add",
+        description="Operation to perform: 'add' (adds to existing facts/list), 'replace' (replaces existing fact/list), or 'remove' (removes specified items from existing fact/list)",
+    )
     visibility: Literal["public", "private"] = Field(
         default="public",
         description="'public' may be shared with customers; 'private' is for internal margins, credentials, or internal goals",
@@ -100,9 +104,10 @@ class FactService:
                     "1. Handle multiple facts in a single sentence (e.g. company name, product catalog, delivery cities, working hours).\n"
                     "2. Support Yemeni Arabic phrases like 'نبيع' (we sell), 'نخدم' (we serve/cover), 'حقنا' (our), 'المحل' (the shop).\n"
                     "3. Assign appropriate topic slugs (e.g. 'company.identity', 'product.<name>', 'service.<name>', 'operations.coverage', 'pricing.<item>', 'policies.<type>').\n"
-                    "4. Visibility must be 'public' unless the information is explicitly internal (cost margins, employee salaries, confidential passwords).\n"
-                    "5. Assign expiration (expires_in_days) for prices (90 days), seasonal stock (30 days), or temporary promotions.\n"
-                    "6. Provide a concise, professional Arabic summary (summary_ar) acknowledging the extracted facts."
+                    "4. Specify operation: 'add' (adds/merges into existing list, default), 'remove' (removes items from existing coverage/catalog), or 'replace' (replaces existing facts/exclusive declaration).\n"
+                    "5. Visibility must be 'public' unless the information is explicitly internal (cost margins, employee salaries, confidential passwords).\n"
+                    "6. Assign expiration (expires_in_days) for prices (90 days), seasonal stock (30 days), or temporary promotions.\n"
+                    "7. Provide a concise, professional Arabic summary (summary_ar) acknowledging the extracted facts."
                 )
 
                 prompt = (
@@ -114,6 +119,7 @@ class FactService:
                     "      \"topic\": \"<slug>\",\n"
                     "      \"subject\": \"<arabic_or_english_title>\",\n"
                     "      \"value\": <structured_value>,\n"
+                    "      \"operation\": \"add\" | \"replace\" | \"remove\",\n"
                     "      \"visibility\": \"public\" | \"private\",\n"
                     "      \"expires_in_days\": <int_or_null>,\n"
                     "      \"is_direct_unambiguous\": true | false\n"
@@ -214,62 +220,105 @@ class FactService:
                 prods_clause,
                 flags=re.IGNORECASE,
             ).strip()
-            # Split items on comma or 'و'
-            raw_items = re.split(r"[،,]+|\s+و(?=\S)", prods_clause)
+            # Split items on comma or 'و' followed by a product indicator
+            raw_items = re.split(r"[،,]+|\s+و(?=(?:برنامج|الموظف|نظام|تطبيق|خدمة)\b)", prods_clause)
             for item in raw_items:
                 clean_item = item.strip()
-                # Clean trailing modifiers like "والتحكم الكامل بها"
-                clean_item = re.split(r"\s+(?:والتحكم|بحيث|مع|في)\b", clean_item)[0].strip()
+                # Clean trailing periods or conjunctions
+                clean_item = re.sub(r"[\.،,]+$", "", clean_item).strip()
                 if clean_item and len(clean_item) > 2 and not clean_item.startswith("نخدم"):
+                    prod_name = clean_item
+                    prod_details = None
+
                     if "ناظم" in clean_item:
                         slug = "nazim_accounting"
+                        prod_name = "برنامج ناظم المحاسبي"
                     elif "سيرو" in clean_item:
                         slug = "ciro_networks"
+                        if "والتحكم" in clean_item or "تحكم" in clean_item:
+                            prod_name = "برنامج سيرو (إدارة الشبكات والتحكم الكامل بها)"
+                        else:
+                            prod_name = clean_item
                     elif "الموظف الذكي" in clean_item or "موظف ذكي" in clean_item:
                         slug = "smart_employee"
+                        prod_name = "الموظف الذكي"
                     else:
                         slug = re.sub(r"[^\w]+", "_", clean_item.lower()).strip("_")
+                        prod_name = clean_item
+
+                    prod_val: dict[str, Any] = {"name": prod_name, "type": "product"}
+                    if prod_details:
+                        prod_val["details"] = prod_details
+
                     facts.append(
                         ExtractedFactItem(
                             topic=f"product.{slug[:40]}",
-                            subject=clean_item,
-                            value={"name": clean_item, "type": "product"},
+                            subject=prod_name,
+                            value=prod_val,
                             visibility="public",
                             is_direct_unambiguous=True,
                         )
                     )
-                    summary_lines.append(f"📦 منتج: {clean_item}")
+                    disp_label = f"{prod_name} ({prod_details})" if prod_details else prod_name
+                    summary_lines.append(f"📦 منتج: {disp_label}")
 
         # 3. Delivery Coverage / Cities Extraction
-        # Match coverage cities (e.g. "نخدم صنعاء والحديدة وذمار وإب والمحويت وريمة" or "نخدم أيضًا محافظة عمران")
-        service_match = re.search(
+        # Match coverage cities (e.g. "نخدم صنعاء والحديدة وذمار وإب والمحويت وريمة" or "نخدم أيضًا محافظة عمران" or "ما نخدم ذمار بعد اليوم")
+        cov_remove_match = re.search(
+            r"(?:ما\s*نخدم|لا\s*نخدم|أوقفنا|وقفنا|حذف|إلغاء|استبعاد|استثنينا)\s*(?:محافظة|مدينة)?\s*([^\n.]+)",
+            text,
+            re.IGNORECASE,
+        )
+        cov_service_match = re.search(
             r"(?:نخدم|نوصل\s*(?:إلى|لـ)?|فروعنا\s*(?:في)?|تغطيتنا\s*(?:في)?)\s*[:—\-=]?\s*([^\n.]+)",
             text,
             re.IGNORECASE,
         )
-        if service_match:
-            cities_clause = service_match.group(1).strip()
-            known_cities = [
-                "صنعاء", "الحديدة", "ذمار", "إب", "المحويت", "ريمة", "عدن", "تعز",
-                "حضرموت", "المكلا", "مأرب", "صعدة", "عمران", "حجة", "البيضاء", "لحج", "أبين", "شبوة",
-                "الرياض", "جدة", "الدمام", "مكة", "المدينة", "دبي", "أبوظبي"
-            ]
-            found_cities: list[str] = []
-            for city in known_cities:
-                if city in cities_clause:
-                    found_cities.append(city)
+
+        known_cities = [
+            "صنعاء", "الحديدة", "ذمار", "إب", "المحويت", "ريمة", "عدن", "تعز",
+            "حضرموت", "المكلا", "مأرب", "صعدة", "عمران", "حجة", "البيضاء", "لحج", "أبين", "شبوة",
+            "الرياض", "جدة", "الدمام", "مكة", "المدينة", "دبي", "أبوظبي"
+        ]
+
+        if cov_remove_match:
+            rem_clause = cov_remove_match.group(1).strip()
+            rem_cities = [city for city in known_cities if city in rem_clause]
+            if rem_cities:
+                facts.append(
+                    ExtractedFactItem(
+                        topic="operations.delivery_zones",
+                        subject="نطاق التوصيل والمدن المدعومة",
+                        value={"cities": rem_cities},
+                        operation="remove",
+                        visibility="public",
+                        is_direct_unambiguous=True,
+                    )
+                )
+                summary_lines.append(f"📍 استبعاد من نطاق التغطية: {', '.join(rem_cities)}")
+
+        elif cov_service_match:
+            cities_clause = cov_service_match.group(1).strip()
+            found_cities = [city for city in known_cities if city in cities_clause]
 
             if found_cities:
+                is_replace = bool(re.search(r"(?:فقط|حصرياً|حصريا|فحسب|بس)\b", text))
+                op: Literal["add", "replace", "remove"] = "replace" if is_replace else "add"
+
                 facts.append(
                     ExtractedFactItem(
                         topic="operations.delivery_zones",
                         subject="نطاق التوصيل والمدن المدعومة",
                         value={"cities": found_cities},
+                        operation=op,
                         visibility="public",
                         is_direct_unambiguous=True,
                     )
                 )
-                summary_lines.append(f"📍 المدن ونطاق التغطية: {', '.join(found_cities)}")
+                if op == "replace":
+                    summary_lines.append(f"📍 حصر نطاق التغطية على: {', '.join(found_cities)}")
+                else:
+                    summary_lines.append(f"📍 المدن ونطاق التغطية: {', '.join(found_cities)}")
 
         # 4. Working Hours Extraction
         hours_match = re.search(
@@ -302,6 +351,66 @@ class FactService:
     # -----------------------------------------------------------------------
     # 2. Storage, Confirmation, and Conflict Detection
     # -----------------------------------------------------------------------
+    @staticmethod
+    def format_fact_readable_arabic(value: Any) -> str:
+        """
+        Formats fact values into natural, human-readable Arabic strings
+        without raw JSON brackets, curly braces, quotes, or dictionary syntax.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, list):
+            items = [FactService.format_fact_readable_arabic(x) for x in value if x is not None]
+            return "، ".join([i for i in items if i])
+        if isinstance(value, dict):
+            # 1. Single-key helpers
+            if "name" in value and len(value) == 1:
+                return str(value["name"]).strip()
+            if "description" in value and len(value) == 1:
+                return str(value["description"]).strip()
+            if "cities" in value:
+                c_val = value["cities"]
+                if isinstance(c_val, list):
+                    return "، ".join(str(c).strip() for c in c_val if str(c).strip())
+                return str(c_val).strip()
+            if "hours" in value or "working_hours" in value:
+                return str(value.get("hours") or value.get("working_hours")).strip()
+
+            # 2. Combined name + details/description/price
+            name = value.get("name")
+            details = value.get("details") or value.get("description")
+            price = value.get("price")
+            unit = value.get("unit", "ريال")
+
+            if name and details and price is not None:
+                return f"{name} ({details} — السعر: {price} {unit})"
+            if name and details:
+                return f"{name} ({details})"
+            if name and price is not None:
+                return f"{name} (السعر: {price} {unit})"
+            if price is not None:
+                return f"{price} {unit}"
+            if name:
+                return str(name).strip()
+            if details:
+                return str(details).strip()
+
+            # 3. Fallback: format clean key-value pairs without braces
+            parts = []
+            for k, v in value.items():
+                if k in ("type", "is_direct"):
+                    continue
+                v_str = FactService.format_fact_readable_arabic(v)
+                if v_str:
+                    parts.append(f"{k}: {v_str}")
+            return "، ".join(parts) if parts else str(value)
+
+        return str(value)
+
     def save_extracted_facts(
         self,
         tenant_id: UUID,
@@ -315,20 +424,16 @@ class FactService:
         - Inferred or ambiguous statements: saved as 'pending_confirmation'.
         - Contradictory statements against existing confirmed facts on the same topic/subject:
           saved as 'conflict' without silent overwrites, returning a conflict report for owner decision.
-        - Additive statements (e.g. adding new delivery zones with 'أيضًا'): merged into existing coverage without conflict.
+        - Additive statements (operation='add'): merged into existing coverage without conflict.
+        - Removal statements (operation='remove'): removes specified items and preserves the rest.
+        - Replacement statements (operation='replace'): replaces coverage, prompting confirmation if removing cities.
         """
         confirmed_records: list[Fact] = []
         pending_records: list[Fact] = []
         conflict_records: list[dict[str, Any]] = []
+        replace_confirmation_info: dict[str, Any] | None = None
 
         now = datetime.now(timezone.utc)
-        is_additive = bool(
-            message_text
-            and re.search(
-                r"(?:أيضًا|ايضا|كذلك|بالإضافة|إضافة|اضافة|كمان|وايضا|وأيضا|ومعاها|ومعها)",
-                message_text,
-            )
-        )
 
         for item in extracted_facts:
             is_coverage_item = (
@@ -370,8 +475,10 @@ class FactService:
             if item.expires_in_days:
                 expires_at = now + timedelta(days=item.expires_in_days)
 
-            # Handle additive updates for coverage / delivery zones
-            is_coverage_additive = False
+            # Handle operation on coverage / delivery zones
+            is_handled_by_operation = False
+            is_replace_requiring_confirmation = False
+
             if is_coverage_item and existing_fact is not None:
                 def _extract_cities_list(val: Any) -> list[str]:
                     if isinstance(val, list):
@@ -388,7 +495,8 @@ class FactService:
 
                 existing_cities = _extract_cities_list(existing_fact.value)
                 new_cities = _extract_cities_list(item.value)
-                if is_additive or (new_cities and not any(c in existing_cities for c in new_cities)):
+
+                if item.operation == "add":
                     merged_cities = list(dict.fromkeys(existing_cities + new_cities))
                     if isinstance(existing_fact.value, dict):
                         item.value = dict(existing_fact.value)
@@ -399,11 +507,42 @@ class FactService:
                         item.value = merged_cities
                     item.topic = existing_fact.topic
                     item.subject = existing_fact.subject
-                    is_coverage_additive = True
+                    is_handled_by_operation = True
+
+                elif item.operation == "remove":
+                    remaining_cities = [c for c in existing_cities if c not in new_cities]
+                    if isinstance(existing_fact.value, dict):
+                        item.value = dict(existing_fact.value)
+                        item.value["cities"] = remaining_cities
+                    elif isinstance(item.value, dict):
+                        item.value = {"cities": remaining_cities}
+                    else:
+                        item.value = remaining_cities
+                    item.topic = existing_fact.topic
+                    item.subject = existing_fact.subject
+                    is_handled_by_operation = True
+
+                elif item.operation == "replace":
+                    removed_cities = [c for c in existing_cities if c not in new_cities]
+                    if len(removed_cities) > 0:
+                        is_replace_requiring_confirmation = True
+                        replace_confirmation_info = {
+                            "topic": item.topic,
+                            "subject": item.subject,
+                            "existing_cities": existing_cities,
+                            "new_cities": new_cities,
+                            "removed_cities": removed_cities,
+                            "removed_count": len(removed_cities),
+                            "existing_fact_id": str(existing_fact.id) if existing_fact else None,
+                        }
+                    item.topic = existing_fact.topic
+                    item.subject = existing_fact.subject
+                    is_handled_by_operation = True
 
             # Conflict Detection:
             # If an existing confirmed fact exists and its value is different from the new value
-            if existing_fact is not None and existing_fact.value != item.value and not is_coverage_additive:
+            # AND it was not handled by an explicit add/remove/replace operation
+            if existing_fact is not None and existing_fact.value != item.value and not is_handled_by_operation:
                 # Store new fact with status='conflict' without deleting existing fact
                 conflict_fact = Fact(
                     id=uuid4(),
@@ -430,15 +569,18 @@ class FactService:
                 )
                 continue
 
-            # Determine status based on certainty and auto-confirm policy
-            if item.is_direct_unambiguous and auto_confirm_direct:
+            # Determine status based on certainty, operation, and auto-confirm policy
+            if is_replace_requiring_confirmation:
+                fact_status = "pending_confirmation"
+                fact_source = "owner_stated"
+            elif item.is_direct_unambiguous and auto_confirm_direct:
                 fact_status = "confirmed"
                 fact_source = "owner_stated"
             else:
                 fact_status = "pending_confirmation"
                 fact_source = "inferred"
 
-            # If replacing an identical or superseded existing fact
+            # Create new Fact record
             new_fact = Fact(
                 id=uuid4(),
                 tenant_id=tenant_id,
@@ -446,7 +588,7 @@ class FactService:
                 subject=item.subject,
                 value=item.value,
                 source=fact_source,
-                confidence=1.0 if fact_status == "confirmed" else 0.75,
+                confidence=1.0 if fact_status == "confirmed" else 0.8,
                 visibility=item.visibility,
                 status=fact_status,
                 expires_at=expires_at,
@@ -454,7 +596,8 @@ class FactService:
             self.db.add(new_fact)
             self.db.flush()
 
-            if existing_fact is not None and existing_fact.id != new_fact.id:
+            # Only supersede existing fact if the new fact is actually confirmed
+            if existing_fact is not None and existing_fact.id != new_fact.id and fact_status == "confirmed":
                 existing_fact.superseded_by = new_fact.id
                 existing_fact.status = "superseded"
                 self.db.flush()
@@ -470,6 +613,7 @@ class FactService:
             "confirmed": confirmed_records,
             "pending": pending_records,
             "conflicts": conflict_records,
+            "replace_confirmation_info": replace_confirmation_info,
         }
 
     def confirm_fact(self, tenant_id: UUID, fact_id: UUID) -> Fact:
@@ -615,6 +759,10 @@ class FactService:
         if not query_words:
             return all_facts[:limit]
 
+        prod_indicators = ("منتج", "منتجات", "منتجاتكم", "منتجاتنا", "كتالوج", "قائمة", "تبيع", "تبيعوا", "تبيعون", "أصناف", "اصناف", "بضاعة", "بضائع")
+        coverage_indicators = ("مدن", "مدينة", "فروع", "فرع", "توصيل", "شحن", "مناطق", "منطقة", "تغطية", "تخدم", "تخدموا", "تخدمون")
+        pricing_indicators = ("سعر", "أسعار", "اسعار", "بكم", "تكلفة", "يكلف", "قيمة")
+
         scored: list[tuple[int, Fact]] = []
         for fact in all_facts:
             val_str = json.dumps(fact.value, ensure_ascii=False).lower()
@@ -629,11 +777,20 @@ class FactService:
                     score += 3
                 if word in topic_str:
                     score += 2
+                if any(ind in word for ind in prod_indicators) and (topic_str.startswith("product.") or "product" in topic_str):
+                    score += 4
+                if any(ind in word for ind in coverage_indicators) and (topic_str.startswith("operations.") or "delivery" in topic_str or "coverage" in topic_str):
+                    score += 4
+                if any(ind in word for ind in pricing_indicators) and (topic_str.startswith("pricing.") or "price" in topic_str):
+                    score += 4
 
             if score > 0 or not query_words:
                 scored.append((score, fact))
 
         scored.sort(key=lambda x: x[0], reverse=True)
+        if not scored:
+            # Fallback: if no specific keyword matched, return confirmed facts up to limit
+            return all_facts[:limit]
         return [f for _, f in scored[:limit]]
 
     # -----------------------------------------------------------------------

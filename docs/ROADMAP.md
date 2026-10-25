@@ -106,6 +106,15 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - Eliminated outside-Alembic table creation leaks (`setup_facts_table` restricted strictly to `ai_employee_test`).
   - Verified across all 6 messages through real entry point on scratch DB. Full regression suite passing (23/23).
 
+- **2.9 Live DB Reconciliation & Part B Hardening Pass**:
+  - Reconciled live PostgreSQL DB (`ai_employee`) to `e6f7a8b9c0d1 (head)` with verified pg_dump snapshot (`backups/backup_ai_employee_pre_phase2.dump`, 759.55 KB) and copy lifecycle proof.
+  - Enforced human-readable Arabic read-back (`FactService.format_fact_readable_arabic`), completely removing raw JSON/dict formatting.
+  - Implemented interactive conflict resolution in owner chat: owner choice ('المنذر تكنولوجي', 'الاسم الصحيح هو الثاني', 'اعتمد المنذر للتقنية') confirms chosen fact, marks rejected fact as superseded, and preserves complete history.
+  - Added robust dialect intent detection for Yemeni Arabic queries ('وش المنتجات اللي عندكم؟'، 'ايش تبيعوا؟'، 'وين تخدموا؟'، 'بكم ناظم؟'، 'كم يكلف سيرو؟') and product comparisons ('ايش الفرق بين ناظم وسيرو؟') strictly answering from stored facts.
+  - Migrated coverage operations to an `operation` schema (`add` / `replace` / `remove`), prompting owner confirmation when a replace operation removes active cities.
+  - Verified customer path isolation: customer query prompts receive only confirmed public facts; conflict, private, or pending facts are strictly excluded.
+  - Full test suite passing (28/28 passed, 1 skipped).
+
 ---
 
 ## Phase 3: Adaptive Owner Onboarding Interview

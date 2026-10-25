@@ -157,3 +157,38 @@ This log records major design and implementation choices, including rationale an
      - Restored `d5e6f7a8b9c0` (approvals token/expires_at) to the migration chain between `c4d5e6f7a8b9` and `e6f7a8b9c0d1`.
      - Preserves single Alembic head and 100% schema alignment across live DB and fresh databases.
      - Eliminated out-of-band table creation in tests (`checkfirst=True` and strict `ai_employee_test` validation).
+
+
+---
+
+## Decision 2.3: Live DB Reconciliation, Human-Readable Read-Back, Conflict Resolution, Operation Semantics & Dialect Robustness
+- **Context**: In Phase 2 review, specific hardening requirements and live database safety reconciliations were specified:
+  1. Live DB reconciliation via copy lifecycle verification, fresh pg_dump, drop empty unmanaged `facts`, and real migration to `e6f7a8b9c0d1 (head)`.
+  2. Owner read-back must be formatted in natural human-readable Arabic, completely eliminating raw JSON/dict formatting (`{"name": ...}`).
+  3. Conflict resolution: owner responses after a conflict message must resolve the conflict (chosen fact confirmed, unchosen superseded, history preserved).
+  4. Dialect-robust queries: Yemeni Arabic queries for products, cities, prices, and product comparisons must answer faithfully from stored facts only, without phrase brittleness.
+  5. Operation schema: replace keyword additive detection with an `operation` field (`add` / `replace` / `remove`), prompting confirmation when replacement removes cities.
+  6. Customer path isolation: customer queries must strictly use only confirmed public facts, never exposing conflict, private, or pending facts.
+- **Decision**:
+  1. **Live DB Upgrade Verified**:
+     - Tested on scratch copy lifecycle (upgrade -> downgrade -> upgrade).
+     - Created verified backup snapshot `backups/backup_ai_employee_pre_phase2.dump` (759.55 KB) and verified clean restore.
+     - Upgraded live DB (`ai_employee`) to `e6f7a8b9c0d1 (head)`: applied approvals columns (`token`, `expires_at`), managed `facts` table, and confirmed zero row count alterations on all existing tables.
+  2. **Format Fact Arabic**:
+     - Implemented `FactService.format_fact_readable_arabic`: converts dicts, lists, and scalars into natural Arabic strings without braces, brackets, quotes, or JSON syntax.
+     - Owner read-back presents grouped items: company identity, products catalog, and coverage cities in clear, professional Arabic.
+  3. **Conversational Conflict Resolution**:
+     - On conflict detection, stores `pending_conflict` in conversation metadata.
+     - In subsequent turn, detects owner choice (Option 1 vs Option 2 or explicit name mention).
+     - Invokes `FactService.resolve_conflict`: marks chosen fact as `confirmed` (`owner_confirmed`), rejected fact as `superseded` (`superseded_by = chosen.id`), and retains complete historical ledger.
+  4. **Robust Dialect Answering & Strict Product Comparison**:
+     - Supported Yemeni dialect variants for products ("وش المنتجات اللي عندكم؟"، "ايش تبيعوا؟"), cities ("وين تخدموا؟"), and prices ("بكم ناظم؟"، "كم يكلف سيرو؟").
+     - Implemented dedicated comparison handler for "ايش الفرق بين ناظم وسيرو؟" querying confirmed product facts, echoing stored descriptions, and explicitly stating detailed technical comparisons are not recorded in the database.
+  5. **Operation-Driven Extraction**:
+     - Added `operation: Literal["add", "replace", "remove"] = "add"` to `ExtractedFactItem`.
+     - Model prompt and regex fallback classify operation:
+       - `add`: merges new cities into confirmed coverage.
+       - `remove`: removes specified cities ("ما نخدم ذمار بعد اليوم") and confirms remaining cities.
+       - `replace`: if replacement removes active cities ("نخدم صنعاء فقط" removes 5 cities), flags for owner confirmation before superseding existing coverage.
+  6. **Customer Path Isolation**:
+     - Verified end-to-end that customer query prompt assembly and reply generation use only `status == 'confirmed'` and `visibility == 'public'` facts; conflict, private, and pending facts are strictly excluded.

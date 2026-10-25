@@ -684,6 +684,683 @@ def test_owner_runtime_learning_queries_and_conflict_resolution(
     assert "إنارة" not in res6.reply_content
 
 
+# ===========================================================================
+# Phase 2 Part B Tests (Human-readable readback, Conflict resolution,
+# Dialect-robust queries, Operation add/remove/replace, Customer path isolation)
+# ===========================================================================
+
+def test_b1_owner_readback_human_readable_arabic_never_raw_json(
+    db: Session, tenant: Tenant, channel: Channel
+):
+    """
+    Test B.1: Owner read-back must be human-readable Arabic, never raw JSON/dicts
+    (e.g. 'اسم الشركة: المنذر تكنولوجي، المنتجات: الموظف الذكي، برنامج ناظم المحاسبي،
+    برنامج سيرو (إدارة الشبكات والتحكم الكامل بها)، المدن: ...').
+    """
+    owner_user = User(
+        tenant_id=tenant.id,
+        email=f"owner-b1-{uuid4().hex[:6]}@tech.com",
+        role="tenant_owner",
+        name="Owner User B1",
+    )
+    db.add(owner_user)
+    db.commit()
+
+    conv_svc = ConversationService(db)
+    conv = conv_svc.start_conversation(
+        tenant_id=tenant.id,
+        customer_id=None,
+        subject="B1 Owner Readback Test",
+        channel_id=channel.id,
+    )
+    engine = ConversationalAgentEngine(db=db, ai_provider=MockAIProvider())
+
+    msg = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content=(
+            "اسم شركتنا المنذر تكنولوجي، نبيع الموظف الذكي وبرنامج ناظم المحاسبي وبرنامج سيرو لإدارة الشبكات والتحكم الكامل بها. "
+            "ونخدم صنعاء والحديدة وذمار وإب والمحويت وريمة."
+        ),
+        metadata_json={"is_owner": True},
+    )
+    res = engine.process_incoming_message(tenant.id, msg.id)
+    assert res.success is True
+    reply = res.reply_content
+
+    # Strict assertion: NO raw JSON/dict formatting (curly braces, double quotes around keys, or brackets)
+    assert "{" not in reply, f"Raw JSON opening curly brace found in reply: {reply}"
+    assert "}" not in reply, f"Raw JSON closing curly brace found in reply: {reply}"
+    assert '{"name":' not in reply
+    assert '"cities":' not in reply
+
+    # Assert expected human-readable Arabic fields
+    assert "اسم الشركة: المنذر تكنولوجي" in reply
+    assert "الموظف الذكي" in reply
+    assert "برنامج ناظم المحاسبي" in reply
+    assert "برنامج سيرو (إدارة الشبكات والتحكم الكامل بها)" in reply
+    assert "صنعاء" in reply
+    assert "الحديدة" in reply
+
+
+def test_b2_conflict_resolution_both_outcomes_and_history(
+    db: Session, tenant: Tenant, channel: Channel
+):
+    """
+    Test B.2: Conflict resolution: after a conflict message, the owner's answer
+    ('المنذر تكنولوجي', 'الاسم الصحيح هو الثاني', 'اعتمد المنذر للتقنية') resolves it:
+    chosen fact becomes confirmed, the other superseded, history kept. Test both outcomes.
+    """
+    owner_user = User(
+        tenant_id=tenant.id,
+        email=f"owner-b2-{uuid4().hex[:6]}@tech.com",
+        role="tenant_owner",
+        name="Owner User B2",
+    )
+    db.add(owner_user)
+    db.commit()
+
+    conv_svc = ConversationService(db)
+    conv = conv_svc.start_conversation(
+        tenant_id=tenant.id,
+        customer_id=None,
+        subject="B2 Conflict Resolution Test",
+        channel_id=channel.id,
+    )
+    engine = ConversationalAgentEngine(db=db, ai_provider=MockAIProvider())
+
+    # Initial state: Establish confirmed fact for company name ("المنذر للتقنية")
+    f_init = Fact(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        topic="company.identity",
+        subject="اسم المنشأة",
+        value={"name": "المنذر للتقنية"},
+        source="owner_stated",
+        confidence=1.0,
+        visibility="public",
+        status="confirmed",
+    )
+    db.add(f_init)
+    db.commit()
+
+    # Turn 1: Owner declares conflicting company name ("المنذر تكنولوجي")
+    msg1 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="اسم شركتنا المنذر تكنولوجي",
+        metadata_json={"is_owner": True},
+    )
+    res1 = engine.process_incoming_message(tenant.id, msg1.id)
+    assert res1.success is True
+    assert "تعارض" in res1.reply_content
+    assert "المنذر للتقنية" in res1.reply_content
+    assert "المنذر تكنولوجي" in res1.reply_content
+
+    # Outcome A: Owner resolves by choosing the second option ("الاسم الصحيح هو الثاني")
+    msg2 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="الاسم الصحيح هو الثاني",
+        metadata_json={"is_owner": True},
+    )
+    res2 = engine.process_incoming_message(tenant.id, msg2.id)
+    assert res2.success is True
+    assert "تم حل التعارض بنجاح" in res2.reply_content
+    assert "المنذر تكنولوجي" in res2.reply_content
+
+    # Verify Outcome A in Database:
+    db.expire_all()
+    confirmed_a = db.scalars(
+        select(Fact).where(
+            Fact.tenant_id == tenant.id,
+            Fact.topic == "company.identity",
+            Fact.status == "confirmed",
+            Fact.superseded_by.is_(None),
+        )
+    ).all()
+    assert len(confirmed_a) == 1
+    assert confirmed_a[0].value.get("name") == "المنذر تكنولوجي"
+    assert confirmed_a[0].source == "owner_confirmed"
+
+    # History verification: previous fact still exists in DB as 'superseded' pointing to the new confirmed fact
+    db.refresh(f_init)
+    assert f_init.status == "superseded"
+    assert f_init.superseded_by == confirmed_a[0].id
+
+    # -------------------------------------------------------------
+    # Outcome B: Another conflict where owner chooses option 1 ("اعتمد المنذر للتقنية")
+    # -------------------------------------------------------------
+    tenant_b_obj = Tenant(name="Tenant B2 Outcome B", slug=f"b2-out-b-{uuid4().hex[:6]}", status="active")
+    db.add(tenant_b_obj)
+    db.commit()
+
+    ch_b = Channel(tenant_id=tenant_b_obj.id, name="Owner Ch B", channel_type="whatsapp", status="active")
+    db.add(ch_b)
+    owner_b = User(tenant_id=tenant_b_obj.id, email=f"owner-b2b-{uuid4().hex[:6]}@tech.com", role="tenant_owner", name="Owner B")
+    db.add(owner_b)
+    db.commit()
+
+    f_init_b = Fact(
+        id=uuid4(),
+        tenant_id=tenant_b_obj.id,
+        topic="company.identity",
+        subject="اسم المنشأة",
+        value={"name": "المنذر للتقنية"},
+        source="owner_stated",
+        confidence=1.0,
+        visibility="public",
+        status="confirmed",
+    )
+    db.add(f_init_b)
+    db.commit()
+
+    conv_b = conv_svc.start_conversation(
+        tenant_id=tenant_b_obj.id,
+        customer_id=None,
+        subject="B2 Conflict Resolution Outcome B",
+        channel_id=ch_b.id,
+    )
+    msg_b1 = conv_svc.send_message(
+        tenant_id=tenant_b_obj.id,
+        conversation_id=conv_b.id,
+        sender_type="user",
+        sender_id=owner_b.id,
+        content="اسم شركتنا المنذر تكنولوجي",
+        metadata_json={"is_owner": True},
+    )
+    res_b1 = engine.process_incoming_message(tenant_b_obj.id, msg_b1.id)
+    assert "تعارض" in res_b1.reply_content
+
+    # Owner resolves by choosing the first option: "اعتمد المنذر للتقنية"
+    msg_b2 = conv_svc.send_message(
+        tenant_id=tenant_b_obj.id,
+        conversation_id=conv_b.id,
+        sender_type="user",
+        sender_id=owner_b.id,
+        content="اعتمد المنذر للتقنية",
+        metadata_json={"is_owner": True},
+    )
+    res_b2 = engine.process_incoming_message(tenant_b_obj.id, msg_b2.id)
+    assert res_b2.success is True
+    assert "تم حل التعارض بنجاح" in res_b2.reply_content
+    assert "المنذر للتقنية" in res_b2.reply_content
+
+    db.expire_all()
+    db.refresh(f_init_b)
+    assert f_init_b.status == "confirmed"
+    assert f_init_b.source == "owner_confirmed"
+
+    conflicting_b_fact = db.scalar(
+        select(Fact).where(
+            Fact.tenant_id == tenant_b_obj.id,
+            Fact.topic == "company.identity",
+            Fact.status == "superseded",
+        )
+    )
+    assert conflicting_b_fact is not None
+    assert conflicting_b_fact.value.get("name") == "المنذر تكنولوجي"
+    assert conflicting_b_fact.superseded_by == f_init_b.id
+
+
+def test_b3_dialect_robust_queries_and_comparison_from_stored_facts_only(
+    db: Session, tenant: Tenant, channel: Channel
+):
+    """
+    Test B.3: Question handling must not depend on exact phrases. Answer from stored
+    confirmed facts or robust dialect intent detection. Test Yemeni-dialect variants for
+    products, cities, and price:
+    'وش المنتجات اللي عندكم؟'، 'ايش تبيعوا؟'، 'وين تخدموا؟'، 'بكم ناظم؟'، 'كم يكلف سيرو؟'،
+    'ايش الفرق بين ناظم وسيرو؟' (the last must answer only from stored facts and state details are not recorded).
+    """
+    owner_user = User(
+        tenant_id=tenant.id,
+        email=f"owner-b3-{uuid4().hex[:6]}@tech.com",
+        role="tenant_owner",
+        name="Owner User B3",
+    )
+    db.add(owner_user)
+
+    # Pre-populate Facts Store with verified facts
+    f_nazim = Fact(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        topic="product.nazim_accounting",
+        subject="برنامج ناظم المحاسبي",
+        value={"name": "برنامج ناظم المحاسبي", "type": "product"},
+        source="owner_stated",
+        confidence=1.0,
+        visibility="public",
+        status="confirmed",
+    )
+    f_ciro = Fact(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        topic="product.ciro_networks",
+        subject="برنامج سيرو",
+        value={"name": "برنامج سيرو", "details": "إدارة الشبكات والتحكم الكامل بها", "type": "product"},
+        source="owner_stated",
+        confidence=1.0,
+        visibility="public",
+        status="confirmed",
+    )
+    f_cities = Fact(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        topic="operations.delivery_zones",
+        subject="نطاق التوصيل والمدن المدعومة",
+        value={"cities": ["صنعاء", "عدن", "تعز", "الحديدة"]},
+        source="owner_stated",
+        confidence=1.0,
+        visibility="public",
+        status="confirmed",
+    )
+    db.add_all([f_nazim, f_ciro, f_cities])
+    db.commit()
+
+    conv_svc = ConversationService(db)
+    conv = conv_svc.start_conversation(
+        tenant_id=tenant.id,
+        customer_id=None,
+        subject="B3 Dialect Queries Test",
+        channel_id=channel.id,
+    )
+    engine = ConversationalAgentEngine(db=db, ai_provider=MockAIProvider())
+
+    # 1. Dialect Query 1: "وش المنتجات اللي عندكم؟"
+    msg1 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="وش المنتجات اللي عندكم؟",
+        metadata_json={"is_owner": True},
+    )
+    res1 = engine.process_incoming_message(tenant.id, msg1.id)
+    assert res1.success is True
+    assert "ناظم" in res1.reply_content
+    assert "سيرو" in res1.reply_content
+
+    # 2. Dialect Query 2: "ايش تبيعوا؟"
+    msg2 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="ايش تبيعوا؟",
+        metadata_json={"is_owner": True},
+    )
+    res2 = engine.process_incoming_message(tenant.id, msg2.id)
+    assert res2.success is True
+    assert "ناظم" in res2.reply_content
+    assert "سيرو" in res2.reply_content
+
+    # 3. Dialect Query 3: "وين تخدموا؟"
+    msg3 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="وين تخدموا؟",
+        metadata_json={"is_owner": True},
+    )
+    res3 = engine.process_incoming_message(tenant.id, msg3.id)
+    assert res3.success is True
+    for c in ["صنعاء", "عدن", "تعز", "الحديدة"]:
+        assert c in res3.reply_content
+
+    # 4. Dialect Query 4: "بكم ناظم؟" (Price query)
+    msg4 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="بكم ناظم؟",
+        metadata_json={"is_owner": True},
+    )
+    res4 = engine.process_incoming_message(tenant.id, msg4.id)
+    assert res4.success is True
+    assert "السعر الخاص بـ (برنامج ناظم المحاسبي) غير مسجل حالياً" in res4.reply_content
+
+    # 5. Dialect Query 5: "كم يكلف سيرو؟" (Price query)
+    msg5 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="كم يكلف سيرو؟",
+        metadata_json={"is_owner": True},
+    )
+    res5 = engine.process_incoming_message(tenant.id, msg5.id)
+    assert res5.success is True
+    assert "السعر الخاص بـ (برنامج سيرو) غير مسجل حالياً" in res5.reply_content
+
+    # 6. Comparison Query: "ايش الفرق بين ناظم وسيرو؟"
+    # Must answer ONLY from stored facts and explicitly state details are not recorded
+    msg6 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="ايش الفرق بين ناظم وسيرو؟",
+        metadata_json={"is_owner": True},
+    )
+    res6 = engine.process_incoming_message(tenant.id, msg6.id)
+    assert res6.success is True
+    assert "برنامج ناظم المحاسبي" in res6.reply_content
+    assert "برنامج سيرو" in res6.reply_content
+    assert "إدارة الشبكات والتحكم الكامل بها" in res6.reply_content
+    assert "غير مسجلة حالياً في قاعدة البيانات" in res6.reply_content
+    # Must not invent ungrounded details
+    assert "ضرائب" not in res6.reply_content
+    assert "مخزون" not in res6.reply_content
+
+
+def test_b4_operations_add_remove_and_replace_with_confirmation(
+    db: Session, tenant: Tenant, channel: Channel
+):
+    """
+    Test B.4: Replace keyword-based 'additive' detection with an `operation` field
+    in extraction schema ('add' / 'replace' / 'remove') decided by model/fallback.
+    Tests:
+      - 'نخدم أيضًا محافظة عمران' (add)
+      - 'ما نخدم ذمار بعد اليوم' (remove, keep rest)
+      - 'نخدم صنعاء فقط' (replace; ask owner to confirm since it removes 5 cities).
+    """
+    owner_user = User(
+        tenant_id=tenant.id,
+        email=f"owner-b4-{uuid4().hex[:6]}@tech.com",
+        role="tenant_owner",
+        name="Owner User B4",
+    )
+    db.add(owner_user)
+
+    # Initial state: 6 confirmed cities
+    f_cov_initial = Fact(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        topic="operations.delivery_zones",
+        subject="نطاق التوصيل والمدن المدعومة",
+        value={"cities": ["صنعاء", "الحديدة", "ذمار", "إب", "المحويت", "ريمة"]},
+        source="owner_stated",
+        confidence=1.0,
+        visibility="public",
+        status="confirmed",
+    )
+    db.add(f_cov_initial)
+    db.commit()
+
+    conv_svc = ConversationService(db)
+    conv = conv_svc.start_conversation(
+        tenant_id=tenant.id,
+        customer_id=None,
+        subject="B4 Operations Flow",
+        channel_id=channel.id,
+    )
+    engine = ConversationalAgentEngine(db=db, ai_provider=MockAIProvider())
+
+    # Step 1: Operation 'add' -> "نخدم أيضًا محافظة عمران"
+    msg1 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="نخدم أيضًا محافظة عمران",
+        metadata_json={"is_owner": True},
+    )
+    res1 = engine.process_incoming_message(tenant.id, msg1.id)
+    assert res1.success is True
+    assert "عمران" in res1.reply_content
+
+    db.expire_all()
+    cov_after_add = db.scalar(
+        select(Fact).where(
+            Fact.tenant_id == tenant.id,
+            Fact.topic == "operations.delivery_zones",
+            Fact.status == "confirmed",
+            Fact.superseded_by.is_(None),
+        )
+    )
+    assert cov_after_add is not None
+    cities_add = cov_after_add.value.get("cities", [])
+    assert len(cities_add) == 7
+    assert "عمران" in cities_add
+    assert "صنعاء" in cities_add
+
+    # Step 2: Operation 'remove' -> "ما نخدم ذمار بعد اليوم"
+    msg2 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="ما نخدم ذمار بعد اليوم",
+        metadata_json={"is_owner": True},
+    )
+    res2 = engine.process_incoming_message(tenant.id, msg2.id)
+    assert res2.success is True
+
+    db.expire_all()
+    cov_after_remove = db.scalar(
+        select(Fact).where(
+            Fact.tenant_id == tenant.id,
+            Fact.topic == "operations.delivery_zones",
+            Fact.status == "confirmed",
+            Fact.superseded_by.is_(None),
+        )
+    )
+    assert cov_after_remove is not None
+    cities_remove = cov_after_remove.value.get("cities", [])
+    assert "ذمار" not in cities_remove
+    assert len(cities_remove) == 6  # 7 minus 1 = 6
+    assert "صنعاء" in cities_remove
+    assert "عمران" in cities_remove
+
+    # Step 3: Operation 'replace' -> "نخدم صنعاء فقط"
+    # Should ask owner to confirm since it removes 5 cities!
+    msg3 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="نخدم صنعاء فقط",
+        metadata_json={"is_owner": True},
+    )
+    res3 = engine.process_incoming_message(tenant.id, msg3.id)
+    assert res3.success is True
+    assert "يحذف 5 مدن" in res3.reply_content
+    assert "تأكيد" in res3.reply_content
+
+    # In DB: previous coverage remains confirmed while replacement is pending_confirmation
+    db.expire_all()
+    pending_replace_fact = db.scalar(
+        select(Fact).where(
+            Fact.tenant_id == tenant.id,
+            Fact.topic == "operations.delivery_zones",
+            Fact.status == "pending_confirmation",
+        )
+    )
+    assert pending_replace_fact is not None
+    assert pending_replace_fact.value.get("cities") == ["صنعاء"]
+
+    # Active confirmed coverage still has all 6 cities until confirmed
+    active_cov = db.scalar(
+        select(Fact).where(
+            Fact.tenant_id == tenant.id,
+            Fact.topic == "operations.delivery_zones",
+            Fact.status == "confirmed",
+            Fact.superseded_by.is_(None),
+        )
+    )
+    assert len(active_cov.value.get("cities", [])) == 6
+
+    # Step 4: Owner confirms replacement -> "تأكيد"
+    msg4 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="تأكيد",
+        metadata_json={"is_owner": True},
+    )
+    res4 = engine.process_incoming_message(tenant.id, msg4.id)
+    assert res4.success is True
+    assert "تم تأكيد استبدال نطاق التغطية" in res4.reply_content
+    assert "صنعاء" in res4.reply_content
+
+    # Now the replaced fact is confirmed with only Sana'a
+    db.expire_all()
+    final_cov = db.scalar(
+        select(Fact).where(
+            Fact.tenant_id == tenant.id,
+            Fact.topic == "operations.delivery_zones",
+            Fact.status == "confirmed",
+            Fact.superseded_by.is_(None),
+        )
+    )
+    assert final_cov.value.get("cities") == ["صنعاء"]
+
+
+def test_b5_customer_path_uses_only_confirmed_public_facts(
+    db: Session, tenant: Tenant, channel: Channel
+):
+    """
+    Test B.5: Add customer-path test: customer asks 'ما هي منتجاتكم؟' and reply
+    uses only confirmed public facts; conflict-status or private fact never appears.
+    """
+    from packages.models.domain import Customer
+
+    # 1. Setup Customer
+    cust = Customer(
+        tenant_id=tenant.id,
+        name="Customer Ali",
+        email=f"ali-{uuid4().hex[:6]}@example.com",
+        phone="+967770000001",
+        status="active",
+    )
+    db.add(cust)
+    db.commit()
+
+    # 2. Setup Facts:
+    # A. Public Confirmed Product (Must be used)
+    f_public_confirmed = Fact(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        topic="product.nazim_accounting",
+        subject="برنامج ناظم المحاسبي",
+        value={"name": "برنامج ناظم المحاسبي", "type": "product"},
+        source="owner_stated",
+        confidence=1.0,
+        visibility="public",
+        status="confirmed",
+    )
+    # B. Public Conflicting Product (Must NOT be used)
+    f_conflict = Fact(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        topic="product.unverified_bundle",
+        subject="حزمة تجريبية ملغية",
+        value={"name": "حزمة تجريبية ملغية"},
+        source="owner_stated",
+        confidence=0.5,
+        visibility="public",
+        status="conflict",
+    )
+    # C. Private Confirmed Fact (Internal margin/credentials - Must NOT be used)
+    f_private = Fact(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        topic="pricing.internal_margin",
+        subject="هامش الربح الداخلي",
+        value={"margin": "45% هامش سري"},
+        source="owner_stated",
+        confidence=1.0,
+        visibility="private",
+        status="confirmed",
+    )
+    # D. Pending Confirmation Fact (Must NOT be used)
+    f_pending = Fact(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        topic="product.pending_service",
+        subject="خدمة السحابة غير المؤكدة",
+        value={"name": "خدمة السحابة غير المؤكدة"},
+        source="inferred",
+        confidence=0.6,
+        visibility="public",
+        status="pending_confirmation",
+    )
+    db.add_all([f_public_confirmed, f_conflict, f_private, f_pending])
+    db.commit()
+
+    # Verify directly via FactService.get_relevant_facts (Customer path query)
+    fact_svc = FactService(db)
+    relevant = fact_svc.get_relevant_facts(
+        tenant_id=tenant.id,
+        query="ما هي منتجاتكم؟",
+        include_private=False,
+    )
+    rel_ids = [f.id for f in relevant]
+    assert f_public_confirmed.id in rel_ids
+    assert f_conflict.id not in rel_ids
+    assert f_private.id not in rel_ids
+    assert f_pending.id not in rel_ids
+
+    # Verify end-to-end through real engine execution
+    conv_svc = ConversationService(db)
+    conv = conv_svc.start_conversation(
+        tenant_id=tenant.id,
+        customer_id=cust.id,
+        subject="Customer Product Inquiry",
+        channel_id=channel.id,
+    )
+
+    captured_prompts: list[str] = []
+
+    class CapturingProvider(MockAIProvider):
+        def generate_text(self, prompt: str, *, system_instruction: str | None = None, temperature: float = 0.2) -> str:
+            captured_prompts.append(prompt)
+            # Reply using only what is in the verified facts ground truth
+            if "برنامج ناظم المحاسبي" in prompt:
+                return "أهلاً بك! نقدم لكم برنامج ناظم المحاسبي المعتمد."
+            return "مرحباً بكم في متجرنا."
+
+    cap_provider = CapturingProvider()
+    engine = ConversationalAgentEngine(db=db, ai_provider=cap_provider)
+
+    cust_msg = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="customer",
+        customer_id=cust.id,
+        content="ما هي منتجاتكم؟",
+        metadata_json={"is_owner": False},
+    )
+
+    res = engine.process_incoming_message(tenant.id, cust_msg.id)
+    assert res.success is True
+    assert "برنامج ناظم المحاسبي" in res.reply_content
+
+    # Assert captured LLM prompt content
+    assert len(captured_prompts) > 0
+    full_prompt = captured_prompts[0]
+    assert "برنامج ناظم المحاسبي" in full_prompt
+    assert "حزمة تجريبية ملغية" not in full_prompt
+    assert "هامش الربح الداخلي" not in full_prompt
+    assert "خدمة السحابة غير المؤكدة" not in full_prompt
+    assert "45% هامش سري" not in full_prompt
+
+    # Assert reply content does NOT leak private or conflict data
+    assert "حزمة تجريبية ملغية" not in res.reply_content
+    assert "هامش سري" not in res.reply_content
+    assert "غير المؤكدة" not in res.reply_content
+
+
 @pytest.mark.skipif(
     not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GROQ_API_KEY")),
     reason="Live AI Provider API key not available in environment",

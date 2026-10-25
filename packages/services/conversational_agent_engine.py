@@ -828,6 +828,116 @@ class ConversationalAgentEngine:
             except Exception as exc:
                 logger.warning("OwnerIntentRouter evaluation skipped due to exception: %s", exc)
 
+        # --- Check for Pending Conflict Resolution (Phase 2 Item B.2) ---
+        conv_meta = dict(conversation.metadata_json or {})
+        pending_conflict = conv_meta.get("pending_conflict")
+        if pending_conflict and isinstance(pending_conflict, dict):
+            opt1_label = pending_conflict.get("opt1_label", "").strip()
+            opt2_label = pending_conflict.get("opt2_label", "").strip()
+            chosen: str | None = None
+
+            # Pattern for Option 2 (conflicting_fact):
+            # e.g. "المنذر تكنولوجي", "الاسم الصحيح هو الثاني", "الثاني", "الخيار الثاني", "الجديد"
+            is_opt2 = (
+                (opt2_label and opt2_label.lower() in content_lower)
+                or bool(re.search(r"(?:الخيار\s*)?الثاني|الجديد", content_lower))
+                or (opt2_label and any(w in content_lower for w in opt2_label.lower().split() if len(w) > 3) and not (opt1_label and opt1_label.lower() in content_lower))
+            )
+
+            # Pattern for Option 1 (existing_fact):
+            # e.g. "المنذر للتقنية", "اعتمد المنذر للتقنية", "الأول", "الاسم الأول", "الخيار الأول", "السابق", "القديم"
+            is_opt1 = (
+                (opt1_label and opt1_label.lower() in content_lower)
+                or bool(re.search(r"(?:الخيار\s*)?الأول|الاول|السابق|القديم", content_lower))
+                or (opt1_label and any(w in content_lower for w in opt1_label.lower().split() if len(w) > 3) and not (opt2_label and opt2_label.lower() in content_lower))
+            )
+
+            if is_opt2 and not is_opt1:
+                chosen = "opt2"
+            elif is_opt1 and not is_opt2:
+                chosen = "opt1"
+            elif is_opt1 and is_opt2:
+                if opt2_label and opt2_label.lower() in content_lower:
+                    chosen = "opt2"
+                elif opt1_label and opt1_label.lower() in content_lower:
+                    chosen = "opt1"
+
+            if chosen in ("opt1", "opt2"):
+                try:
+                    from packages.services.fact_service import FactService
+                    fact_svc = FactService(self.db)
+
+                    if chosen == "opt2":
+                        kept_id = UUID(pending_conflict["conflicting_fact_id"])
+                        rejected_id = UUID(pending_conflict["existing_fact_id"])
+                        chosen_label = opt2_label
+                    else:
+                        kept_id = UUID(pending_conflict["existing_fact_id"])
+                        rejected_id = UUID(pending_conflict["conflicting_fact_id"])
+                        chosen_label = opt1_label
+
+                    kept_fact = fact_svc.resolve_conflict(
+                        tenant_id=tenant_id,
+                        kept_fact_id=kept_id,
+                        rejected_fact_id=rejected_id,
+                    )
+
+                    # Update business_brain dual-write if identity or product
+                    if kept_fact.topic == "company.identity" and isinstance(kept_fact.value, dict):
+                        try:
+                            brain_svc = BusinessBrainService(self.db)
+                            brain_svc.update_brain(tenant_id=tenant_id, identity=kept_fact.value, updated_by_user_id=message.sender_id)
+                        except Exception as exc:
+                            logger.error("Failed to update brain during conflict resolution: %s", exc)
+
+                    conv_meta.pop("pending_conflict", None)
+                    conversation.metadata_json = conv_meta
+                    flag_modified(conversation, "metadata_json")
+                    self.db.commit()
+
+                    reply_text = (
+                        f"✅ تم حل التعارض بنجاح واعتماد ({chosen_label}) كبيان رسمي للمنشأة، "
+                        f"مع أرشفة القيمة السابقة في السجل التاريخي."
+                    )
+                    return self._persist_and_return_reply(
+                        tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                    )
+                except Exception as exc:
+                    logger.error("Error resolving conflict for tenant_id=%s: %s", tenant_id, exc, exc_info=True)
+
+        # --- Check for Pending Replace Confirmation (Phase 2 Item B.4) ---
+        pending_replace = conv_meta.get("pending_replace")
+        if pending_replace and isinstance(pending_replace, dict):
+            affirmative_words = ["نعم", "تأكيد", "اعتمد", "موافق", "أوافق", "نعم اعتمد", "نعم أوافق"]
+            if any(re.search(rf"\b{w}\b", content_lower) for w in affirmative_words):
+                try:
+                    from packages.services.fact_service import FactService
+                    fact_svc = FactService(self.db)
+                    fact_id = UUID(pending_replace["fact_id"])
+                    confirmed_f = fact_svc.confirm_fact(tenant_id, fact_id)
+
+                    old_fact_id_str = pending_replace.get("existing_fact_id")
+                    if old_fact_id_str:
+                        old_fact_id = UUID(old_fact_id_str)
+                        old_fact = self.db.scalar(select(Fact).where(Fact.id == old_fact_id, Fact.tenant_id == tenant_id))
+                        if old_fact:
+                            old_fact.superseded_by = confirmed_f.id
+                            old_fact.status = "superseded"
+                            self.db.flush()
+
+                    conv_meta.pop("pending_replace", None)
+                    conversation.metadata_json = conv_meta
+                    flag_modified(conversation, "metadata_json")
+                    self.db.commit()
+
+                    clean_c = FactService.format_fact_readable_arabic(confirmed_f.value)
+                    reply_text = f"✅ تم تأكيد استبدال نطاق التغطية واعتماد ({clean_c}) بنجاح."
+                    return self._persist_and_return_reply(
+                        tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                    )
+                except Exception as exc:
+                    logger.error("Error confirming pending replace: %s", exc)
+
         # --- A. Check for Approvals ---
         from packages.services.approval_service import ApprovalService
         approval_svc = ApprovalService(self.db)
@@ -1406,10 +1516,63 @@ class ConversationalAgentEngine:
             return gap_response
 
         # --- H. Product Catalog & Facts Store Queries (Answered strictly from stored facts) ---
-        # 1. Product Catalog Query ("ما هي منتجاتنا؟")
+        # 0. Product Comparison Query ("ايش الفرق بين ناظم وسيرو؟")
+        comp_match = re.search(
+            r"(?:ايش|إيش|وش|ما|ماهو|ما\s*هو)?\s*(?:الفرق|مقارنة|المقارنة)\s*بين\s+([^\s]+)\s+(?:و|مع)\s*([^\s\?؟]+)",
+            content_lower,
+        )
+        if comp_match:
+            raw_p1 = comp_match.group(1).strip()
+            raw_p2 = comp_match.group(2).strip()
+            clean_p1 = re.sub(r"^(?:برنامج|منتج|نظام|تطبيق)\s+", "", raw_p1).strip()
+            clean_p2 = re.sub(r"^(?:برنامج|منتج|نظام|تطبيق)\s+", "", raw_p2).strip()
+
+            from packages.services.fact_service import FactService
+            all_p_facts = self.db.scalars(
+                select(Fact).where(
+                    Fact.tenant_id == tenant_id,
+                    Fact.topic.like("product.%"),
+                    Fact.status == "confirmed",
+                    Fact.superseded_by.is_(None),
+                )
+            ).all()
+
+            p1_fact = None
+            p2_fact = None
+            for pf in all_p_facts:
+                subj = pf.subject
+                val_str = str(pf.value)
+                if clean_p1 in subj or clean_p1 in val_str or clean_p1 in pf.topic:
+                    p1_fact = pf
+                if clean_p2 in subj or clean_p2 in val_str or clean_p2 in pf.topic:
+                    p2_fact = pf
+
+            if p1_fact and p2_fact:
+                p1_val = FactService.format_fact_readable_arabic(p1_fact.value)
+                p2_val = FactService.format_fact_readable_arabic(p2_fact.value)
+                reply_text = (
+                    f"بناءً على الحقائق المسجلة في بيانات المنشأة:\n"
+                    f"- {p1_fact.subject}: {p1_val}\n"
+                    f"- {p2_fact.subject}: {p2_val}\n\n"
+                    f"أما التفاصيل الدقيقة للفروقات التقنية والمقارنة المفصلة بينهما، فهي غير مسجلة حالياً في قاعدة البيانات."
+                )
+            elif p1_fact:
+                p1_val = FactService.format_fact_readable_arabic(p1_fact.value)
+                reply_text = (
+                    f"بناءً على البيانات المعتمدة في المنشأة، المنتج ({p1_fact.subject}) مسجل: ({p1_val})، "
+                    f"بينما المنتج الآخر ({raw_p2}) غير مسجل في قاعدة البيانات، وتفاصيل المقارنة غير مسجلة."
+                )
+            else:
+                reply_text = f"تفاصيل المنتجات والمقارنة بين ({raw_p1}) و ({raw_p2}) غير مسجلة حالياً في بيانات المنشأة."
+
+            return self._persist_and_return_reply(
+                tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+            )
+
+        # 1. Product Catalog Query ("ما هي منتجاتنا؟", "وش المنتجات اللي عندكم؟", "ايش تبيعوا؟")
         is_product_list_query = bool(
             re.search(
-                r"(?:قائمة|عرض|ماهي|ما\s*هي|ايش|إيش|كم|اعطني|أعطني|استعرض)\s*(?:كل\s*)?(?:المنتجات|منتجاتنا|منتجاتكم|الأسعار|أسعاركم|المنيو|كتالوج)|(?:منتجات|أسعار)\s*(?:المتجر|المنشأة)|ما\s*هي\s*قائمة\s*منتجات",
+                r"(?:قائمة|عرض|ماهي|ما\s*هي|ايش|إيش|وش|شو|كم|اعطني|أعطني|استعرض)\s*(?:كل\s*)?(?:المنتجات|منتجاتنا|منتجاتكم|الأسعار|أسعاركم|المنيو|كتالوج|اللي\s*عندكم|المتوفرة)|(?:منتجات|أسعار)\s*(?:المتجر|المنشأة)|ما\s*هي\s*قائمة\s*منتجات|(?:وش|ايش|إيش|شو|ماذا)\s*(?:تبيعوا|تبيعون|تقدموا|تقدمون|عندكم)",
                 content_lower,
             )
         ) and not bool(re.search(r"أضف|سجل|تحديث|بسعر|سعره|نبيع|نوفر|نقدم|نخدم|اسم\s*شركتنا", content_lower))
@@ -1435,13 +1598,13 @@ class ConversationalAgentEngine:
                 tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
             )
 
-        # 2. Delivery Coverage / Cities Query ("ما هي المدن التي نخدمها؟")
+        # 2. Delivery Coverage / Cities Query ("ما هي المدن التي نخدمها؟", "وين تخدموا؟")
         is_coverage_query = bool(
             re.search(
-                r"(?:ما\s*هي|ماهي|ايش|إيش|عرض|أين|اين|استعرض)\s*(?:نطاق(?:ات)?\s*التوصيل|المدن\s*(?:التي\s*نخدمها|المدعومة|المشمولة)|فروعنا|مناطق\s*التغطية|التغطية)|(?:ما\s*هي\s*)?المدن\s*التي\s*نخدمها",
+                r"(?:ما\s*هي|ماهي|ايش|إيش|وش|عرض|أين|اين|وين|فين|استعرض)\s*(?:نطاق(?:ات)?\s*التوصيل|المدن\s*(?:التي\s*نخدمها|المدعومة|المشمولة|اللي\s*نخدمها)|فروعنا|مناطق\s*التغطية|التغطية)|(?:ما\s*هي\s*)?المدن\s*التي\s*نخدمها|(?:وين|أين|اين|فين)\s*(?:تخدموا|تخدمون|توصلوا|توصلون|فروعكم|تغطيتكم)",
                 content_lower,
             )
-        ) and not bool(re.search(r"أضف|سجل|تحديث|أيضًا|ايضا|^\s*(?:نخدم|نوصل|فروعنا\s*في)\b", content_lower))
+        ) and not bool(re.search(r"أضف|سجل|تحديث|أيضًا|ايضا|ما\s*نخدم|لا\s*نخدم|^\s*(?:نخدم|نوصل|فروعنا\s*في)\b", content_lower))
 
         if is_coverage_query:
             try:
@@ -1488,9 +1651,9 @@ class ConversationalAgentEngine:
                 tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
             )
 
-        # 3. Product Price Query ("كم سعر ناظم؟")
+        # 3. Product Price Query ("كم سعر ناظم؟", "بكم ناظم؟", "كم يكلف سيرو؟")
         price_query_match = re.search(
-            r"(?:كم\s*سعر|ما\s*(?:هو\s*)?سعر)\s*(?:برنامج|منتج)?\s*([^\?؟\n]+)",
+            r"(?:بكم|كم\s*(?:سعر|يكلف|تكلفة|قيمة)|ما\s*(?:هو\s*)?سعر)\s*(?:برنامج|منتج|نظام|تطبيق)?\s*([^\?؟\n]+)",
             content_lower,
         )
         if price_query_match and not bool(re.search(r"أضف|سجل|تحديث|هو\s*سعر", content_lower)):
@@ -1548,48 +1711,118 @@ class ConversationalAgentEngine:
                     auto_confirm_direct=True,
                     message_text=content,
                 )
+
+                # Check for replacement confirmation requirement (Item B.4)
+                if save_result.get("replace_confirmation_info"):
+                    info = save_result["replace_confirmation_info"]
+                    rem_str = "، ".join(info["removed_cities"])
+                    new_str = "، ".join(info["new_cities"])
+                    conv_meta = dict(conversation.metadata_json or {})
+                    conv_meta["pending_replace"] = {
+                        "fact_id": str(save_result["pending"][0].id) if save_result["pending"] else "",
+                        "existing_fact_id": str(info.get("existing_fact_id") or ""),
+                        "info": info,
+                    }
+                    conversation.metadata_json = conv_meta
+                    flag_modified(conversation, "metadata_json")
+                    self.db.commit()
+
+                    reply_text = (
+                        f"⚠️ استوعبت رغبتكم في حصر نطاق التغطية على ({new_str}) فقط.\n"
+                        f"هذا الإجراء سيستبدل النطاق المعتمد سابقاً ويحذف {info['removed_count']} مدن ({rem_str}).\n"
+                        f"يرجى تأكيد الاعتماد للمتابعة (أو الرد بـ 'تأكيد')."
+                    )
+                    return self._persist_and_return_reply(
+                        tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                    )
+
                 if save_result["conflicts"]:
-                    c_lines = []
-                    for c in save_result["conflicts"]:
-                        old_v = json.dumps(c["existing_fact"].value, ensure_ascii=False)
-                        new_v = json.dumps(c["conflicting_fact"].value, ensure_ascii=False)
-                        c_lines.append(f"⚠️ تعارض في بيان '{c['subject']}': القيمة المسجلة حالياً ({old_v}) تختلف عن القيمة الجديدة ({new_v}). يرجى تحديد القيمة المعتمدة.")
-                    reply_text = "تم رصد تعارض مع بيانات معتمدة سابقة:\n" + "\n".join(c_lines)
-                else:
-                    summary_items = []
-                    b_updates: dict[str, Any] = {}
-                    for f in save_result["confirmed"]:
-                        summary_items.append(f"✅ {f.subject}: {json.dumps(f.value, ensure_ascii=False)}")
-                        if f.topic == "company.identity" and isinstance(f.value, dict):
-                            b_updates["identity"] = f.value
-                        elif f.topic.startswith("product."):
-                            b_updates.setdefault("products", {})[f.subject] = f.value
-                            topic_slug = f.topic.split(".", 1)[1] if "." in f.topic else ""
-                            if topic_slug:
-                                b_updates["products"][topic_slug] = f.value
-                            if "ناظم" in f.subject:
-                                b_updates["products"]["nazim_accounting"] = f.value
-                            if "سيرو" in f.subject:
-                                b_updates["products"]["ciro_networks"] = f.value
-                            if "الموظف الذكي" in f.subject or "موظف ذكي" in f.subject:
-                                b_updates["products"]["smart_employee"] = f.value
-                        elif f.topic.startswith("service."):
-                            b_updates.setdefault("services", {})[f.subject] = f.value
-                        elif f.topic.startswith("operations.") and isinstance(f.value, dict):
-                            b_updates.setdefault("operations", {}).update(f.value)
+                    c0 = save_result["conflicts"][0]
+                    old_v = FactService.format_fact_readable_arabic(c0["existing_fact"].value)
+                    new_v = FactService.format_fact_readable_arabic(c0["conflicting_fact"].value)
 
-                    for f in save_result["pending"]:
-                        summary_items.append(f"⏳ {f.subject}: {json.dumps(f.value, ensure_ascii=False)} (بانتظار تأكيدك)")
+                    conv_meta = dict(conversation.metadata_json or {})
+                    conv_meta["pending_conflict"] = {
+                        "existing_fact_id": str(c0["existing_fact"].id),
+                        "conflicting_fact_id": str(c0["conflicting_fact"].id),
+                        "topic": c0["topic"],
+                        "subject": c0["subject"],
+                        "opt1_label": old_v,
+                        "opt2_label": new_v,
+                    }
+                    conversation.metadata_json = conv_meta
+                    flag_modified(conversation, "metadata_json")
+                    self.db.commit()
 
-                    # Dual-write to business_brain during migration phase for backward compatibility
-                    if b_updates:
-                        try:
-                            brain_svc = BusinessBrainService(self.db)
-                            brain_svc.update_brain(tenant_id=tenant_id, **b_updates, updated_by_user_id=message.sender_id)
-                        except Exception as exc:
-                            logger.error("Error dual-writing to business_brain for tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
+                    reply_text = (
+                        f"تم رصد تعارض مع بيانات معتمدة سابقة:\n"
+                        f"⚠️ تعارض في بيان '{c0['subject']}': القيمة المسجلة حالياً ({old_v}) تختلف عن القيمة الجديدة ({new_v}). "
+                        f"يرجى تحديد القيمة المعتمدة (الخيار 1: {old_v}، الخيار 2: {new_v})."
+                    )
+                    return self._persist_and_return_reply(
+                        tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                    )
 
-                    reply_text = f"تم استيعاب وتوثيق البيانات في قاعدة الحقائق بنجاح:\n" + "\n".join(summary_items)
+                # Format human-readable Arabic read-back without raw JSON/dicts (Item B.1)
+                confirmed_products = []
+                confirmed_other = []
+                b_updates: dict[str, Any] = {}
+
+                for f in save_result["confirmed"]:
+                    clean_val = FactService.format_fact_readable_arabic(f.value)
+                    if f.topic.startswith("product."):
+                        confirmed_products.append(clean_val or f.subject)
+                        b_updates.setdefault("products", {})[f.subject] = f.value
+                        topic_slug = f.topic.split(".", 1)[1] if "." in f.topic else ""
+                        if topic_slug:
+                            b_updates["products"][topic_slug] = f.value
+                        if "ناظم" in f.subject:
+                            b_updates["products"]["nazim_accounting"] = f.value
+                        if "سيرو" in f.subject:
+                            b_updates["products"]["ciro_networks"] = f.value
+                        if "الموظف الذكي" in f.subject or "موظف ذكي" in f.subject:
+                            b_updates["products"]["smart_employee"] = f.value
+                    else:
+                        if f.topic == "company.identity":
+                            confirmed_other.append(f"اسم الشركة: {clean_val}")
+                            if isinstance(f.value, dict):
+                                b_updates["identity"] = f.value
+                        elif f.topic == "company.description":
+                            confirmed_other.append(f"مجال النشاط: {clean_val}")
+                        elif f.topic.startswith("operations.delivery_zones") or f.topic.startswith("operations.coverage"):
+                            confirmed_other.append(f"المدن ونطاق التغطية: {clean_val}")
+                            if isinstance(f.value, dict):
+                                b_updates.setdefault("operations", {}).update(f.value)
+                        elif f.topic.startswith("operations.working_hours"):
+                            confirmed_other.append(f"أوقات العمل: {clean_val}")
+                            if isinstance(f.value, dict):
+                                b_updates.setdefault("operations", {}).update(f.value)
+                        else:
+                            confirmed_other.append(f"{f.subject}: {clean_val}")
+                            if f.topic.startswith("service."):
+                                b_updates.setdefault("services", {})[f.subject] = f.value
+                            elif f.topic.startswith("operations.") and isinstance(f.value, dict):
+                                b_updates.setdefault("operations", {}).update(f.value)
+
+                all_readback_parts = []
+                all_readback_parts.extend(confirmed_other)
+                if confirmed_products:
+                    all_readback_parts.append(f"المنتجات: {('، '.join(confirmed_products))}")
+
+                for f in save_result["pending"]:
+                    clean_val = FactService.format_fact_readable_arabic(f.value)
+                    all_readback_parts.append(f"⏳ {f.subject}: {clean_val} (بانتظار تأكيدك)")
+
+                # Dual-write to business_brain during migration phase for backward compatibility
+                if b_updates:
+                    try:
+                        brain_svc = BusinessBrainService(self.db)
+                        brain_svc.update_brain(tenant_id=tenant_id, **b_updates, updated_by_user_id=message.sender_id)
+                    except Exception as exc:
+                        logger.error("Error dual-writing to business_brain for tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
+
+                readback_body = "، ".join(all_readback_parts)
+                reply_text = f"تم استيعاب وتوثيق البيانات في قاعدة الحقائق بنجاح:\n{readback_body}"
 
                 return self._persist_and_return_reply(
                     tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
