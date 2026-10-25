@@ -98,6 +98,13 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - `get_relevant_facts` strictly limits customer context to public confirmed non-expired facts; owner context receives both public and private facts.
 - **2.7 Non-Destructive Migration Plan**:
   - Pre-migration backup routine, Alembic migration `e6f7a8b9c0d1_add_facts_table.py`, and data copier `migrate_business_brains_and_knowledge_to_facts`. Documented in `docs/MIGRATION_PLAN_PHASE2.md` awaiting user approval before applying to live DB.
+- **2.8 Runtime Integration & Real Entry-Point Wire-up**:
+  - Routed all owner business declarations directly through structured fact extraction as primary engine, making old regex confirmation messages completely unreachable.
+  - Added additive delivery zone merging (e.g. "لا، نخدم أيضًا محافظة عمران" merges into existing coverage without conflict, superseding previous record while keeping existing cities).
+  - Wired direct query handlers for product catalogs ("ما هي منتجاتنا؟"), delivery coverage ("ما هي المدن التي نخدمها؟"), and specific product prices ("كم سعر ناظم؟") answering strictly from the Facts Store without hallucinating features or asking about unrelated categories.
+  - Reconciled Alembic migration chain (`c4d5e6f7a8b9 -> d5e6f7a8b9c0 -> e6f7a8b9c0d1`), ensuring fresh and live DB schema parity.
+  - Eliminated outside-Alembic table creation leaks (`setup_facts_table` restricted strictly to `ai_employee_test`).
+  - Verified across all 6 messages through real entry point on scratch DB. Full regression suite passing (23/23).
 
 ---
 

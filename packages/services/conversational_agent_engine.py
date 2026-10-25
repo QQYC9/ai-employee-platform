@@ -24,6 +24,7 @@ from packages.models.domain import (
     CapabilityVersion,
     Conversation,
     Customer,
+    Fact,
     Message,
     Tool,
     User,
@@ -1404,241 +1405,202 @@ class ConversationalAgentEngine:
         if gap_response is not None:
             return gap_response
 
-        # --- H. Product Catalog Batch / Single Addition or Update via Tool ---
-        from packages.tools.business_tools import parse_arabic_products
-        extracted_products = parse_arabic_products(content)
-        is_explicit_product_action = bool(
-            re.search(
-                r"(?:أضف|سجل|تحديث|قائمة\s*المنتجات|منتجاتنا|المنتجات|سعر)\s*[:\s]?",
-                content,
-                re.IGNORECASE,
-            )
-        )
-        if extracted_products and (len(extracted_products) > 1 or is_explicit_product_action):
-            # Check if store name is also provided in the same message (e.g. "اسم المتجر: المنذر للعسل")
-            store_name_match = re.search(
-                r"اسم\s*(?:المتجر|المنشأة|الشركة|المحل)\s*[:—\-]?\s*([^\n\.,]+)",
-                content,
-                re.IGNORECASE,
-            )
-            store_name = None
-            if store_name_match:
-                store_name = self._clean_business_name(store_name_match.group(1).strip())
-                brain_svc = BusinessBrainService(self.db)
-                brain_svc.update_brain(
-                    tenant_id=tenant_id,
-                    identity={"name": store_name, "legal_name": store_name},
-                    updated_by_user_id=message.sender_id,
-                )
-                knowledge_svc = KnowledgeService(self.db)
-                knowledge_svc.create_knowledge(
-                    tenant_id=tenant_id,
-                    title=f"اسم المنشأة: {store_name}",
-                    content=f"اسم المنشأة التجاري المعتمد: {store_name}",
-                    knowledge_type="identity",
-                    metadata_json={"source": "owner_conversation", "verified": True},
-                    user_id=message.sender_id,
-                )
-
-            tool_res = self.execute_tool_action(
-                tenant_id,
-                "product_add_or_update",
-                {"raw_text": content},
-                conversation_id=conversation_id,
-            )
-            if tool_res.status == "executed" and tool_res.output:
-                res_data = tool_res.output if isinstance(tool_res.output, dict) else {}
-                saved = res_data.get("saved_products", [])
-                lines = [f"{i+1}. {p['name']} — {p['price']:g} {p['unit']}" for i, p in enumerate(saved)]
-
-                reply_lines = [
-                    "✅ **تم حفظ وتحديث معلومات النشاط التجاري بنجاح:**",
-                    "📦 تم توثيق وحفظ المنتجات المعتمدة في قاعدة البيانات الرسمية:",
-                ]
-                if store_name:
-                    reply_lines.append(f"🏢 **اسم المتجر:** {store_name}")
-                reply_lines.append(f"📦 **عدد المنتجات المحفوظة:** {len(saved)} منتج.\n")
-                reply_lines.append("📋 **قائمة المنتجات المعتمدة وأسعارها:**")
-                reply_lines.extend(lines)
-                reply_lines.append(
-                    "\n💾 تم التحقق الفعلي من كتابة جميع المنتجات في قاعدة البيانات (BusinessBrain) "
-                    "وأصبحت متاحة فوراً وموثقة لخدمة العملاء والرد على استفساراتهم."
-                )
-                reply_text = "\n".join(reply_lines)
-            else:
-                reply_text = f"تعذر حفظ المنتجات: {tool_res.reason or tool_res.status}"
-
-            return self._persist_and_return_reply(
-                tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
-            )
-
-        # --- G1. Product Catalog Query via Tool (SSOT) ---
+        # --- H. Product Catalog & Facts Store Queries (Answered strictly from stored facts) ---
+        # 1. Product Catalog Query ("ما هي منتجاتنا؟")
         is_product_list_query = bool(
             re.search(
                 r"(?:قائمة|عرض|ماهي|ما\s*هي|ايش|إيش|كم|اعطني|أعطني|استعرض)\s*(?:كل\s*)?(?:المنتجات|منتجاتنا|منتجاتكم|الأسعار|أسعاركم|المنيو|كتالوج)|(?:منتجات|أسعار)\s*(?:المتجر|المنشأة)|ما\s*هي\s*قائمة\s*منتجات",
                 content_lower,
             )
-        ) and not bool(re.search(r"أضف|سجل|تحديث|بسعر|سعره", content_lower))
+        ) and not bool(re.search(r"أضف|سجل|تحديث|بسعر|سعره|نبيع|نوفر|نقدم|نخدم|اسم\s*شركتنا", content_lower))
 
         if is_product_list_query:
-            tool_res = self.execute_tool_action(
-                tenant_id,
-                "product_list",
-                {},
-                conversation_id=conversation_id,
-            )
-            if tool_res.status == "executed" and tool_res.output:
-                data = tool_res.output if isinstance(tool_res.output, dict) else {}
-                reply_text = data.get("catalog_text", "لا توجد منتجات مسجلة.")
-            else:
-                reply_text = f"تم استدعاء أداة استعراض المنتجات: {tool_res.reason or tool_res.status}"
+            try:
+                tool_res = self.execute_tool_action(
+                    tenant_id,
+                    "product_list",
+                    {},
+                    conversation_id=conversation_id,
+                )
+                if tool_res.status == "executed" and tool_res.output:
+                    data = tool_res.output if isinstance(tool_res.output, dict) else {}
+                    reply_text = data.get("catalog_text", "لا توجد منتجات مسجلة.")
+                else:
+                    reply_text = f"تم استدعاء أداة استعراض المنتجات: {tool_res.reason or tool_res.status}"
+            except Exception as exc:
+                logger.error("Product list query failed for tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
+                reply_text = "لا توجد منتجات مسجلة حالياً في قاعدة بيانات المنشأة."
 
             return self._persist_and_return_reply(
                 tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
             )
 
-        # --- G. Conversational Business Learning (Phase 2 Facts Store Primary + Fallback) ---
-        from packages.services.fact_service import FactService
-        fact_svc = FactService(self.db)
-        fact_res = fact_svc.extract_facts(tenant_id, content, provider=provider)
-        if fact_res and fact_res.facts:
-            save_result = fact_svc.save_extracted_facts(tenant_id, fact_res.facts, auto_confirm_direct=True)
-            if save_result["conflicts"]:
-                c_lines = []
-                for c in save_result["conflicts"]:
-                    old_v = json.dumps(c["existing_fact"].value, ensure_ascii=False)
-                    new_v = json.dumps(c["conflicting_fact"].value, ensure_ascii=False)
-                    c_lines.append(f"⚠️ تعارض في بيان '{c['subject']}': القيمة المسجلة حالياً ({old_v}) تختلف عن القيمة الجديدة ({new_v}). يرجى تحديد القيمة المعتمدة.")
-                reply_text = "تم رصد تعارض مع بيانات معتمدة سابقة:\n" + "\n".join(c_lines)
-            else:
-                summary_items = []
-                b_updates: dict[str, Any] = {}
-                for f in save_result["confirmed"]:
-                    summary_items.append(f"✅ {f.subject}: {json.dumps(f.value, ensure_ascii=False)}")
-                    if f.topic == "company.identity" and isinstance(f.value, dict):
-                        b_updates["identity"] = f.value
-                    elif f.topic.startswith("product."):
-                        b_updates.setdefault("products", {})[f.subject] = f.value
-                        topic_slug = f.topic.split(".", 1)[1] if "." in f.topic else ""
-                        if topic_slug:
-                            b_updates["products"][topic_slug] = f.value
-                        if "ناظم" in f.subject:
-                            b_updates["products"]["nazim_accounting"] = f.value
-                        if "سيرو" in f.subject:
-                            b_updates["products"]["ciro_networks"] = f.value
-                        if "الموظف الذكي" in f.subject or "موظف ذكي" in f.subject:
-                            b_updates["products"]["smart_employee"] = f.value
-                    elif f.topic.startswith("service."):
-                        b_updates.setdefault("services", {})[f.subject] = f.value
-                    elif f.topic.startswith("operations.") and isinstance(f.value, dict):
-                        b_updates.setdefault("operations", {}).update(f.value)
+        # 2. Delivery Coverage / Cities Query ("ما هي المدن التي نخدمها؟")
+        is_coverage_query = bool(
+            re.search(
+                r"(?:ما\s*هي|ماهي|ايش|إيش|عرض|أين|اين|استعرض)\s*(?:نطاق(?:ات)?\s*التوصيل|المدن\s*(?:التي\s*نخدمها|المدعومة|المشمولة)|فروعنا|مناطق\s*التغطية|التغطية)|(?:ما\s*هي\s*)?المدن\s*التي\s*نخدمها",
+                content_lower,
+            )
+        ) and not bool(re.search(r"أضف|سجل|تحديث|أيضًا|ايضا|^\s*(?:نخدم|نوصل|فروعنا\s*في)\b", content_lower))
 
-                for f in save_result["pending"]:
-                    summary_items.append(f"⏳ {f.subject}: {json.dumps(f.value, ensure_ascii=False)} (بانتظار تأكيدك)")
+        if is_coverage_query:
+            try:
+                cov_facts = self.db.scalars(
+                    select(Fact).where(
+                        Fact.tenant_id == tenant_id,
+                        Fact.topic.in_(["operations.delivery_zones", "operations.coverage"]),
+                        Fact.status == "confirmed",
+                        Fact.superseded_by.is_(None),
+                    )
+                ).all()
+                all_cities: list[str] = []
+                for f in cov_facts:
+                    val = f.value
+                    if isinstance(val, list):
+                        all_cities.extend([str(c) for c in val])
+                    elif isinstance(val, dict):
+                        raw_c = val.get("cities") or val.get("coverage") or []
+                        if isinstance(raw_c, list):
+                            all_cities.extend([str(c) for c in raw_c])
+                        elif isinstance(raw_c, str):
+                            all_cities.extend([c.strip() for c in raw_c.split("،")])
+                all_cities = list(dict.fromkeys(all_cities))
 
-                # Dual-write to business_brain during migration phase for backward compatibility
-                if b_updates:
-                    try:
-                        brain_svc = BusinessBrainService(self.db)
-                        brain_svc.update_brain(tenant_id=tenant_id, **b_updates, updated_by_user_id=message.sender_id)
-                    except Exception:
-                        pass
+                if not all_cities:
+                    brain = BusinessBrainService(self.db).get_brain(tenant_id)
+                    if brain and brain.operations and (brain.operations.get("cities") or brain.operations.get("branches")):
+                        raw_ops = brain.operations.get("cities") or brain.operations.get("branches")
+                        if isinstance(raw_ops, list):
+                            all_cities.extend(raw_ops)
+                        elif isinstance(raw_ops, str):
+                            all_cities.extend([c.strip() for c in raw_ops.split("،")])
+                        all_cities = list(dict.fromkeys(all_cities))
 
-                reply_text = f"تم استيعاب وتوثيق البيانات في قاعدة الحقائق بنجاح:\n" + "\n".join(summary_items)
+                if all_cities:
+                    reply_text = f"📍 **المدن ونطاق التغطية المعتمد في المنشأة ({len(all_cities)} مدن):**\n" + "، ".join(all_cities)
+                else:
+                    reply_text = "نطاقات التغطية والمدن التي تخدمها المنشأة غير مسجلة حالياً في قاعدة البيانات."
+            except Exception as exc:
+                logger.error("Coverage query failed for tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
+                reply_text = "تعذر استرجاع نطاقات التغطية حالياً."
 
             return self._persist_and_return_reply(
                 tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
             )
 
-        learning_info = self._extract_business_knowledge(content)
-        if learning_info:
-            if learning_info.get("needs_clarification"):
-                reply_text = learning_info["clarification_question"]
+        # 3. Product Price Query ("كم سعر ناظم؟")
+        price_query_match = re.search(
+            r"(?:كم\s*سعر|ما\s*(?:هو\s*)?سعر)\s*(?:برنامج|منتج)?\s*([^\?؟\n]+)",
+            content_lower,
+        )
+        if price_query_match and not bool(re.search(r"أضف|سجل|تحديث|هو\s*سعر", content_lower)):
+            target_prod = price_query_match.group(1).strip()
+            # Clean common filler particles
+            target_clean = re.sub(r"^(?:برنامج|منتج|نظام|تطبيق|أداة)\s+", "", target_prod).strip()
+            try:
+                prod_facts = self.db.scalars(
+                    select(Fact).where(
+                        Fact.tenant_id == tenant_id,
+                        Fact.topic.like("product.%"),
+                        Fact.status == "confirmed",
+                        Fact.superseded_by.is_(None),
+                    )
+                ).all()
+
+                matching_prod_fact = None
+                for pf in prod_facts:
+                    if target_clean in pf.subject or target_clean in pf.topic:
+                        matching_prod_fact = pf
+                        break
+                    val = pf.value
+                    if isinstance(val, dict) and target_clean in (val.get("name") or ""):
+                        matching_prod_fact = pf
+                        break
+
+                if matching_prod_fact:
+                    val = matching_prod_fact.value
+                    price_val = val.get("price") if isinstance(val, dict) else None
+                    unit_val = val.get("unit", "ريال") if isinstance(val, dict) else "ريال"
+                    if price_val is not None and float(price_val) > 0:
+                        reply_text = f"سعر ({matching_prod_fact.subject}) المعتمد في السجل هو: {price_val:g} {unit_val}."
+                    else:
+                        reply_text = f"السعر الخاص بـ ({matching_prod_fact.subject}) غير مسجل حالياً في بيانات المنشأة. يمكنك تزويدي بالسعر لاعتماده وحفظه فوراً."
+                else:
+                    reply_text = f"المنتج ({target_prod}) غير مسجل حالياً في بيانات المنشأة."
+            except Exception as exc:
+                logger.error("Price query failed for tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
+                reply_text = f"السعر الخاص بـ ({target_prod}) غير مسجل حالياً في بيانات المنشأة."
+
+            return self._persist_and_return_reply(
+                tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+            )
+
+        # --- I. Conversational Business Learning (Phase 2 Facts Store Primary Engine) ---
+        # Any owner message stating business declarations (identity, products, coverage, hours, pricing, policies)
+        try:
+            from packages.services.fact_service import FactService
+            fact_svc = FactService(self.db)
+            fact_res = fact_svc.extract_facts(tenant_id, content, provider=provider)
+            if fact_res and fact_res.facts:
+                save_result = fact_svc.save_extracted_facts(
+                    tenant_id,
+                    fact_res.facts,
+                    auto_confirm_direct=True,
+                    message_text=content,
+                )
+                if save_result["conflicts"]:
+                    c_lines = []
+                    for c in save_result["conflicts"]:
+                        old_v = json.dumps(c["existing_fact"].value, ensure_ascii=False)
+                        new_v = json.dumps(c["conflicting_fact"].value, ensure_ascii=False)
+                        c_lines.append(f"⚠️ تعارض في بيان '{c['subject']}': القيمة المسجلة حالياً ({old_v}) تختلف عن القيمة الجديدة ({new_v}). يرجى تحديد القيمة المعتمدة.")
+                    reply_text = "تم رصد تعارض مع بيانات معتمدة سابقة:\n" + "\n".join(c_lines)
+                else:
+                    summary_items = []
+                    b_updates: dict[str, Any] = {}
+                    for f in save_result["confirmed"]:
+                        summary_items.append(f"✅ {f.subject}: {json.dumps(f.value, ensure_ascii=False)}")
+                        if f.topic == "company.identity" and isinstance(f.value, dict):
+                            b_updates["identity"] = f.value
+                        elif f.topic.startswith("product."):
+                            b_updates.setdefault("products", {})[f.subject] = f.value
+                            topic_slug = f.topic.split(".", 1)[1] if "." in f.topic else ""
+                            if topic_slug:
+                                b_updates["products"][topic_slug] = f.value
+                            if "ناظم" in f.subject:
+                                b_updates["products"]["nazim_accounting"] = f.value
+                            if "سيرو" in f.subject:
+                                b_updates["products"]["ciro_networks"] = f.value
+                            if "الموظف الذكي" in f.subject or "موظف ذكي" in f.subject:
+                                b_updates["products"]["smart_employee"] = f.value
+                        elif f.topic.startswith("service."):
+                            b_updates.setdefault("services", {})[f.subject] = f.value
+                        elif f.topic.startswith("operations.") and isinstance(f.value, dict):
+                            b_updates.setdefault("operations", {}).update(f.value)
+
+                    for f in save_result["pending"]:
+                        summary_items.append(f"⏳ {f.subject}: {json.dumps(f.value, ensure_ascii=False)} (بانتظار تأكيدك)")
+
+                    # Dual-write to business_brain during migration phase for backward compatibility
+                    if b_updates:
+                        try:
+                            brain_svc = BusinessBrainService(self.db)
+                            brain_svc.update_brain(tenant_id=tenant_id, **b_updates, updated_by_user_id=message.sender_id)
+                        except Exception as exc:
+                            logger.error("Error dual-writing to business_brain for tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
+
+                    reply_text = f"تم استيعاب وتوثيق البيانات في قاعدة الحقائق بنجاح:\n" + "\n".join(summary_items)
+
                 return self._persist_and_return_reply(
                     tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
                 )
-
-            category = learning_info["category"]
-            data_dict = learning_info["data"]
-            title = learning_info["title"]
-            details = learning_info["details"]
-
-            brain_svc = BusinessBrainService(self.db)
-            if "multi_updates" in learning_info:
-                brain_svc.update_brain(
-                    tenant_id=tenant_id,
-                    **learning_info["multi_updates"],
-                    updated_by_user_id=message.sender_id,
-                )
-            else:
-                brain_svc.update_brain(
-                    tenant_id=tenant_id,
-                    **{category: data_dict},
-                    updated_by_user_id=message.sender_id,
-                )
-
-            knowledge_svc = KnowledgeService(self.db)
-            knowledge_svc.create_knowledge(
-                tenant_id=tenant_id,
-                title=title,
-                content=details,
-                knowledge_type=category,
-                metadata_json={
-                    "source": "owner_conversation",
-                    "verified": True,
-                    "channel_message_id": str(message.id),
-                    "category": category,
-                },
-                user_id=message.sender_id,
-            )
-
-            # Flush and read back actual persisted record from database (Item 0.8)
-            self.db.flush()
-            refreshed_brain = brain_svc.get_brain(tenant_id)
-            persisted_lines: list[str] = []
-            if refreshed_brain:
-                if category == "identity" or "identity" in learning_info.get("multi_updates", {}):
-                    c_name = (refreshed_brain.identity or {}).get("name") or (refreshed_brain.identity or {}).get("company_name")
-                    if c_name:
-                        persisted_lines.append(f"🏢 اسم المنشأة المعتمد في السجل: {c_name}")
-                if category == "products" or "products" in learning_info.get("multi_updates", {}):
-                    prods = refreshed_brain.products or {}
-                    p_names = [p.get("name", k) if isinstance(p, dict) else k for k, p in prods.items()]
-                    if p_names:
-                        persisted_lines.append(f"📦 المنتجات المحفوظة في السجل: {', '.join(p_names)}")
-                if category == "services" or "services" in learning_info.get("multi_updates", {}):
-                    servs = refreshed_brain.services or {}
-                    s_names = [s.get("name", k) if isinstance(s, dict) else k for k, s in servs.items()]
-                    if s_names:
-                        persisted_lines.append(f"🛠️ الخدمات المحفوظة في السجل: {', '.join(s_names)}")
-                if category == "operations":
-                    ops = refreshed_brain.operations or {}
-                    if ops.get("cities") or ops.get("branches"):
-                        c_list = ops.get("cities") or ops.get("branches")
-                        persisted_lines.append(f"📍 الفروع وتغطية المدن في السجل: {', '.join(c_list)}")
-                    if ops.get("working_hours"):
-                        persisted_lines.append(f"⏰ أوقات العمل في السجل: {ops.get('working_hours')}")
-                if category == "policies":
-                    pols = refreshed_brain.policies or {}
-                    for p_key, p_val in pols.items():
-                        persisted_lines.append(f"📜 السياسة المعتمدة في السجل: {p_val}")
-                if category == "pricing":
-                    pr = refreshed_brain.pricing or {}
-                    for pr_k, pr_v in pr.items():
-                        item = pr_v.get("item", pr_k) if isinstance(pr_v, dict) else pr_k
-                        price = pr_v.get("price") if isinstance(pr_v, dict) else pr_v
-                        curr = pr_v.get("currency", "ريال") if isinstance(pr_v, dict) else "ريال"
-                        persisted_lines.append(f"💰 السعر المعتمد لـ ({item}): {price} {curr}")
-
-            persisted_summary = "\n".join(f"- {d}" for d in persisted_lines) if persisted_lines else f"- {details}"
-
-            reply_text = (
-                f"✅ تم حفظ وتأكيد البيانات في قاعدة بيانات المنشأة (BusinessBrain):\n"
-                f"{persisted_summary}\n\n"
-                f"💾 تم التحقق الفعلي من كتابة هذه البيانات في السجل الدائم، وأصبحت معتمدة فوراً في خدمة العملاء."
-            )
-            return self._persist_and_return_reply(
-                tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+        except Exception as exc:
+            logger.error(
+                "Structured fact extraction error for tenant_id=%s, message_id=%s: %s",
+                tenant_id,
+                message_id,
+                exc,
+                exc_info=True,
             )
 
         # --- H. Store Identity Inquiry & Interactive Onboarding Flow ---
@@ -1760,8 +1722,8 @@ class ConversationalAgentEngine:
                 for f in owner_facts:
                     v_str = json.dumps(f.value, ensure_ascii=False)
                     facts_lines.append(f"- [{f.subject}] ({f.topic}, visibility={f.visibility}): {v_str}")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error("Error retrieving relevant facts for owner prompt tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
 
             owner_prompt_parts: list[str] = []
             if facts_lines:
@@ -1796,7 +1758,8 @@ class ConversationalAgentEngine:
                 reply_text = provider.generate_text(
                     owner_user_prompt, system_instruction=system_inst, temperature=temperature
                 )
-            except Exception:
+            except Exception as exc:
+                logger.error("Error generating text in owner guidance for tenant_id=%s, message_id=%s: %s", tenant_id, message_id, exc, exc_info=True)
                 reply_text = "أهلاً بك يا صاحب النشاط! أنا موظفك الذكي، جاهز لتنفيذ تعليماتك، تحديث المنتجات والأسعار، أو تزويدك بملخص النشاط."
         else:
             reply_text = (

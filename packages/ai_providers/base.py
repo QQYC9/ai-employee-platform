@@ -128,8 +128,10 @@ class AIProvider(Protocol):
         system_instruction: str | None = None,
         temperature: float = 0.1,
         max_tokens: int | None = None,
+        schema: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
-        """Generate and parse a JSON object."""
+        """Generate and parse a JSON object, optionally conforming to a JSON Schema."""
         ...
 
     def test_connection(self) -> dict[str, Any]:

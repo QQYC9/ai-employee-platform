@@ -136,3 +136,24 @@ This log records major design and implementation choices, including rationale an
 
 
 
+
+---
+
+## Decision 2.2: Primary Structured Fact Routing, Additive Merging & Truthful Query Answering
+- **Context**: In runtime testing with realistic multi-clause declarations and consecutive inquiries, legacy regex parsers and intent branches intervened prematurely. Company names could silently overwrite existing records without conflict detection, queries like "ما هي منتجاتنا؟" read empty legacy columns, additive sentences like "لا، نخدم أيضًا محافظة عمران" failed or collided with existing facts, and the old regex confirmation message was still emitted.
+- **Decision**:
+  1. **Structured Fact Extraction as Primary Handler**:
+     - In `ConversationalAgentEngine._process_owner_message`, structured extraction is executed ahead of legacy catalog/knowledge fallback routes.
+     - The old regex confirmation acknowledgment message has been made completely unreachable.
+     - All exceptions in this path are logged with `tenant_id`, `message_id`, and stack traces; exceptions are never swallowed silently.
+  2. **Additive Coverage Merging**:
+     - When owner declarations include additive terminology (`أيضًا`, `ايضا`, `كذلك`, `بالإضافة`, `إضافة`), or provide new coverage cities without negating previous ones, `FactService.save_extracted_facts` merges new cities into the existing confirmed record (`list(dict.fromkeys(existing + new))`), marks the previous fact as `superseded_by`, and confirms the updated list without generating a conflict.
+     - Contradictory identity declarations (e.g. changing company name) continue to be strictly flagged as `status="conflict"` requiring owner confirmation.
+  3. **Truthful Direct Query Handlers**:
+     - Product catalog inquiries ("ما هي منتجاتنا؟") query confirmed facts directly from the `facts` table, formatted into an ordered Arabic listing.
+     - Delivery coverage inquiries ("ما هي المدن التي نخدمها؟") return the deduplicated list of confirmed coverage cities.
+     - Product price inquiries ("كم سعر ناظم؟") check the confirmed product record; if unrecorded, the agent truthfully states that the price is not recorded and offers to record it, strictly without hallucinating features, guessing numbers, or asking about unrelated categories (such as heat regulators or lighting).
+  4. **Alembic Migration Reconciled**:
+     - Restored `d5e6f7a8b9c0` (approvals token/expires_at) to the migration chain between `c4d5e6f7a8b9` and `e6f7a8b9c0d1`.
+     - Preserves single Alembic head and 100% schema alignment across live DB and fresh databases.
+     - Eliminated out-of-band table creation in tests (`checkfirst=True` and strict `ai_employee_test` validation).

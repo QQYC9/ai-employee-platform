@@ -166,6 +166,8 @@ class GeminiProvider:
         system_instruction: str | None = None,
         temperature: float = 0.1,
         max_tokens: int | None = None,
+        schema: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         if not prompt.strip():
             raise ValueError("Prompt cannot be empty")
@@ -177,6 +179,8 @@ class GeminiProvider:
         }
         if max_tokens is not None and max_tokens > 0:
             config_kwargs["max_output_tokens"] = max_tokens
+        if schema is not None:
+            config_kwargs["response_schema"] = schema
 
         try:
             response = self.client.models.generate_content(

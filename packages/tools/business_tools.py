@@ -716,9 +716,77 @@ class ProductListTool(BaseRealTool):
 
     def run(self, context: ToolExecutionContext, **parameters: Any) -> dict[str, Any]:
         from packages.services.business_brain_service import BusinessBrainService
+        from packages.models.domain import Fact
 
-        brain = BusinessBrainService(self.db).get_brain(context.tenant_id)
-        if not brain or not brain.products:
+        query = (parameters.get("query") or "").strip().lower()
+        items = []
+
+        # 1. Query confirmed facts from Facts Store (SSOT)
+        confirmed_facts = self.db.scalars(
+            select(Fact).where(
+                Fact.tenant_id == context.tenant_id,
+                Fact.topic.like("product.%"),
+                Fact.status == "confirmed",
+                Fact.superseded_by.is_(None),
+            )
+        ).all()
+
+        seen_names = set()
+        for f in confirmed_facts:
+            val = f.value
+            slug = f.topic.split(".", 1)[1] if "." in f.topic else f.topic
+            name = f.subject
+            price = 0
+            unit = "ريال"
+            cat = ""
+            if isinstance(val, dict):
+                name = val.get("name") or val.get("title") or f.subject
+                price = val.get("price", 0)
+                unit = val.get("unit") or val.get("currency") or "ريال"
+                cat = val.get("category", "")
+            elif isinstance(val, str):
+                name = val
+
+            if query and query not in name.lower() and query not in slug.lower():
+                continue
+
+            clean_name = name.strip()
+            if clean_name.lower() in seen_names:
+                continue
+            seen_names.add(clean_name.lower())
+
+            items.append({
+                "slug": slug,
+                "name": clean_name,
+                "price": price,
+                "unit": unit,
+                "category": cat,
+            })
+
+        # 2. Fallback to legacy BusinessBrain products if facts store has no products
+        if not items:
+            brain = BusinessBrainService(self.db).get_brain(context.tenant_id)
+            if brain and brain.products:
+                for slug, data in brain.products.items():
+                    if not isinstance(data, dict):
+                        continue
+                    name = data.get("name") or data.get("title") or slug
+                    price = data.get("price", 0)
+                    unit = data.get("unit") or data.get("currency") or "ريال"
+                    cat = data.get("category", "")
+
+                    if query and query not in name.lower() and query not in slug.lower():
+                        continue
+
+                    items.append({
+                        "slug": slug,
+                        "name": name,
+                        "price": price,
+                        "unit": unit,
+                        "category": cat,
+                    })
+
+        if not items:
             return {
                 "tenant_id": str(context.tenant_id),
                 "total_count": 0,
@@ -726,28 +794,14 @@ class ProductListTool(BaseRealTool):
                 "catalog_text": "لا توجد أي منتجات مسجلة في قاعدة بيانات المنشأة حالياً.",
             }
 
-        query = (parameters.get("query") or "").strip().lower()
-        items = []
-        for slug, data in brain.products.items():
-            if not isinstance(data, dict):
-                continue
-            name = data.get("name") or data.get("title") or slug
-            price = data.get("price", 0)
-            unit = data.get("unit") or data.get("currency") or "ريال"
-            cat = data.get("category", "")
+        catalog_lines = []
+        for i, p in enumerate(items):
+            p_price = p['price']
+            if p_price and p_price > 0:
+                catalog_lines.append(f"{i+1}. {p['name']} — {p_price:g} {p['unit']}")
+            else:
+                catalog_lines.append(f"{i+1}. {p['name']}")
 
-            if query and query not in name.lower() and query not in slug.lower():
-                continue
-
-            items.append({
-                "slug": slug,
-                "name": name,
-                "price": price,
-                "unit": unit,
-                "category": cat,
-            })
-
-        catalog_lines = [f"{i+1}. {p['name']} — {p['price']:g} {p['unit']}" for i, p in enumerate(items)]
         catalog_text = "📦 **قائمة المنتجات المعتمدة:**\n" + "\n".join(catalog_lines)
 
         return {

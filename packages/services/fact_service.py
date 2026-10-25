@@ -134,7 +134,7 @@ class FactService:
                     if parsed.facts:
                         return parsed
             except Exception as exc:
-                logger.warning("AI Model structured fact extraction failed; falling back to regex: %s", exc)
+                logger.warning("AI Model structured fact extraction failed for tenant %s: %s; falling back to regex", tenant_id, exc, exc_info=True)
 
         # Fallback to deterministic regex extraction
         return self._extract_facts_regex_fallback(message_text)
@@ -142,17 +142,18 @@ class FactService:
     def _extract_facts_regex_fallback(self, text: str) -> FactExtractionResponse:
         """
         Documented deterministic fallback extraction for Arabic business declarations.
-        Handles company identity, product catalog, and delivery coverage zones.
+        Handles company identity, company description, product catalog, and delivery coverage zones.
         """
         facts: list[ExtractedFactItem] = []
         summary_lines: list[str] = []
 
         # 1. Company Name Extraction
         name_match = re.search(
-            r"(?:اسم\s*(?:الشركة|المنشأة|المحل|المتجر|المؤسسة|شركتنا|منشأتنا)|نحن|معكم)\s*[:—\-=]?\s*([^\n،,.]+)",
+            r"(?:(?:ال)?اسم\s*(?:الشركة|المنشأة|المحل|المتجر|المؤسسة|شركتنا|منشأتنا|التجاري(?:\s*(?:الرسمي|المعتمد|لمنشأتنا|لشركتنا))?)|نحن|معكم)\s*[:—\-=]?\s*([^\n،,.]+)",
             text,
             re.IGNORECASE,
         )
+        cleaned_name = None
         if name_match:
             raw_name = name_match.group(1).strip()
             cleaned_name = re.sub(
@@ -160,7 +161,7 @@ class FactService:
                 "",
                 raw_name,
             ).strip()
-            # Stop before verbs like "نبيع" or "نخدم"
+            # Stop before verbs like "نبيع" or "نخدم" or "شركة"
             cleaned_name = re.split(r"\s+(?:نبيع|نخدم|نوفر|نقدم|لدينا)\b", cleaned_name)[0].strip()
             if cleaned_name:
                 facts.append(
@@ -174,19 +175,51 @@ class FactService:
                 )
                 summary_lines.append(f"🏢 اسم المنشأة: {cleaned_name}")
 
+        # 1.5. Company Activity / Description
+        desc_match = re.search(
+            r"(?:شركة|مؤسسة|منشأة|متجر|متخصصون\s*في|مجالنا)\s+([^\n.]+?)(?=\.|\n|نبيع|نوفر|نقدم|نخدم|$)",
+            text,
+            re.IGNORECASE,
+        )
+        if desc_match:
+            raw_desc = desc_match.group(0).strip()
+            # Only add if it's descriptive and not just the company name itself
+            if raw_desc and len(raw_desc) > 8 and "نبيع" not in raw_desc and raw_desc != cleaned_name:
+                facts.append(
+                    ExtractedFactItem(
+                        topic="company.description",
+                        subject="مجال النشاط",
+                        value={"description": raw_desc},
+                        visibility="public",
+                        is_direct_unambiguous=True,
+                    )
+                )
+                summary_lines.append(f"📋 مجال النشاط: {raw_desc}")
+
         # 2. Product Catalog Extraction
         # Match sentences declaring selling products (e.g. "نبيع الموظف الذكي وبرنامج ناظم المحاسبي وبرنامج سيرو لإدارة الشبكات")
         sell_match = re.search(
-            r"(?:نبيع|نوفر|نقدم|منتجاتنا(?:\s*هي)?|لدينا\s*(?:منتجات)?)\s*[:—\-=]?\s*([^\n.]+?)(?=(?:\s*نخدم|\s*وفروعنا|\s*ونوصل|\s*ساعات|\s*$))",
+            r"(?:نبيع|نوفر|نقدم|منتجاتنا(?:\s*هي)?|لدينا\s*(?:منتجات)?)\s*[:—\-=]?\s*(.+?)(?=(?:\.?\s*(?:نخدم|فروعنا|ونوصل|ساعات)|\n|$))",
             text,
             re.IGNORECASE,
         )
         if sell_match:
             prods_clause = sell_match.group(1).strip()
+            # Strip trailing period if present
+            prods_clause = re.sub(r"\.+$", "", prods_clause).strip()
+            # Strip introductory quantifiers like "ثلاثة منتجات:" or "قائمة المنتجات:"
+            prods_clause = re.sub(
+                r"^(?:ثلاثة|أربعة|خمسة|ستة|عدة|\d+)?\s*منتجات\s*[:\s]*",
+                "",
+                prods_clause,
+                flags=re.IGNORECASE,
+            ).strip()
             # Split items on comma or 'و'
             raw_items = re.split(r"[،,]+|\s+و(?=\S)", prods_clause)
             for item in raw_items:
                 clean_item = item.strip()
+                # Clean trailing modifiers like "والتحكم الكامل بها"
+                clean_item = re.split(r"\s+(?:والتحكم|بحيث|مع|في)\b", clean_item)[0].strip()
                 if clean_item and len(clean_item) > 2 and not clean_item.startswith("نخدم"):
                     if "ناظم" in clean_item:
                         slug = "nazim_accounting"
@@ -208,7 +241,7 @@ class FactService:
                     summary_lines.append(f"📦 منتج: {clean_item}")
 
         # 3. Delivery Coverage / Cities Extraction
-        # Match coverage cities (e.g. "نخدم صنعاء والحديدة وذمار وإب والمحويت وريمة")
+        # Match coverage cities (e.g. "نخدم صنعاء والحديدة وذمار وإب والمحويت وريمة" or "نخدم أيضًا محافظة عمران")
         service_match = re.search(
             r"(?:نخدم|نوصل\s*(?:إلى|لـ)?|فروعنا\s*(?:في)?|تغطيتنا\s*(?:في)?)\s*[:—\-=]?\s*([^\n.]+)",
             text,
@@ -274,6 +307,7 @@ class FactService:
         tenant_id: UUID,
         extracted_facts: list[ExtractedFactItem],
         auto_confirm_direct: bool = True,
+        message_text: str | None = None,
     ) -> dict[str, Any]:
         """
         Saves extracted facts into the database while detecting conflicts and managing confirmation.
@@ -281,32 +315,95 @@ class FactService:
         - Inferred or ambiguous statements: saved as 'pending_confirmation'.
         - Contradictory statements against existing confirmed facts on the same topic/subject:
           saved as 'conflict' without silent overwrites, returning a conflict report for owner decision.
+        - Additive statements (e.g. adding new delivery zones with 'أيضًا'): merged into existing coverage without conflict.
         """
         confirmed_records: list[Fact] = []
         pending_records: list[Fact] = []
         conflict_records: list[dict[str, Any]] = []
 
         now = datetime.now(timezone.utc)
+        is_additive = bool(
+            message_text
+            and re.search(
+                r"(?:أيضًا|ايضا|كذلك|بالإضافة|إضافة|اضافة|كمان|وايضا|وأيضا|ومعاها|ومعها)",
+                message_text,
+            )
+        )
 
         for item in extracted_facts:
-            # Check for existing active confirmed facts on this topic and subject
-            existing_fact = self.db.scalar(
-                select(Fact).where(
-                    Fact.tenant_id == tenant_id,
-                    Fact.topic == item.topic,
-                    Fact.subject == item.subject,
-                    Fact.status == "confirmed",
-                    Fact.superseded_by.is_(None),
-                )
+            is_coverage_item = (
+                item.topic in ("operations.delivery_zones", "operations.coverage")
+                or (item.topic.startswith("operations.") and any(k in item.subject for k in ["مدن", "تغطية", "نطاق", "فروع", "مناطق"]))
             )
+
+            # Check for existing active confirmed facts on this topic and subject
+            if is_coverage_item:
+                existing_fact = self.db.scalar(
+                    select(Fact).where(
+                        Fact.tenant_id == tenant_id,
+                        Fact.topic.in_(["operations.delivery_zones", "operations.coverage"]),
+                        Fact.status == "confirmed",
+                        Fact.superseded_by.is_(None),
+                    )
+                )
+            else:
+                existing_fact = self.db.scalar(
+                    select(Fact).where(
+                        Fact.tenant_id == tenant_id,
+                        Fact.topic == item.topic,
+                        Fact.status == "confirmed",
+                        Fact.superseded_by.is_(None),
+                    )
+                )
+                if not existing_fact:
+                    existing_fact = self.db.scalar(
+                        select(Fact).where(
+                            Fact.tenant_id == tenant_id,
+                            Fact.topic == item.topic,
+                            Fact.subject == item.subject,
+                            Fact.status == "confirmed",
+                            Fact.superseded_by.is_(None),
+                        )
+                    )
 
             expires_at = None
             if item.expires_in_days:
                 expires_at = now + timedelta(days=item.expires_in_days)
 
+            # Handle additive updates for coverage / delivery zones
+            is_coverage_additive = False
+            if is_coverage_item and existing_fact is not None:
+                def _extract_cities_list(val: Any) -> list[str]:
+                    if isinstance(val, list):
+                        return [str(c).strip() for c in val if str(c).strip()]
+                    if isinstance(val, dict):
+                        raw = val.get("cities") or val.get("coverage") or val.get("zones") or []
+                        if isinstance(raw, list):
+                            return [str(c).strip() for c in raw if str(c).strip()]
+                        if isinstance(raw, str):
+                            return [c.strip() for c in raw.split("،") if c.strip()]
+                    if isinstance(val, str):
+                        return [c.strip() for c in val.split("،") if c.strip()]
+                    return []
+
+                existing_cities = _extract_cities_list(existing_fact.value)
+                new_cities = _extract_cities_list(item.value)
+                if is_additive or (new_cities and not any(c in existing_cities for c in new_cities)):
+                    merged_cities = list(dict.fromkeys(existing_cities + new_cities))
+                    if isinstance(existing_fact.value, dict):
+                        item.value = dict(existing_fact.value)
+                        item.value["cities"] = merged_cities
+                    elif isinstance(item.value, dict):
+                        item.value = {"cities": merged_cities}
+                    else:
+                        item.value = merged_cities
+                    item.topic = existing_fact.topic
+                    item.subject = existing_fact.subject
+                    is_coverage_additive = True
+
             # Conflict Detection:
             # If an existing confirmed fact exists and its value is different from the new value
-            if existing_fact is not None and existing_fact.value != item.value:
+            if existing_fact is not None and existing_fact.value != item.value and not is_coverage_additive:
                 # Store new fact with status='conflict' without deleting existing fact
                 conflict_fact = Fact(
                     id=uuid4(),

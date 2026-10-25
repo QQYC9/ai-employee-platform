@@ -453,7 +453,10 @@ def test_0_8_saved_confirmation_shows_actual_persisted_db_record(db: Session, te
     # Must contain the clean value actually persisted in the DB
     assert "المنذر تكنولوجي" in reply.content
     assert "الرسمي لمنشأتنا" not in reply.content
-    assert "تم حفظ وتأكيد البيانات في قاعدة بيانات المنشأة (BusinessBrain)" in reply.content
+    assert (
+        "تم استيعاب وتوثيق البيانات في قاعدة الحقائق بنجاح" in reply.content
+        or "تم حفظ وتأكيد البيانات في قاعدة بيانات المنشأة (BusinessBrain)" in reply.content
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -402,6 +402,8 @@ class ResilientAIProvider:
         system_instruction: str | None = None,
         temperature: float = 0.1,
         max_tokens: int | None = None,
+        schema: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         def _call_json(p: AIProvider) -> dict[str, Any]:
             import inspect
@@ -411,6 +413,9 @@ class ResilientAIProvider:
             }
             if max_tokens is not None:
                 kw["max_tokens"] = max_tokens
+            if schema is not None:
+                kw["schema"] = schema
+            kw.update(kwargs)
             sig = inspect.signature(p.generate_json)
             has_var = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
             if not has_var:

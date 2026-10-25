@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from uuid import UUID, uuid4
 from datetime import datetime, timedelta, timezone
@@ -14,14 +15,18 @@ from packages.core.database import SessionLocal, Base, engine
 from packages.models.domain import BusinessBrain, Fact, Knowledge, Message, Conversation, Channel, User
 from packages.models.tenant import Tenant
 from packages.services.conversational_agent_engine import ConversationalAgentEngine
+from packages.services.conversation_service import ConversationService
 from packages.services.fact_service import ExtractedFactItem, FactExtractionResponse, FactService
 
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_facts_table():
-    """Ensure the facts table is created in the isolated test database."""
-    from packages.core.database import Base, engine
-    Base.metadata.create_all(bind=engine, tables=[Fact.__table__])
+    """Ensure the facts table is created strictly in the isolated test database."""
+    from packages.core.safety_guard import verify_test_database_isolation
+    import packages.core.database as core_db
+    actual_db = verify_test_database_isolation(core_db.engine)
+    assert actual_db == "ai_employee_test", f"Safety violation: attempted table creation on {actual_db}"
+    Fact.__table__.create(bind=core_db.engine, checkfirst=True)
     yield
 
 
@@ -518,3 +523,188 @@ def test_owner_corrects_auto_confirmed_fact_preserves_history(db: Session, tenan
     assert len(active_facts) == 1
     assert active_facts[0].id == corrected_fact.id
     assert active_facts[0].value == corrected_val
+
+
+def test_owner_runtime_learning_queries_and_conflict_resolution(
+    db: Session, tenant: Tenant, channel: Channel
+):
+    """
+    Verifies the end-to-end runtime owner flow through the real entry point:
+    1. Business declaration: company name, description, products, coverage cities.
+    2. Products catalog query: answered strictly from Facts Store.
+    3. Conflicting company name declaration: creates conflict, does not overwrite silently.
+    4. Additive delivery coverage declaration: merges governorate, keeps others, supersedes old.
+    5. Delivery coverage query: returns all 7 cities.
+    6. Product price query: states price not recorded, no invented features or irrelevant categories.
+    """
+    owner_user = User(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        email=f"owner_{uuid4().hex[:8]}@example.com",
+        role="owner",
+        name="Owner Tester",
+        status="active",
+    )
+    db.add(owner_user)
+    db.commit()
+
+    conv_svc = ConversationService(db)
+    conv = conv_svc.start_conversation(
+        tenant_id=tenant.id,
+        customer_id=None,
+        subject="Owner Management Chat",
+        channel_id=channel.id,
+    )
+
+    mock_provider = MockAIProvider(reply="رد اختباري")
+    engine = ConversationalAgentEngine(db=db, ai_provider=mock_provider)
+
+    # Turn 1: Business declaration
+    msg1 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content=(
+            "اسم شركتنا المنذر تكنولوجي، شركة برمجيات وشبكات وتقنيات حاسوب. "
+            "نبيع ثلاثة منتجات: الموظف الذكي، وبرنامج ناظم المحاسبي، وبرنامج سيرو لإدارة الشبكات والتحكم الكامل بها. "
+            "نخدم صنعاء والحديدة وذمار وإب والمحويت وريمة."
+        ),
+        metadata_json={"is_owner": True},
+    )
+    res1 = engine.process_incoming_message(tenant.id, msg1.id)
+    assert res1.success is True
+    assert "تم استيعاب وتوثيق البيانات في قاعدة الحقائق بنجاح" in res1.reply_content
+    assert "المنذر تكنولوجي" in res1.reply_content
+    assert "الموظف الذكي" in res1.reply_content
+    assert "ناظم" in res1.reply_content
+    assert "سيرو" in res1.reply_content
+
+    db.expire_all()
+    initial_facts = db.scalars(
+        select(Fact).where(Fact.tenant_id == tenant.id, Fact.status == "confirmed")
+    ).all()
+    assert len(initial_facts) >= 5
+
+    # Turn 2: Product query ("ما هي منتجاتنا؟")
+    msg2 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="ما هي منتجاتنا؟",
+        metadata_json={"is_owner": True},
+    )
+    res2 = engine.process_incoming_message(tenant.id, msg2.id)
+    assert res2.success is True
+    assert "قائمة المنتجات المعتمدة" in res2.reply_content
+    assert "الموظف الذكي" in res2.reply_content
+    assert "ناظم" in res2.reply_content
+    assert "سيرو" in res2.reply_content
+
+    # Turn 3: Conflicting company name declaration
+    msg3 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="اسم شركتنا المنذر للتقنية",
+        metadata_json={"is_owner": True},
+    )
+    res3 = engine.process_incoming_message(tenant.id, msg3.id)
+    assert res3.success is True
+    assert "تعارض" in res3.reply_content
+    assert "المنذر تكنولوجي" in res3.reply_content
+    assert "المنذر للتقنية" in res3.reply_content
+
+    db.expire_all()
+    conflicts = db.scalars(
+        select(Fact).where(Fact.tenant_id == tenant.id, Fact.status == "conflict")
+    ).all()
+    assert len(conflicts) == 1
+    assert "المنذر للتقنية" in str(conflicts[0].value)
+
+    # Turn 4: Additive coverage declaration ("لا، نخدم أيضًا محافظة عمران")
+    msg4 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="لا، نخدم أيضًا محافظة عمران",
+        metadata_json={"is_owner": True},
+    )
+    res4 = engine.process_incoming_message(tenant.id, msg4.id)
+    assert res4.success is True
+    assert "عمران" in res4.reply_content
+
+    db.expire_all()
+    active_cov = db.scalar(
+        select(Fact).where(
+            Fact.tenant_id == tenant.id,
+            Fact.topic.in_(["operations.delivery_zones", "operations.coverage"]),
+            Fact.status == "confirmed",
+            Fact.superseded_by.is_(None),
+        )
+    )
+    assert active_cov is not None
+    cities_in_val = active_cov.value if isinstance(active_cov.value, list) else active_cov.value.get("cities", [])
+    assert "عمران" in cities_in_val
+    assert "صنعاء" in cities_in_val
+    assert len(cities_in_val) == 7
+
+    # Turn 5: Coverage query ("ما هي المدن التي نخدمها؟")
+    msg5 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="ما هي المدن التي نخدمها؟",
+        metadata_json={"is_owner": True},
+    )
+    res5 = engine.process_incoming_message(tenant.id, msg5.id)
+    assert res5.success is True
+    for c in ["صنعاء", "الحديدة", "ذمار", "إب", "المحويت", "ريمة", "عمران"]:
+        assert c in res5.reply_content
+
+    # Turn 6: Specific product price query ("كم سعر ناظم؟")
+    msg6 = conv_svc.send_message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        sender_type="user",
+        sender_id=owner_user.id,
+        content="كم سعر ناظم؟",
+        metadata_json={"is_owner": True},
+    )
+    res6 = engine.process_incoming_message(tenant.id, msg6.id)
+    assert res6.success is True
+    assert "السعر الخاص بـ" in res6.reply_content
+    assert "غير مسجل حالياً" in res6.reply_content
+    # Must not hallucinate or ask about heat regulators or lighting
+    assert "حرارة" not in res6.reply_content
+    assert "إنارة" not in res6.reply_content
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GROQ_API_KEY")),
+    reason="Live AI Provider API key not available in environment",
+)
+def test_live_model_facts_extraction_smoke(db: Session, tenant: Tenant):
+    """
+    Optional live-model smoke test exercising real AIProvider structured JSON extraction.
+    Skipped automatically if no live API key is configured.
+    """
+    from packages.ai_providers.factory import AIProviderFactory
+    from packages.services.fact_service import FactService
+
+    provider = AIProviderFactory.create_resilient_provider(tenant_id=tenant.id, db=db)
+    assert provider is not None
+
+    fact_svc = FactService(db)
+    res = fact_svc.extract_facts(
+        tenant_id=tenant.id,
+        message_text="اسم شركتنا المنذر تكنولوجي، نبيع برنامج ناظم المحاسبي وبرنامج سيرو للشبكات.",
+        provider=provider,
+    )
+    assert res is not None
+    assert len(res.facts) >= 2
+
