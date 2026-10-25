@@ -60,7 +60,7 @@ This document outlines the phased plan to evolve the Digital Employee platform f
 ---
 
 ## Phase 1: Owner Inquiry Loop (Ask the Owner When Answer is Unknown)
-- **Status**: todo
+- **Status**: done (Verified with 3 real-path tests in `tests/test_phase1_task3_owner_inquiries.py`)
 - **Objective**: Implement asynchronous inquiry escalation to the business owner when customer questions lack verified knowledge.
 - **Acceptance Criteria**:
   - `owner_inquiries` table with `tenant_id`, `conversation_id`, `customer_question`, `status`, `owner_answer`, timestamps.
@@ -71,6 +71,7 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - Escalation task and customer notification upon timeout.
   - Deduplication across multiple customers asking the same question.
   - Multi-tenant isolation verified by test.
+- **1.1 Owner Inquiry Loop & Dynamic Knowledge Resolution**: Implemented migration `c1d2e3f4a5b6_add_owner_inquiries_table.py`, `OwnerInquiryService`, question normalization deduplication, holding sentence dispatch, owner answer matching (reply-to, inquiry #, single pending), FactService persistence, scope prompting ('للجميع' / 'لهذا العميل فقط'), 2h/24h reminders/timeouts, and commands ('الاستفسارات', 'تجاهل 12').
 
 ---
 

@@ -722,7 +722,16 @@ class ConversationalAgentEngine:
                 comp_name = agent_context.business.get("identity", {}).get("name") if agent_context.business else "منشأتنا"
                 reply_text = self._build_safe_products_reply(tenant_id=tenant_id, company_name=comp_name)
             else:
-                reply_text = DEFAULT_HANDOFF_REPLY
+                from packages.services.owner_inquiry_service import OwnerInquiryService
+                inq_svc = OwnerInquiryService(self.db, self.audit_service)
+                sender_str = str((message.metadata_json or {}).get("sender_id") or message.customer_id or "customer")
+                inq_obj, holding_sentence = inq_svc.handle_customer_inquiry(
+                    tenant_id=tenant_id,
+                    customer_conversation_id=conversation.id,
+                    customer_sender=sender_str,
+                    question=message.content or "",
+                )
+                reply_text = holding_sentence
 
             # Log handoff in queryable audit_events table for tenant owner
             self.audit_service.record_event(
@@ -772,6 +781,19 @@ class ConversationalAgentEngine:
                     )
                 except Exception:
                     pass
+
+        # Phase 1: If reply contains handoff or unrecorded notice, create inquiry and reply with holding sentence
+        if DEFAULT_HANDOFF_REPLY in reply_text:
+            from packages.services.owner_inquiry_service import OwnerInquiryService
+            inq_svc = OwnerInquiryService(self.db, self.audit_service)
+            sender_str = str((message.metadata_json or {}).get("sender_id") or message.customer_id or "customer")
+            inq_obj, holding_sentence = inq_svc.handle_customer_inquiry(
+                tenant_id=tenant_id,
+                customer_conversation_id=conversation.id,
+                customer_sender=sender_str,
+                question=message.content or "",
+            )
+            reply_text = holding_sentence
 
         # 9. Persist Agent Reply in Conversation
         return self._persist_and_return_reply(
@@ -900,6 +922,44 @@ class ConversationalAgentEngine:
         msg_meta = dict(message.metadata_json or {})
         if trace_id:
             msg_meta["trace_id"] = str(trace_id)
+
+        # --- Phase 1: Owner Inquiry Loop Hook ---
+        try:
+            from packages.services.owner_inquiry_service import OwnerInquiryService
+            inquiry_svc = OwnerInquiryService(self.db, self.audit_service)
+
+            # A. Scope prompt follow-up ("للجميع" / "لهذا العميل فقط")
+            scope_res = inquiry_svc.handle_scope_reply(tenant_id, content)
+            if scope_res:
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, scope_res, msg_meta, is_owner=True
+                )
+
+            # B. Administrative inquiry commands ("الاستفسارات" / "تجاهل 12")
+            cmd_res = inquiry_svc.handle_command(tenant_id, content)
+            if cmd_res:
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, cmd_res, msg_meta, is_owner=True
+                )
+
+            # C. Owner answering an inquiry (reply-to, inquiry #, single pending)
+            reply_to_id = msg_meta.get("reply_to_message_id")
+            matched_inq, matched_answer = inquiry_svc.match_owner_answer(
+                tenant_id=tenant_id,
+                content=content,
+                reply_to_message_id=reply_to_id,
+            )
+            if matched_inq and matched_answer:
+                ans_prompt = inquiry_svc.answer_inquiry(
+                    tenant_id=tenant_id,
+                    inquiry=matched_inq,
+                    answer=matched_answer,
+                )
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, ans_prompt, msg_meta, is_owner=True
+                )
+        except Exception as inq_err:
+            logger.error("Error in owner inquiry handling for tenant_id=%s: %s", tenant_id, inq_err, exc_info=True)
 
         # --- Phase 3: Adaptive Owner Onboarding Interview ---
         try:
