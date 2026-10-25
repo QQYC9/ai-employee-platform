@@ -128,6 +128,10 @@ export const TenantsPage: React.FC = () => {
   // Handle Provisioning
   const handleProvision = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!provisionData.agent_name.trim()) {
+      setActionError('اسم الموظف الرقمي الأولي مطلوب لإنشاء المستأجر');
+      return;
+    }
     setIsSubmitting(true);
     setActionError(null);
     try {
@@ -603,7 +607,7 @@ export const TenantsPage: React.FC = () => {
             </button>
             <button
               onClick={handleProvision}
-              disabled={isSubmitting || !provisionData.tenant_name || !provisionData.owner_email || !provisionData.owner_name}
+              disabled={isSubmitting || !provisionData.tenant_name || !provisionData.owner_email || !provisionData.owner_name || !provisionData.agent_name.trim()}
               className="rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2 text-xs font-bold text-white hover:from-emerald-500 hover:to-teal-500 transition disabled:opacity-50"
             >
               {isSubmitting ? 'جاري التأسيس...' : 'إنشاء وتفعيل المستأجر'}
@@ -693,13 +697,14 @@ export const TenantsPage: React.FC = () => {
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1">
-                اسم الموظف الرقمي الأولي
+                اسم الموظف الرقمي الأولي <span className="text-rose-400">*</span>
               </label>
               <input
                 type="text"
+                required
                 value={provisionData.agent_name}
                 onChange={(e) => setProvisionData({ ...provisionData, agent_name: e.target.value })}
-                placeholder="سارة - المساعد الذكي"
+                placeholder="سارة"
                 className="w-full rounded-xl border border-slate-800 bg-slate-950 p-2.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
               />
             </div>

@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { TenantLayout } from './components/layout/TenantLayout';
 import { LoginPage } from './pages/LoginPage';
+import { SetPasswordPage } from './pages/SetPasswordPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { AgentsPage } from './pages/AgentsPage';
 import { TasksPage } from './pages/TasksPage';
@@ -39,6 +40,8 @@ export const AppRoutes: React.FC = () => {
         path="/login"
         element={!isLoading && user ? <Navigate to="/" replace /> : <LoginPage />}
       />
+
+      <Route path="/set-password" element={<SetPasswordPage />} />
 
       <Route
         path="/"

@@ -210,7 +210,9 @@ class TenantProvisioningService:
         try:
             # Step A: Create Tenant
             agent_input = request.agent or InitialAgentInput()
-            emp_name = (request.employee_name or (agent_input.name if agent_input else None) or "").strip() or None
+            emp_name = (request.employee_name or (agent_input.name if agent_input else None) or "").strip()
+            if not emp_name:
+                raise ValueError("Employee name is required for tenant creation")
             tenant = Tenant(
                 name=clean_name,
                 slug=slug,

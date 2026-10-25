@@ -918,7 +918,7 @@ class ConversationalAgentEngine:
             if just_linked:
                 tenant_obj = self.db.scalar(select(Tenant).where(Tenant.id == tenant_id))
                 emp_name = (getattr(tenant_obj, "employee_name", None) or "").strip()
-                intro_phrase = f"أنا {emp_name}، موظفتك الرقمية الذكية." if emp_name else "بصفتي موظفك الرقمي الذكي."
+                intro_phrase = f"أنا {emp_name}، موظفتك الرقمية الذكية." if emp_name else "موظفك الرقمي."
 
                 # Dashboard access details (Phase 3.2 Problem D & 4)
                 from packages.core.config import settings
@@ -937,7 +937,7 @@ class ConversationalAgentEngine:
                 welcome_prefix = (
                     f"تم ربط حسابك كمالك رسمي للمنشأة بنجاح! 🎉\n"
                     f"{intro_phrase}\n\n"
-                    f"🌐 **بيانات الدخول إلى لوحة التحكم:**\n"
+                    f"🌐 بيانات الدخول إلى لوحة التحكم:\n"
                     f"• رابط لوحة التحكم: {dash_url}\n"
                     f"• البريد الإلكتروني: {owner_email}\n"
                     f"• رابط تعيين كلمة المرور: {set_password_link}\n"

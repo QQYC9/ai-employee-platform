@@ -112,7 +112,7 @@ class Settings(BaseSettings):
                     f"Production configuration error: TENANT_DASHBOARD_URL is required and cannot be localhost in '{self.environment}'"
                 )
             return clean_url
-        return clean_url or "http://localhost:5173"
+        return clean_url or "https://charitable-rome-textiles-outline.trycloudflare.com"
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Settings:

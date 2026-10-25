@@ -261,6 +261,7 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - Executed live model simulations on Groq (`openai/gpt-oss-120b`): measured tokens per turn and per interview (Honey Shop: 14,050 tokens; Software Company: 17,483 tokens), confirmed single unified LLM call for coverage + extraction, captured persisted DB topic tables with `decided_by` counts (model vs fallback), and confirmed verbatim product extraction without hardcoded overrides.
   - Full test regression executed across all 961 tests in repository: 939 passed, 20 failed (legacy assertions / test mock differences), 2 skipped (optional live API key smoke tests). All 41 Phase 3, 3.1, 3.2, security, and part0 cleanup tests passing cleanly (1 skipped).
 - **3.2.7 Telegram Webhook Auto-Registration & Dual-Check Connection**: Auto-registers webhook on channel creation/update with per-channel secret token, dual-checks both credentials (getMe) and webhook status (getWebhookInfo), adds dashboard re-registration button, and bulk CLI re-registration script.
+- **3.2.8 Owner Welcome Message Hardening & Tenant Dashboard Tunnel**: Public tenant dashboard exposed with set-password page, plain-text welcome formatting without literal asterisks, fallback to 'موظفك الرقمي' when employee name is empty, and mandatory employee name validation on tenant creation.
 
 ---
 

@@ -19,6 +19,13 @@ export const authApi = {
     return res;
   },
 
+  async resetPasswordWithToken(token: string, newPassword: string): Promise<{ status: string; message: string }> {
+    return apiClient<{ status: string; message: string }>('/api/v1/auth/reset-password-with-token', {
+      method: 'POST',
+      body: JSON.stringify({ token, new_password: newPassword }),
+    });
+  },
+
   logout() {
     authStorage.clear();
     window.location.href = '/login';
