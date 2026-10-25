@@ -1497,7 +1497,59 @@ class ConversationalAgentEngine:
                 tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
             )
 
-        # --- G. Conversational Business Learning (Products, Pricing, Policies, Operations, Identity) ---
+        # --- G. Conversational Business Learning (Phase 2 Facts Store Primary + Fallback) ---
+        from packages.services.fact_service import FactService
+        fact_svc = FactService(self.db)
+        fact_res = fact_svc.extract_facts(tenant_id, content, provider=provider)
+        if fact_res and fact_res.facts:
+            save_result = fact_svc.save_extracted_facts(tenant_id, fact_res.facts, auto_confirm_direct=True)
+            if save_result["conflicts"]:
+                c_lines = []
+                for c in save_result["conflicts"]:
+                    old_v = json.dumps(c["existing_fact"].value, ensure_ascii=False)
+                    new_v = json.dumps(c["conflicting_fact"].value, ensure_ascii=False)
+                    c_lines.append(f"⚠️ تعارض في بيان '{c['subject']}': القيمة المسجلة حالياً ({old_v}) تختلف عن القيمة الجديدة ({new_v}). يرجى تحديد القيمة المعتمدة.")
+                reply_text = "تم رصد تعارض مع بيانات معتمدة سابقة:\n" + "\n".join(c_lines)
+            else:
+                summary_items = []
+                b_updates: dict[str, Any] = {}
+                for f in save_result["confirmed"]:
+                    summary_items.append(f"✅ {f.subject}: {json.dumps(f.value, ensure_ascii=False)}")
+                    if f.topic == "company.identity" and isinstance(f.value, dict):
+                        b_updates["identity"] = f.value
+                    elif f.topic.startswith("product."):
+                        b_updates.setdefault("products", {})[f.subject] = f.value
+                        topic_slug = f.topic.split(".", 1)[1] if "." in f.topic else ""
+                        if topic_slug:
+                            b_updates["products"][topic_slug] = f.value
+                        if "ناظم" in f.subject:
+                            b_updates["products"]["nazim_accounting"] = f.value
+                        if "سيرو" in f.subject:
+                            b_updates["products"]["ciro_networks"] = f.value
+                        if "الموظف الذكي" in f.subject or "موظف ذكي" in f.subject:
+                            b_updates["products"]["smart_employee"] = f.value
+                    elif f.topic.startswith("service."):
+                        b_updates.setdefault("services", {})[f.subject] = f.value
+                    elif f.topic.startswith("operations.") and isinstance(f.value, dict):
+                        b_updates.setdefault("operations", {}).update(f.value)
+
+                for f in save_result["pending"]:
+                    summary_items.append(f"⏳ {f.subject}: {json.dumps(f.value, ensure_ascii=False)} (بانتظار تأكيدك)")
+
+                # Dual-write to business_brain during migration phase for backward compatibility
+                if b_updates:
+                    try:
+                        brain_svc = BusinessBrainService(self.db)
+                        brain_svc.update_brain(tenant_id=tenant_id, **b_updates, updated_by_user_id=message.sender_id)
+                    except Exception:
+                        pass
+
+                reply_text = f"تم استيعاب وتوثيق البيانات في قاعدة الحقائق بنجاح:\n" + "\n".join(summary_items)
+
+            return self._persist_and_return_reply(
+                tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+            )
+
         learning_info = self._extract_business_knowledge(content)
         if learning_info:
             if learning_info.get("needs_clarification"):
@@ -1694,7 +1746,28 @@ class ConversationalAgentEngine:
                 "3. أجب باحترافية وإيجاز وموضوعية تامة باللغة العربية."
             )
 
-            owner_prompt_parts = [
+            # Phase 2 Facts Store: Inject verified facts (including private facts for owner)
+            facts_lines: list[str] = []
+            try:
+                from packages.services.fact_service import FactService
+                fact_svc = FactService(self.db)
+                owner_facts = fact_svc.get_relevant_facts(
+                    tenant_id=tenant_id,
+                    query=content,
+                    include_private=True,
+                    limit=30,
+                )
+                for f in owner_facts:
+                    v_str = json.dumps(f.value, ensure_ascii=False)
+                    facts_lines.append(f"- [{f.subject}] ({f.topic}, visibility={f.visibility}): {v_str}")
+            except Exception:
+                pass
+
+            owner_prompt_parts: list[str] = []
+            if facts_lines:
+                owner_prompt_parts.extend(["### VERIFIED FACTS STORE (Public & Internal Ground Truth)", "\n".join(facts_lines), ""])
+
+            owner_prompt_parts.extend([
                 "### BUSINESS BRAIN CONTEXT (Verified)",
                 "\n".join(biz_sections) if biz_sections else "None provided.",
                 "",
@@ -1702,7 +1775,7 @@ class ConversationalAgentEngine:
                 "\n".join(k_snippets) if k_snippets else "No relevant knowledge found.",
                 "",
                 "### CONVERSATION HISTORY",
-            ]
+            ])
             for turn in owner_history_dialogue:
                 owner_prompt_parts.append(f"{turn['sender']}: {turn['content']}")
 
@@ -2788,6 +2861,19 @@ class ConversationalAgentEngine:
         for k in knowledge:
             corpus_chunks.append(str(k.get("title", "")).lower())
             corpus_chunks.append(str(k.get("content", "")).lower())
+
+        # Include confirmed facts from Phase 2 Facts Store
+        try:
+            from packages.services.fact_service import FactService
+            fact_svc = FactService(self.db)
+            db_facts = fact_svc.get_relevant_facts(agent_context.tenant_id, limit=50)
+            for df in db_facts:
+                corpus_chunks.append(df.subject.lower())
+                corpus_chunks.append(df.topic.lower())
+                corpus_chunks.append(json.dumps(df.value, ensure_ascii=False).lower())
+        except Exception:
+            pass
+
         corpus_text = " ".join(corpus_chunks)
 
         # 1. Price Verification: Look for numeric prices
@@ -3031,7 +3117,29 @@ class ConversationalAgentEngine:
             c = agent_context.customer
             customer_info = f"Customer Profile: Name: {c.get('name')}, Type: {c.get('customer_type')}"
 
-        prompt_parts: list[str] = [
+        # Retrieve relevant confirmed public facts from Phase 2 Facts Store (Requirement 6)
+        facts_lines: list[str] = []
+        try:
+            from packages.services.fact_service import FactService
+            fact_svc = FactService(self.db)
+            customer_query = incoming_message.content if incoming_message else None
+            facts_list = fact_svc.get_relevant_facts(
+                tenant_id=conversation.tenant_id,
+                query=customer_query,
+                include_private=False,
+                limit=25,
+            )
+            for f in facts_list:
+                val_str = json.dumps(f.value, ensure_ascii=False)
+                facts_lines.append(f"- [{f.subject}] ({f.topic}): {val_str}")
+        except Exception as exc:
+            logger.debug("Failed to retrieve from Facts Store: %s", exc)
+
+        prompt_parts: list[str] = []
+        if facts_lines:
+            prompt_parts.extend(["### VERIFIED FACTS STORE (Ground Truth)", "\n".join(facts_lines), ""])
+
+        prompt_parts.extend([
             "### BUSINESS BRAIN CONTEXT (Verified)",
             "\n".join(business_sections) if business_sections else "None provided.",
             "",
@@ -3041,7 +3149,7 @@ class ConversationalAgentEngine:
             "### CUSTOMER MEMORY & PREFERENCES (Untrusted Reference Data)",
             "\n".join(customer_memories) if customer_memories else "No previous memories.",
             "",
-        ]
+        ])
 
         if customer_info:
             prompt_parts.extend([customer_info, ""])

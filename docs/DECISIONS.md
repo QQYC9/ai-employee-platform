@@ -91,4 +91,48 @@ This log records major design and implementation choices, including rationale an
   `"المعلومات المتعلقة بهذا الاستفسار غير مسجلة حالياً في قاعدة بيانات المنشأة. يمكنك تزويدي بتفاصيلها لحفظها وتوثيقها فوراً."`
 - **Rationale**: The assistant must be truthful to the owner; hallucinating company features back to the owner erodes platform trust and breaks administrative workflows.
 
+---
+
+## Decision 2.1: Flexible Facts Store Architecture & Structured Extraction
+- **Context**: The legacy `business_brain` table relied on a fixed schema (`identity`, `products`, `services`, `pricing`, `policies`) and fragile regex parsers. This proved incapable of representing diverse business domains (such as honey shops, electronics distributors, network providers) without modifying database columns and regex patterns.
+- **Decision**: Implement a decoupled, schema-agnostic `facts` ledger and structured extraction engine:
+  1. **Schema Design**:
+     - `id`: UUID primary key.
+     - `tenant_id`: Mandatory tenant foreign key with isolation enforcement on every operation.
+     - `topic`: Free-form dot-separated slug (e.g., `product.nazim.pricing`, `delivery.zones.sanaa`, `company.goals`).
+     - `subject`: Human-readable label for the entity or assertion.
+     - `value`: JSONB payload capable of storing any data model (scalars, lists, dictionaries, specifications).
+     - `source`: Enum/string (`owner_stated`, `owner_confirmed`, `inferred`).
+     - `confidence`: Float metric between 0.0 and 1.0.
+     - `visibility`: `public` (accessible to customer-facing prompts) or `private` (restricted to owner and internal workflows).
+     - `status`: `confirmed`, `pending_confirmation`, `stale`, or `conflict`.
+     - `expires_at`: Optional timestamp for time-sensitive data (promotions, seasonal hours, pricing).
+     - `superseded_by`: Self-referential UUID foreign key to track fact revisions without destructive overwrites.
+     - Composite indexes on `(tenant_id, topic)`, `(tenant_id, status)`, and `(tenant_id, subject)`.
+  2. **Extraction Engine**:
+     - Primary path uses AI provider structured JSON output conforming to Pydantic schema `FactExtractionResponse`.
+     - Handles multiple facts in a single message and parses Yemeni/regional Arabic business terminology (`نبيع`, `نخدم`, `حقنا`, `المحل`).
+     - Documented regex fallback (`_extract_facts_regex_fallback`) guarantees deterministic parsing if the AI provider fails or is absent.
+  3. **Confirmation vs. Direct Auto-Confirm**:
+     - Ambiguous, inferred, or low-confidence facts are saved with `status="pending_confirmation"` accompanied by an Arabic summary asking the owner to confirm or correct.
+     - Clear, direct, unambiguous owner declarations (e.g. "اسم شركتنا المنذر تكنولوجي", "نقدم برنامج ناظم المحاسبي") are marked `confirmed` with `source="owner_stated"`, accompanied by an explicit read-back acknowledgment of the saved values.
+     - Corrections mark the superseded fact with `superseded_by` and insert the updated fact.
+  4. **Contradiction & Conflict Resolution**:
+     - When a new fact is stated that conflicts with an active confirmed fact on the same topic/subject, it is flagged as `status="conflict"`.
+     - Both conflicting records are preserved until the owner explicitly resolves the conflict, notifying the owner in Arabic of the discrepancy.
+  5. **Data Expiration**:
+     - Facts regarding pricing and temporary campaigns receive an expiration date (`expires_at`).
+     - `FactService.list_stale_facts` queries expired or aging facts per tenant to enable proactive re-verification.
+  6. **Customer vs. Owner Retrieval Isolation**:
+     - `get_relevant_facts`:
+       - Customer inquiries strictly query `status == 'confirmed'`, `visibility == 'public'`, and `(expires_at IS NULL OR expires_at > now())`.
+       - Owner inquiries retrieve both public and private verified facts.
+  7. **Migration Safeguards**:
+     - Migration plan documented in `docs/MIGRATION_PLAN_PHASE2.md`.
+     - Pre-migration JSON export of all `business_brains` and `knowledge` rows.
+     - Alembic revision `e6f7a8b9c0d1_add_facts_table.py` creates the `facts` table with full rollback capability (`op.drop_table('facts')`).
+     - Non-destructive data migration copies existing brain and knowledge records into the `facts` table while preserving existing tables during the transition.
+     - Execution on live database is gated by explicit user review and approval.
+
+
 

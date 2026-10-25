@@ -75,13 +75,29 @@ This document outlines the phased plan to evolve the Digital Employee platform f
 ---
 
 ## Phase 2: Facts Store & Structured Extraction
-- **Status**: todo
-- **Objective**: Transition from conversational regex parsing to schema-validated structured model extraction and persistent `facts` ledger.
-- **Acceptance Criteria**:
-  - `facts` table with key, value, source, confidence, visibility, expiration, and status.
-  - Schema-validated structured JSON fact extraction.
-  - Conflict resolution and owner confirmation workflow.
-  - Reversible migration plan preserving existing `business_brain` data.
+- **Status**: done (Implementation & test suite verified; live DB migration gated by user approval of `docs/MIGRATION_PLAN_PHASE2.md`)
+- **Objective**: Transition from conversational regex parsing to a flexible, multi-tenant `facts` store, schema-validated structured model extraction, confirmation/conflict workflows, and non-destructive migration.
+- **Verification**: Verified with 7 comprehensive tests in `tests/test_phase2_facts_store.py` (7/7 passed), plus 21/21 passing in full Phase 0, Phase 0.5, and Phase 2 regression suites.
+
+### Work Items
+- **2.1 Flexible Facts Schema**:
+  - Table `facts` with `id`, `tenant_id`, `topic` (dot-separated slug), `subject`, `value` (JSONB), `source` (`owner_stated`/`owner_confirmed`/`inferred`), `confidence`, `visibility` (`public`/`private`), `status` (`confirmed`/`pending_confirmation`/`stale`/`conflict`), `expires_at`, `created_at`, `updated_at`, `superseded_by`.
+  - Composite indexes on `(tenant_id, topic)`, `(tenant_id, status)`, and `(tenant_id, subject)`.
+- **2.2 Structured AI Fact Extraction & Dialect Support**:
+  - Model extraction via Pydantic schema `FactExtractionResponse` supporting multiple facts per sentence and Yemeni Arabic dialects ("نبيع", "نخدم", "حقنا", "المحل").
+  - Documented deterministic regex fallback (`_extract_facts_regex_fallback`).
+- **2.3 Confirmation & Auto-Confirm Workflow**:
+  - Ambiguous/inferred facts stored as `pending_confirmation` with Arabic review summary.
+  - Direct unambiguous owner declarations auto-confirmed with read-back summary.
+  - Correction flow updates fact and marks superseded version.
+- **2.4 Contradiction & Conflict Resolution**:
+  - Conflicting assertions marked `status="conflict"` and preserved until owner resolution.
+- **2.5 Expiry Tracking**:
+  - Expiration dates for prices/promotions and `list_stale_facts` function.
+- **2.6 Public vs Private Retrieval**:
+  - `get_relevant_facts` strictly limits customer context to public confirmed non-expired facts; owner context receives both public and private facts.
+- **2.7 Non-Destructive Migration Plan**:
+  - Pre-migration backup routine, Alembic migration `e6f7a8b9c0d1_add_facts_table.py`, and data copier `migrate_business_brains_and_knowledge_to_facts`. Documented in `docs/MIGRATION_PLAN_PHASE2.md` awaiting user approval before applying to live DB.
 
 ---
 

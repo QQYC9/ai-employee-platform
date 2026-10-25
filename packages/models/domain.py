@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, ForeignKeyConstraint, Index, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, ForeignKeyConstraint, Index, Integer, Numeric, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -334,6 +334,12 @@ class Approval(Base):
     )
     decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    token: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
     )
 
     __table_args__ = (
@@ -697,6 +703,59 @@ class Knowledge(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class Fact(Base):
+    """
+    Phase 2 Facts Store: Flexible, structured, per-tenant knowledge ledger
+    holding facts for any business domain without hardcoded schema fields.
+    """
+    __tablename__ = "facts"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    topic: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    value: Mapped[dict | list | str | int | float | bool] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    source: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="owner_stated", server_default="owner_stated"
+    )
+    confidence: Mapped[float] = mapped_column(
+        Float, nullable=False, default=1.0, server_default="1.0"
+    )
+    visibility: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="public", server_default="public"
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="confirmed", server_default="confirmed"
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("facts.id", ondelete="SET NULL"),
+        nullable=True,
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_facts_tenant_topic", "tenant_id", "topic"),
+        Index("ix_facts_tenant_status", "tenant_id", "status"),
+        Index("ix_facts_tenant_subject", "tenant_id", "subject"),
+    )
+
 
 class Memory(Base):
     __tablename__ = "memories"
@@ -1517,6 +1576,16 @@ class ProactiveWorkflow(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_tenant_continuous_learning_workflow",
+            "tenant_id",
+            "action_type",
+            unique=True,
+            postgresql_where=(text("action_type = 'continuous_learning_cycle'")),
+        ),
     )
 
 
