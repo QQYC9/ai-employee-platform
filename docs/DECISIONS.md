@@ -64,3 +64,31 @@ This log records major design and implementation choices, including rationale an
 - **Decision**: Added open conversation lookup by `(tenant_id, channel_id, customer_id)` before starting a new conversation, and hardened external ID resolution across both PostgreSQL JSON and SQLite.
 - **Rationale**: Ensures consecutive customer messages are correctly threaded in a single continuous conversation.
 
+---
+
+## Decision 0.9: Extended Reply Guardrails (Entities & Capability Claims)
+- **Context**: Guardrail item 0.6 initially covered only prices and discounts. In runtime tests, the LLM invented product descriptions (e.g., claiming Nazim is a task/inventory tool), unrecorded features (tax/ZATCA integration), trials ("14-day free trial"), 24/7 support, webinars, and unverified branch locations.
+- **Decision**: Extend `_evaluate_reply_guardrails` to evaluate:
+  1. **Product/Service Entities**: Scan for product indicators (`برنامج`, `نظام`, `تطبيق`, `أداة`, `منصة`, `منتج`, `خدمة`) followed by candidate names. Exclude common stop-words (`الخاص`, `المعتمد`, `الرسمي`, etc.). If the candidate is not found in the verified corpus (`BusinessBrain` + `Knowledge`), block the reply.
+  2. **Product Purpose Claims**: Scan for definition patterns (`هو نظام لـ...` / `عبارة عن أداة لـ...`). Check that content tokens (e.g. `مهام`, `مخزون`) exist in verified facts.
+  3. **High-Risk Feature & Capability Claims**:
+     - *Tax / ZATCA / VAT*: Block assertions like `الربط مع الضرائب` or `الفوترة الإلكترونية` unless explicitly recorded.
+     - *Free Trials*: Block `نسخة تجريبية مجانية` or `14 يومًا تجربة` unless documented in policies.
+     - *Support Hours*: Block `24/7` or `على مدار الساعة` unless documented.
+     - *Webinars / Workshops*: Block claims of training courses or webinars unless documented.
+     - *Branch Locations*: Extract city names from `فرعنا في <city>` and check against verified locations or operations.
+  4. **Negation Awareness**: Preceding negation phrases (`لا نوفر`, `لا يدعم`, `غير متاح`, `ليس لدينا`) are recognized as honest boundary statements and are allowed rather than blocked.
+- **Matching Mechanism & Known Limits**:
+  - *Mechanism*: Token and regex pattern matching evaluated against an aggregated verified corpus (`json.dumps(business)` + knowledge snippets).
+  - *False Positives*: Can occur if the model uses novel phrasing that resembles a capability claim without a direct negation phrase. Minimized via local context window look-behind for negation particles.
+  - *False Negatives*: Highly paraphrased or indirect claims without trigger keywords (e.g., "نحن متواجدون دائمًا لراحتكم" instead of "24/7") might bypass regex pattern matching. Full structured facts evaluation in Phase 2 will further address this.
+
+---
+
+## Decision 0.10: Guardrail Enforcement in Owner Management Path
+- **Context**: When the owner asked general business questions (`ما هو برنامج ناظم وما هي مميزاته؟`), the owner path called `generate_text` without post-generation validation, allowing invented facts to be shown to the owner.
+- **Decision**: Apply `_evaluate_reply_guardrails` to `_process_owner_message` in general guidance / chat branch J. If the LLM generates an unverified claim, block it, log an `owner_reply_blocked_by_guardrail` audit event, and substitute:
+  `"المعلومات المتعلقة بهذا الاستفسار غير مسجلة حالياً في قاعدة بيانات المنشأة. يمكنك تزويدي بتفاصيلها لحفظها وتوثيقها فوراً."`
+- **Rationale**: The assistant must be truthful to the owner; hallucinating company features back to the owner erodes platform trust and breaks administrative workflows.
+
+

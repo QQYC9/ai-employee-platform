@@ -79,7 +79,7 @@ class ConversationalAgentEngine:
       9. Sanitizes errors and audit logs to prevent credential leakage.
     """
 
-    ALLOWED_INPUT_SENDERS = {"customer", "user"}
+    ALLOWED_INPUT_SENDERS = {"customer", "user", "owner"}
     DEFAULT_HISTORY_LIMIT = 15
     MAX_TOOL_CALL_ITERATIONS = 3
 
@@ -1730,6 +1730,34 @@ class ConversationalAgentEngine:
                 "أهلاً بك يا صاحب العمل! أنا موظفك الذكي، يمكنك تعليمي المنتجات والأسعار والسياسات، "
                 "أو طلب ملخص النشاط وحالة المهام في أي وقت."
             )
+
+        # Post-generation guardrails for owner path when answering about business
+        if provider is not None and reply_text:
+            is_safe, violation_reason = self._evaluate_reply_guardrails(reply_text, owner_context)
+            if not is_safe:
+                logger.warning(
+                    "Guardrail blocked owner reply for message %s: %s (Original: %s)",
+                    message_id,
+                    violation_reason,
+                    reply_text[:120],
+                )
+                msg_meta["guardrail_blocked"] = True
+                msg_meta["guardrail_reason"] = violation_reason
+                msg_meta["original_blocked_reply"] = reply_text
+
+                self.audit_service.record_event(
+                    tenant_id=tenant_id,
+                    event_type="owner_reply_blocked_by_guardrail",
+                    action="guardrail_block",
+                    description=f"Blocked unverified claim in owner reply: {violation_reason}",
+                    event_metadata={
+                        "conversation_id": str(conversation_id),
+                        "message_id": str(message_id),
+                        "reason": violation_reason,
+                    },
+                )
+                reply_text = "المعلومات المتعلقة بهذا الاستفسار غير مسجلة حالياً في قاعدة بيانات المنشأة. يمكنك تزويدي بتفاصيلها لحفظها وتوثيقها فوراً."
+
         return self._persist_and_return_reply(
             tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
         )
@@ -2744,12 +2772,23 @@ class ConversationalAgentEngine:
         agent_context: AgentContext,
     ) -> tuple[bool, str | None]:
         """
-        Inspects generated customer reply for hallucinated prices, unverified discounts,
-        or unsubstantiated commercial claims not supported by BusinessBrain or Knowledge.
+        Inspects generated reply for hallucinated prices, unverified discounts,
+        unsupported products/services, and unsubstantiated capability or feature claims
+        not supported by BusinessBrain or Knowledge.
         Returns (is_safe, violation_reason).
         """
         if not reply_text:
             return True, None
+
+        biz = agent_context.business or {}
+        knowledge = agent_context.knowledge or []
+
+        # 0. Build verified corpus text
+        corpus_chunks = [json.dumps(biz, ensure_ascii=False).lower()]
+        for k in knowledge:
+            corpus_chunks.append(str(k.get("title", "")).lower())
+            corpus_chunks.append(str(k.get("content", "")).lower())
+        corpus_text = " ".join(corpus_chunks)
 
         # 1. Price Verification: Look for numeric prices
         price_patterns = [
@@ -2767,7 +2806,6 @@ class ConversationalAgentEngine:
 
         if found_prices:
             verified_prices: set[float] = set()
-            biz = agent_context.business or {}
 
             # from products
             for p_k, p_v in (biz.get("products") or {}).items():
@@ -2796,7 +2834,7 @@ class ConversationalAgentEngine:
                         pass
 
             # from knowledge snippets text
-            k_text = " ".join(str(k.get("content", "")) + " " + str(k.get("title", "")) for k in (agent_context.knowledge or []))
+            k_text = " ".join(str(k.get("content", "")) + " " + str(k.get("title", "")) for k in knowledge)
             pol_text = json.dumps(biz.get("policies") or {}, ensure_ascii=False)
 
             for p in found_prices:
@@ -2819,10 +2857,105 @@ class ConversationalAgentEngine:
                     pass
 
         if found_discounts:
-            verified_text = json.dumps(agent_context.business or {}, ensure_ascii=False) + " " + " ".join(str(k.get("content", "")) for k in (agent_context.knowledge or []))
+            verified_text = json.dumps(biz, ensure_ascii=False) + " " + " ".join(str(k.get("content", "")) for k in knowledge)
             for d in found_discounts:
                 if f"{d}%" not in verified_text and f"{d} %" not in verified_text and f"{d} بالمئة" not in verified_text:
                     return False, f"Unverified discount {d}% detected in reply without basis in verified policies"
+
+        # 3. Product / Service entity mention check
+        prod_matches = re.finditer(r"(?:برنامج|نظام|تطبيق|أداة|منصة|منتج|خدمة)\s+([^\s،,.:;!؟\n]+)", reply_text)
+        stopwords = {
+            "الخاص", "بنا", "لدينا", "المعتمد", "الرسمي", "المحاسبي", "المحاسبة",
+            "المتاح", "الحالي", "المطلوب", "الجديد", "المحدد", "الشركة", "المنشأة",
+            "المتجر", "العملاء", "العمل", "النشاط",
+        }
+        for m in prod_matches:
+            candidate = m.group(1).strip()
+            if candidate not in stopwords and len(candidate) > 2:
+                if candidate.lower() not in corpus_text:
+                    return False, f"Unverified product or service '{candidate}' mentioned without basis in BusinessBrain or Knowledge"
+
+        # 3.1 Product purpose / feature description claim (e.g. "هو نظام لإدارة المهام والمخزون")
+        purpose_match = re.search(
+            r"(?:هو|هي|عبارة\s*عن)\s+(?:نظام|برنامج|أداة|تطبيق|حل|منصة)\s+(?:لـ?|من\s*أجل\s*)([^\.\n،,!؟]+)",
+            reply_text,
+        )
+        if purpose_match:
+            purpose_text = purpose_match.group(1).strip()
+            words = [
+                w for w in re.findall(r"[\u0621-\u064A]{3,}", purpose_text)
+                if w not in {"إدارة", "تقديم", "توفير", "عمل", "خدمة", "نظام", "برنامج"}
+            ]
+            for w in words:
+                if w.lower() not in corpus_text:
+                    return False, f"Unverified feature claim '{purpose_text}' contains unsupported term '{w}'"
+
+        # Helper to check if a pattern match is explicitly negated
+        def is_negated(pattern_match: re.Match, text: str) -> bool:
+            start = pattern_match.start()
+            preceding = text[max(0, start - 30):start]
+            return bool(
+                re.search(
+                    r"(?:لا\s*(?:يوجد|نوفر|نقدم|يدعم|نمتلك)?|غير\s*(?:متاح|متوفر|مدعوم)|ليس\s*لدينا)\s*$",
+                    preceding.strip(),
+                )
+            )
+
+        # 4. Tax / VAT / ZATCA Integration Claim
+        tax_pat = re.compile(
+            r"(?:الربط\s*مع\s*الضرائب|الربط\s*الضريبي|الفوترة\s*الإلكترونية|هيئة\s*الزكاة|زاتكا|zatca|vat|ضريبة\s*القيمة\s*المضافة)",
+            re.IGNORECASE,
+        )
+        t_m = tax_pat.search(reply_text)
+        if t_m and not is_negated(t_m, reply_text):
+            tax_terms = ["الضرائب", "الضريبة", "الربط الضريبي", "الفوترة الإلكترونية", "زاتكا", "zatca", "vat", "الزكاة"]
+            if not any(t in corpus_text for t in tax_terms):
+                return False, "Unverified capability claim: tax/ZATCA/VAT integration is not supported by verified facts"
+
+        # 5. Free Trial / Evaluation Period Claim
+        trial_pat = re.compile(
+            r"(?:نسخة\s*تجريبية|فترة\s*تجريبية|تجربة\s*مجانية|تجريبية\s*مجانية|تجربة\s*\d+\s*يوم|\b\d+\s*يوم(?:اً|ا)?\s*(?:تجربة|تجريبي)|\bfree\s*trial\b)",
+            re.IGNORECASE,
+        )
+        tr_m = trial_pat.search(reply_text)
+        if tr_m and not is_negated(tr_m, reply_text):
+            trial_terms = ["نسخة تجريبية", "فترة تجريبية", "تجربة مجانية", "تجريبية مجانية", "free trial", "تجريبية"]
+            if not any(t in corpus_text for t in trial_terms):
+                return False, "Unverified capability claim: free trial or evaluation period is not supported by verified facts"
+
+        # 6. 24/7 Support Claim
+        support_pat = re.compile(
+            r"(?:على\s*مدار\s*الساعة|24\s*/\s*7|24\s*ساعة|دعم\s*متواصل|طوال\s*اليوم)",
+            re.IGNORECASE,
+        )
+        s_m = support_pat.search(reply_text)
+        if s_m and not is_negated(s_m, reply_text):
+            support_terms = ["24/7", "على مدار الساعة", "24 ساعة", "طوال اليوم", "دعم متواصل"]
+            if not any(t in corpus_text for t in support_terms):
+                return False, "Unverified capability claim: 24/7 support is not supported by verified facts"
+
+        # 7. Webinars / Workshops / Training Claim
+        webinar_pat = re.compile(
+            r"(?:ندوة|ندوات|ورشة\s*عمل|ورش\s*عمل|ويبينار|webinar|دورة\s*تدريبية|دورات\s*تدريبية)",
+            re.IGNORECASE,
+        )
+        w_m = webinar_pat.search(reply_text)
+        if w_m and not is_negated(w_m, reply_text):
+            webinar_terms = ["ندوة", "ندوات", "ورشة عمل", "ورش عمل", "ويبينار", "webinar", "دورة تدريبية", "دورات تدريبية"]
+            if not any(t in corpus_text for t in webinar_terms):
+                return False, "Unverified capability claim: webinars or workshops are not supported by verified facts"
+
+        # 8. Branch / City Location Claim
+        branch_pat = re.compile(
+            r"(?:فرع(?:نا)?\s*(?:في|بـ)?|فروع(?:نا)?\s*(?:في|بـ)?|مقر(?:نا)?\s*(?:في|بـ)?|لدينا\s*فرع\s*(?:في|بـ)?)\s+([^\s،,.:;!؟\n]+)",
+            re.IGNORECASE,
+        )
+        b_m = branch_pat.search(reply_text)
+        if b_m and not is_negated(b_m, reply_text):
+            candidate_city = b_m.group(1).strip()
+            if candidate_city not in {"المحافظات", "المدن", "كل", "جميع", "المنطقة", "البلاد", "الخارج", "هنا"}:
+                if candidate_city.lower() not in corpus_text:
+                    return False, f"Unverified location claim: branch in '{candidate_city}' is not supported by verified facts"
 
         return True, None
 

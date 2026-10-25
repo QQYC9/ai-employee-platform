@@ -31,6 +31,28 @@ This document outlines the phased plan to evolve the Digital Employee platform f
 
 ---
 
+## Phase 0.5: Guardrails Hardening & End-to-End Integration Flow
+- **Status**: done
+- **Objective**: Extend post-generation guardrails to cover unverified product mentions, purpose descriptions, and high-risk capability claims (tax/ZATCA integration, free trials, 24/7 support, webinars, branches), enforce the guardrail in the owner path, and verify the complete decoupled message flow.
+- **Verification**: Verified with 4 comprehensive tests in `tests/test_phase0_5_hardening.py` (4/4 passed), plus 10/10 in `tests/test_phase0_fixes_verification.py`.
+
+### Work Items
+- **0.5.1 Product & Purpose Guardrails**:
+  - Scan for unverified product/service entities and purpose descriptions (e.g., "برنامج ناظم هو نظام لإدارة المهام والمخزون").
+  - Block with Arabic handoff if unsupported by BusinessBrain or Knowledge Base.
+- **0.5.2 High-Risk Capability Claims**:
+  - Intercept claims of Tax/ZATCA integration ("يدعم الربط مع الضرائب في السعودية"), free trials ("نسخة تجريبية مجانية لمدة 14 يومًا"), 24/7 support, webinars, and branch locations when unrecorded.
+  - Support honest negative statements via negation look-behind.
+  - Allow identical sentences when verified facts exist in the brain.
+- **0.5.3 Owner Path Guardrail Enforcement**:
+  - Apply `_evaluate_reply_guardrails` to the general chat branch of `_process_owner_message`.
+  - Block hallucinated responses to owner queries and replace with Arabic missing-data prompt.
+- **0.5.4 Real Message Flow Integration Test**:
+  - Webhook payload -> Inbound persistence -> Outbox process_incoming_message -> OutboxWorker -> Engine reasoning & guardrails -> Channel dispatch send.
+  - Inspect and assert stored `conversation_id`, inbound message ID, and persisted reply.
+
+---
+
 ## Phase 1: Owner Inquiry Loop (Ask the Owner When Answer is Unknown)
 - **Status**: todo
 - **Objective**: Implement asynchronous inquiry escalation to the business owner when customer questions lack verified knowledge.
