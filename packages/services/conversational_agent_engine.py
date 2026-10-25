@@ -3362,6 +3362,44 @@ class ConversationalAgentEngine:
                 if not in_branch:
                     return False, f"Unverified location claim: branch in '{raw_city}' is not supported by verified facts"
 
+        # 9. Forwarding / False Promise check (Phase 2.11)
+        # While the owner-inquiry loop (Phase 1) does not exist, the customer reply must never say or imply
+        # that the request was forwarded to or will be answered by a team ("سأنقل طلبك", "سيرد عليك", "سنعود إليك بأسرع وقت").
+        # When information is missing, the model must say it is not recorded and use the approved handoff sentence only.
+        if reply_text.strip() != DEFAULT_HANDOFF_REPLY:
+            forwarding_patterns = [
+                r"(?:سـ?أنقل|سـ?أقوم\s*بـ?نقل|سـ?أرفع|سـ?أوصل|سـ?أبلغ|سـ?أقوم\s*بـ?إبلاغ|سـ?أرسل)\s*(?:طلبك|استفسارك|سؤالك|رسالتك|ذلك|هذا|الأمر|الموضوع)?\s*(?:إلى|لـ)?\s*(?:فريق|إدارة|الموظف|المسؤول|المبيعات|الدعم)",
+                r"(?:سـ?أحول|سـ?أقوم\s*بـ?تحويل)\s*(?:طلبك|استفسارك|سؤالك|رسالتك|ذلك|هذا|الأمر|الموضوع)?\s*(?:إلى|لـ)?\s*(?:فريق|إدارة|الموظف|المسؤول|المبيعات|الدعم)",
+                r"(?:سـ?يرد|سـ?ترد|سـ?يتواصل|سـ?تتواصل)\s*(?:عليك|معك)\s*(?:قريباً|قريبا|فريق|أحد|إدارة|المسؤول|الموظف|ممثل)",
+                r"(?:سنعود\s*إليك\s*بـ?(?:أسرع|أقرب)\s*وقت)",
+                r"(?:سـ?يقوم\s*فريق\s*(?:المبيعات|الدعم|المختص|العمل)?\s*بـ?(?:الرد|التواصل))",
+            ]
+            for f_pat in forwarding_patterns:
+                m_fwd = re.search(f_pat, reply_text)
+                if m_fwd:
+                    return False, f"Unapproved forwarding or promise phrase detected in reply: '{m_fwd.group(0)}'"
+
+        # 10. Unrecorded Topic Offers check (Phase 2.11)
+        # The reply must not suggest or offer unrecorded topics (e.g. مميزات البرنامج, المتطلبات التقنية, طريقة الاستخدام, طرق الترخيص)
+        unrecorded_topics_patterns = [
+            r"(?:الخصائص\s*التقنية|المتطلبات\s*التقنية|المميزات\s*التقنية|مميزات\s*البرنامج|ميزات\s*البرنامج|طرق\s*الترخيص|طريقة\s*الترخيص|طريقة\s*الاستخدام|طرق\s*الاستخدام|أنواع\s*التراخيص|كيفية\s*الاستخدام|شرح\s*الاستخدام)",
+        ]
+        for t_pat in unrecorded_topics_patterns:
+            m_top = re.search(t_pat, reply_text)
+            if m_top and not is_negated(m_top, reply_text):
+                clean_top = m_top.group(0)
+                if clean_top.lower() not in corpus_text:
+                    return False, f"Unrecorded topic offer detected in reply: '{clean_top}'"
+
+        # 11. Language check (Phase 2.11)
+        # Reply must be entirely Arabic; block stray Latin words that are not verified product/brand names in corpus
+        corpus_latin_words = {w.lower() for w in re.findall(r"[A-Za-z0-9_-]+", corpus_text)}
+        latin_tokens = re.findall(r"\b[A-Za-z]{2,}\b", reply_text)
+        if latin_tokens:
+            for l_tok in latin_tokens:
+                if l_tok.lower() not in corpus_latin_words:
+                    return False, f"Stray English/Latin word '{l_tok}' detected in Arabic customer reply"
+
         return True, None
 
     def _construct_prompt(
@@ -3400,7 +3438,10 @@ class ConversationalAgentEngine:
             "explicitly state in Arabic that these details have not been configured yet by the store owner.\n"
             "7. STRICT CAPABILITY LIMITS (NO FABRICATION): You DO NOT possess tools for making phone calls, scheduling/booking appointments, "
             "sending external links, providing free trials, or designing/generating images. Under NO circumstances promise or claim you can perform these actions. "
-            "If a customer inquires about or requests any of these, politely inform them in Arabic that you do not support this directly and that you will pass their request to the specialized human team to follow up with them."
+            "If a customer inquires about or requests any of these, clearly state in Arabic that you do not support this directly and use the approved handoff sentence: 'هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك.'\n"
+            "8. NO FALSE PROMISES OR FORWARDING CLAIMS (CRITICAL): While the owner inquiry loop does not exist yet, you must NEVER say, imply, or promise that you have forwarded or will forward the request to a team (NEVER say 'سأنقل طلبك', 'سأقوم بتحويل طلبك', 'سيتواصل معك فريق', 'سيرد عليك أحد', or 'سنعود إليك بأسرع وقت'). If any requested information is missing from the verified facts, state that it is not recorded yet and use ONLY the single approved handoff sentence: 'هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك.' and nothing else.\n"
+            "9. DO NOT OFFER UNRECORDED TOPICS: The reply must NEVER suggest or invite questions on unrecorded topics or features (such as 'مميزات البرنامج', 'المتطلبات التقنية', 'الخصائص التقنية', 'طرق الترخيص', 'طريقة الاستخدام', or 'الدعم الفني'). The only allowed follow-up invitation is asking the customer which of the stored products, services, or cities they are interested in.\n"
+            "10. STRICT ARABIC LANGUAGE REQUIREMENT: Your entire reply must be in Arabic with zero stray English words or Latin letters (do not use English customer names like 'Customer Replay', English headings, or English phrases). Only officially verified product names that are registered in Latin characters in the verified context are permitted."
         )
 
         # Assemble business facts - injecting all populated sections including operations, branches, hours (Item 0.3)
@@ -3434,7 +3475,12 @@ class ConversationalAgentEngine:
         customer_info = ""
         if agent_context.customer:
             c = agent_context.customer
-            customer_info = f"Customer Profile: Name: {c.get('name')}, Type: {c.get('customer_type')}"
+            c_name = c.get("name")
+            # If name is Latin placeholder/non-Arabic, omit name to prevent model from echoing stray English
+            if c_name and not re.search(r"^[A-Za-z0-9\s_-]+$", c_name):
+                customer_info = f"Customer Profile: Name: {c_name}, Type: {c.get('customer_type')}"
+            else:
+                customer_info = f"Customer Profile: Type: {c.get('customer_type')}"
 
         # Retrieve relevant confirmed public facts from Phase 2 Facts Store (Requirement 6)
         facts_lines: list[str] = []

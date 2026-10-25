@@ -426,3 +426,125 @@ def test_handoff_logging_is_queryable_by_owner(db: Session, test_setup: dict):
         assert ev.event_metadata["question"] == "كم السعر؟"
         assert "handoff_reply" in ev.event_metadata
         assert ev.event_metadata["handoff_reply"] == DEFAULT_HANDOFF_REPLY
+
+
+def test_customer_forwarding_promise_blocked_and_replaced_with_approved_handoff(db: Session, test_setup: dict):
+    """
+    Phase 2.11 Addendum:
+    Customer reply must never say or imply that request was forwarded or will be answered
+    by a team ("سأنقل طلبك", "سيرد عليك", "سنعود إليك بأسرع وقت").
+    Live reply: "سأنقل طلبك إلى فريق المبيعات المختص..." -> replaced by approved handoff text.
+    """
+    tenant_id = test_setup["tenant_id"]
+    channel_id = test_setup["channel_id"]
+    non_owner_id = "967779999010"
+
+    # Exact pattern observed in live Groq / gpt-oss-120b execution
+    live_forwarding_reply = (
+        "سأنقل طلبك إلى فريق المبيعات المختص وسيتواصلون معك قريباً للإجابة على كافة تفاصيل الأسعار."
+    )
+    mock_ai = NaturalMockAIProvider(reply=live_forwarding_reply)
+    engine = ConversationalAgentEngine(db=db, ai_provider=mock_ai)
+
+    inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "كم سعر ناظم؟")
+    res = engine.process_incoming_message(tenant_id, inbound_msg.id)
+    assert res.success is True
+    assert res.reply_content == DEFAULT_HANDOFF_REPLY
+    assert res.reply_content == "هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."
+
+    reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
+    assert reply_msg.metadata_json.get("guardrail_blocked") is True
+    assert "Unapproved forwarding or promise phrase" in reply_msg.metadata_json.get("guardrail_reason", "")
+
+    # Audit event logged
+    audit_svc = AuditService(db)
+    events = audit_svc.list_events(tenant_id=tenant_id, event_type="customer_inquiry_handoff")
+    assert any(e.event_metadata.get("original_blocked_reply") == live_forwarding_reply for e in events)
+
+
+def test_customer_unrecorded_topic_offers_blocked(db: Session, test_setup: dict):
+    """
+    Phase 2.11 Addendum:
+    The reply must not suggest unrecorded topics ("مميزات البرنامج", "المتطلبات التقنية", "طريقة الاستخدام", "طرق الترخيص").
+    """
+    tenant_id = test_setup["tenant_id"]
+    channel_id = test_setup["channel_id"]
+    non_owner_id = "967779999011"
+
+    # Model offers unrecorded topics at the end of reply
+    unrecorded_topics_reply = (
+        "نحن نقدم الموظف الذكي وبرنامج سيرو وناظم المحاسبي. "
+        "هل ترغب في معرفة تفاصيل إضافية حول الخصائص التقنية وطرق الترخيص وطريقة الاستخدام؟"
+    )
+    mock_ai = NaturalMockAIProvider(reply=unrecorded_topics_reply)
+    engine = ConversationalAgentEngine(db=db, ai_provider=mock_ai)
+
+    inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "ما هي منتجاتكم؟")
+    res = engine.process_incoming_message(tenant_id, inbound_msg.id)
+    assert res.success is True
+    assert res.reply_content == DEFAULT_HANDOFF_REPLY
+
+    reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
+    assert reply_msg.metadata_json.get("guardrail_blocked") is True
+    assert "Unrecorded topic offer" in reply_msg.metadata_json.get("guardrail_reason", "")
+
+
+def test_customer_stray_english_words_blocked(db: Session, test_setup: dict):
+    """
+    Phase 2.11 Addendum:
+    Reply must be entirely Arabic; stray Latin words (like 'Customer Replay' or 'Support')
+    that are not verified product/brand names in facts are deterministically blocked.
+    """
+    tenant_id = test_setup["tenant_id"]
+    channel_id = test_setup["channel_id"]
+    non_owner_id = "967779999012"
+
+    stray_english_reply = "مرحبًا عزيزي Customer Replay، يسعدنا تواصلك معنا لخدمتك."
+    mock_ai = NaturalMockAIProvider(reply=stray_english_reply)
+    engine = ConversationalAgentEngine(db=db, ai_provider=mock_ai)
+
+    inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "مرحبا")
+    res = engine.process_incoming_message(tenant_id, inbound_msg.id)
+    assert res.success is True
+    assert res.reply_content == DEFAULT_HANDOFF_REPLY
+
+    reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
+    assert reply_msg.metadata_json.get("guardrail_blocked") is True
+    assert "Stray English/Latin word" in reply_msg.metadata_json.get("guardrail_reason", "")
+
+
+def test_customer_verified_latin_product_name_allowed(db: Session, test_setup: dict):
+    """
+    Phase 2.11 Addendum:
+    Verified Latin product/brand names in the verified facts (e.g. 'Ciro Networks')
+    are permitted in Arabic customer replies without being blocked.
+    """
+    tenant_id = test_setup["tenant_id"]
+    channel_id = test_setup["channel_id"]
+    non_owner_id = "967779999013"
+
+    # Add verified fact containing Latin product name
+    latin_fact = Fact(
+        tenant_id=tenant_id,
+        subject="Ciro Networks",
+        topic="product.ciro_networks",
+        value={"name": "Ciro Networks", "description": "حل إدارة الشبكات المتقدم"},
+        status="confirmed",
+        visibility="public",
+        source="owner",
+    )
+    db.add(latin_fact)
+    db.commit()
+
+    verified_latin_reply = "أهلاً بك! نقدم نظام Ciro Networks المتخصص في إدارة الشبكات السلكية واللاسلكية."
+    mock_ai = NaturalMockAIProvider(reply=verified_latin_reply)
+    engine = ConversationalAgentEngine(db=db, ai_provider=mock_ai)
+
+    inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "عندكم Ciro Networks؟")
+    res = engine.process_incoming_message(tenant_id, inbound_msg.id)
+    assert res.success is True
+    assert res.reply_content == verified_latin_reply
+
+    reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
+    assert reply_msg.metadata_json.get("guardrail_blocked") is not True
+

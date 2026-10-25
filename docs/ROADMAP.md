@@ -124,6 +124,14 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - Logged every customer handoff event with `tenant_id`, `conversation_id`, and `question` into the queryable `audit_events` table for tenant owner visibility.
   - Verified with 9 comprehensive tests in `tests/test_customer_path_confirmed_facts.py` (9/9 passed) across products questions ("ما هي منتجاتكم؟", "ايش تبيعوا؟"), coverage question ("وين تخدموا؟"), branch questions, and unverified price/trial/VAT handoffs. 37/37 regression passing.
 
+- **2.11 Customer Path Addendum (Forwarding Promises, Topic Offers & Arabic Language Guardrails)**:
+  - **Status**: done
+  - Prohibited false forwarding promises: while the owner inquiry loop (Phase 1) is not active, customer replies must never say or imply that the request was forwarded to or will be answered by a team ("سأنقل طلبك", "سيرد عليك", "سنعود إليك بأسرع وقت"). Deterministic post-check Rule 9 intercepts all unapproved forwarding promises and replaces them with the approved handoff text: `"هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."`.
+  - Blocked unrecorded topic offers: Guardrail Rule 10 intercepts offers suggesting unrecorded topics or features ("مميزات البرنامج", "المتطلبات التقنية", "الخصائص التقنية", "طرق الترخيص", "طريقة الاستخدام", "الدعم الفني") when not present in confirmed facts.
+  - Enforced strict Arabic language: Guardrail Rule 11 extracts Latin tokens and blocks any stray English words (e.g. "Customer Replay", "Support") unless officially verified as Latin product/brand names in confirmed facts (e.g. "Ciro Networks").
+  - Sanitized customer prompt construction: omitted Latin placeholder names from customer context injection to avoid prompting the LLM to echo stray English names in greetings.
+  - Verified with 13 comprehensive tests in `tests/test_customer_path_confirmed_facts.py` (13/13 passed) and full regression (41 passing tests).
+
 ---
 
 ## Phase 3: Adaptive Owner Onboarding Interview
