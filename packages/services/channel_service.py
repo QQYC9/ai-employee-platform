@@ -501,13 +501,29 @@ class ChannelService:
 
             if customer is None:
                 # Check by metadata external ID
-                customer = self.db.scalar(
-                    select(Customer).where(
-                        Customer.tenant_id == tenant_id,
-                        Customer.status != "deleted",
-                        Customer.metadata_json[f"{inbound.channel_type}_id"].as_string() == inbound.sender_id,
+                try:
+                    customer = self.db.scalar(
+                        select(Customer).where(
+                            Customer.tenant_id == tenant_id,
+                            Customer.status != "deleted",
+                            Customer.metadata_json[f"{inbound.channel_type}_id"].as_string() == str(inbound.sender_id),
+                        )
                     )
-                )
+                except Exception:
+                    customer = None
+
+                if customer is None:
+                    all_custs = self.db.scalars(
+                        select(Customer).where(
+                            Customer.tenant_id == tenant_id,
+                            Customer.status != "deleted",
+                        )
+                    ).all()
+                    for c in all_custs:
+                        c_meta = c.metadata_json or {}
+                        if str(c_meta.get(f"{inbound.channel_type}_id")) == str(inbound.sender_id):
+                            customer = c
+                            break
 
             if customer is None:
                 # Create new customer

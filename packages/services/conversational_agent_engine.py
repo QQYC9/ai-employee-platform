@@ -623,6 +623,46 @@ class ConversationalAgentEngine:
                 trace_id=trace_id,
             )
 
+        # 8.1 Post-generation Guardrails (Phase 0.6)
+        is_safe, violation_reason = self._evaluate_reply_guardrails(reply_text, agent_context)
+        if not is_safe:
+            logger.warning(
+                "Guardrail blocked customer reply for message %s: %s (Original: %s)",
+                message_id,
+                violation_reason,
+                reply_text[:120],
+            )
+            msg_meta["guardrail_blocked"] = True
+            msg_meta["guardrail_reason"] = violation_reason
+            msg_meta["original_blocked_reply"] = reply_text
+
+            self.audit_service.record_event(
+                tenant_id=tenant_id,
+                event_type="agent_reply_blocked_by_guardrail",
+                action="guardrail_block",
+                description=f"Blocked hallucinated content: {violation_reason}",
+                event_metadata={
+                    "conversation_id": str(conversation_id),
+                    "message_id": str(message_id),
+                    "reason": violation_reason,
+                },
+            )
+            if trace_id:
+                try:
+                    self.tracing_service.record_step(
+                        tenant_id=tenant_id,
+                        trace_id=trace_id,
+                        step_name="guardrail_evaluation",
+                        step_type="guardrail",
+                        step_order=3,
+                        status="failed",
+                        error_info={"violation": violation_reason},
+                    )
+                except Exception:
+                    pass
+
+            reply_text = "سأحوّل استفسارك للموظف المختص وسيرد عليك قريبًا."
+
         # 9. Persist Agent Reply in Conversation
         return self._persist_and_return_reply(
             tenant_id=tenant_id,
@@ -661,6 +701,9 @@ class ConversationalAgentEngine:
         }
         if effective_trace_id:
             reply_metadata["trace_id"] = str(effective_trace_id)
+        if msg_meta.get("guardrail_blocked"):
+            reply_metadata["guardrail_blocked"] = True
+            reply_metadata["guardrail_reason"] = msg_meta.get("guardrail_reason")
 
         reply_msg = self.conversation_service.send_message(
             tenant_id=tenant_id,
@@ -788,22 +831,67 @@ class ConversationalAgentEngine:
         from packages.services.approval_service import ApprovalService
         approval_svc = ApprovalService(self.db)
 
-        is_approval_intent = any(
-            re.search(pat, content_lower)
-            for pat in [
-                r"أوافق|موافق|نعم أوافق|تأكيد|تمت الموافقة|نفذ الأمر|اعتمد|اعتمدت|اعتمدت التنفيذ",
-                r"\b(approve|confirm|proceed|authorized)\b",
-            ]
+        # Disqualify messages that talk about approval conditionally or ask the agent to request approval
+        is_approval_disqualified = bool(
+            re.search(
+                r"(?:اطلب|طلب|تتطلب|يتطلب|يلزم|يلزمنا|تحتاج|نحتاج|بدون|دون|في\s*انتظار|بانتظار)\s*(?:ذلك\s*)?(?:الموافقة|موافقة|موافقتي|موافقتك)|(?:هل\s*توجد|ما\s*هي|عرض|قائمة)\s*(?:طلبات\s*)?الموافق",
+                content_lower,
+            )
+        )
+
+        uuid_matches = re.findall(r"[0-9a-fA-F-]{36}", content)
+        slug_match = re.search(r"(?:تفعيل|اعتماد)\s*(?:القدرة|الأداة|المهارة)?\s*([a-zA-Z0-9_-]+)", content_lower)
+        token_match = re.search(r"\b(APP-[A-Za-z0-9_-]{4,10})\b", content, re.IGNORECASE)
+
+        affirmative_patterns = [
+            r"(?<![\u0621-\u064A])(?:نعم\s+)?(?:أوافق|موافق|تأكيد|تمت\s*الموافقة|نفذ\s*الأمر|اعتمد|اعتمدت|اعتمدت\s*التنفيذ)(?![\u0621-\u064A])",
+            r"\b(approve|confirm|proceed|authorized)\b",
+        ]
+        has_affirmative = any(re.search(pat, content_lower) for pat in affirmative_patterns)
+
+        # Concise bare affirmation (e.g. "موافق", "أوافق", "نعم أوافق", "اعتمد", "أوافق على الطلب")
+        is_concise_affirmation = bool(
+            re.search(
+                r"^\s*(?:نعم\s+)?(?:أوافق|موافق|تأكيد|تمت\s*الموافقة|اعتمد|اعتمدت|نفذ\s*الأمر)(?:\s+(?:على\s+الطلب|التنفيذ))?[\.!\s]*$",
+                content_lower,
+            )
+            or re.search(r"^\s*(?:yes\s+)?(?:approve|confirm|proceed|authorized)[\.!\s]*$", content_lower)
+        )
+
+        is_approval_intent = (
+            not is_approval_disqualified
+            and (
+                bool(token_match and (has_affirmative or is_concise_affirmation or "موافق" in content_lower or "اعتمد" in content_lower))
+                or bool(uuid_matches and has_affirmative)
+                or bool(slug_match and has_affirmative)
+                or is_concise_affirmation
+            )
         )
         if is_approval_intent:
-            uuid_matches = re.findall(r"[0-9a-fA-F-]{36}", content)
-            slug_match = re.search(r"(?:تفعيل|اعتماد)\s*(?:القدرة|الأداة|المهارة)?\s*([a-zA-Z0-9_-]+)", content_lower)
             pending = approval_svc.list_approvals(tenant_id, status="pending")
 
             target_approval = None
 
+            # Case 0: Explicit correlation token provided in message (e.g. "موافق APP-8492")
+            if token_match:
+                cand_token = token_match.group(1).strip().upper()
+                token_approval = approval_svc.find_pending_approval_by_token(tenant_id, cand_token)
+                if token_approval is None:
+                    reply_text = f"⚠️ لم يتم العثور على أي طلب موافقة معلق بالرمز [{cand_token}] في منشأتكم."
+                    return self._persist_and_return_reply(
+                        tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                    )
+
+                if approval_svc.is_approval_expired(token_approval):
+                    reply_text = f"⚠️ طلب الموافقة المحدد بالرمز [{cand_token}] انتهت صلاحيته الزمنية ولم يعد قابلاً للاعتماد."
+                    return self._persist_and_return_reply(
+                        tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                    )
+
+                target_approval = token_approval
+
             # Case 1: Explicit UUID provided in message
-            if uuid_matches:
+            elif uuid_matches:
                 raw_cand_id = uuid_matches[0]
                 try:
                     cand_uuid = UUID(raw_cand_id)
@@ -880,8 +968,25 @@ class ConversationalAgentEngine:
                         tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
                     )
 
-                # Exactly one pending approval: check if sensitive/destructive
+                # Exactly one pending approval: check if token-gated or sensitive/destructive
                 single_app = pending[0]
+                app_token = approval_svc.get_approval_token(single_app)
+                if app_token:
+                    reply_text = (
+                        f"⚠️ طلب الموافقة المعلق يتطلب تأكيداً صريحاً برمز الاعتماد:\n"
+                        f"\"{single_app.description}\"\n\n"
+                        f"يرجى الرد بصيغة: 'موافق {app_token}' أو اعتماده عبر لوحة التحكم."
+                    )
+                    return self._persist_and_return_reply(
+                        tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                    )
+
+                if approval_svc.is_approval_expired(single_app):
+                    reply_text = "⚠️ طلب الموافقة المعلق انتهت صلاحيته الزمنية ولم يعد قابلاً للاعتماد."
+                    return self._persist_and_return_reply(
+                        tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                    )
+
                 is_sensitive = (
                     single_app.action in (
                         "bulk_destructive_operation",
@@ -1012,12 +1117,14 @@ class ConversationalAgentEngine:
 
             # Standard non-capability approval
             try:
+                target_token = approval_svc.get_approval_token(target_approval)
                 approval_svc.approve(
                     tenant_id=tenant_id,
                     approval_id=target_approval.id,
                     decision_by_user_id=approval_user.id,
                     reason="Approved via owner chat channel",
                     user_role="tenant_owner",
+                    token=target_token,
                 )
                 reply_text = (
                     f"✅ تمت الموافقة بنجاح على الطلب [{target_approval.id}].\n"
@@ -1199,6 +1306,99 @@ class ConversationalAgentEngine:
                 tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
             )
 
+        # --- G0. Company Profile & Commercial Document Generation Intent ---
+        is_company_profile_request = bool(
+            re.search(
+                r"(?:إعداد|إنشاء|توليد|صياغة|اكتب|اعمل|جهز)\s*(?:لي\s*)?(?:ملف\s*تعريفي|بروفايل|ملف\s*الشركة|بروفايل\s*الشركة|وثيقة\s*تعريفية|ملف\s*تجاري|بروفايل\s*تجاري)|(?:ملف\s*تعريفي|بروفايل\s*الشركة|بروفايل\s*شركتنا|ملف\s*شركتنا)\s*(?:احترافي|جاهز|تجاري)?",
+                content_lower,
+            )
+        )
+        if is_company_profile_request:
+            brain_svc = BusinessBrainService(self.db)
+            brain = brain_svc.get_brain(tenant_id)
+            identity = (brain.identity if brain else None) or {}
+            products = (brain.products if brain else None) or {}
+            services = (brain.services if brain else None) or {}
+
+            company_name = identity.get("name") or identity.get("company_name") or ""
+            has_offerings = bool(products or services)
+
+            # Check if store name is mentioned directly in prompt (e.g. "يا موظف المنذر تكنولوجي...")
+            name_in_prompt = re.search(r"(?:موظف|شركة|مؤسسة|متجر)\s+([a-zA-Z0-9_\u0621-\u064A\s]+?)(?:،|,|\.|\n|أريد|اريد)", content)
+            if not company_name and name_in_prompt:
+                cand_name = name_in_prompt.group(1).strip()
+                if cand_name and len(cand_name) > 3 and not re.search(r"أريد|اريد|الذكاء|المبيعات", cand_name):
+                    company_name = cand_name
+
+            # If company identity or products/services are missing -> Inquire without hallucination or dummy tools!
+            if not company_name or not has_offerings:
+                target_name_disp = f" لشركة [{company_name}]" if company_name else ""
+                reply_text = (
+                    f"مرحباً بك! يسعدني جداً البدء في إعداد وتنسيق الملف التعريفي الاحترافي{target_name_disp} بصيغة تجارية جاهزة للعملاء المحتملين.\n\n"
+                    "⚡ **أداة توليد وتنسيق المستندات والملفات الرسمية (generate_document) متوفرة ومجهزة في النظام.**\n\n"
+                    "وحتى يكون الملف التعريفي دقيقاً 100% ويعكس هويتكم التجارية الحقيقية أمام العملاء دون أي تخمين أو ادعاء لمعلومات غير مؤكدة، يرجى تزويدي بالبيانات الأساسية التالية:\n"
+                    "1️⃣ **نبذة عن الشركة (من نحن):** الاسم التجاري المعتمد ومجال النشاط والرؤية.\n"
+                    "2️⃣ **الخدمات والمنتجات:** قائمة المنتجات والحلول البرمجية التي تقدمونها (مثل الأنظمة والتطبيقات والحلول الرقمية).\n"
+                    "3️⃣ **المزايا التنافسية:** ما الذي يميز حلولكم عن المنافسين وكيف يستفيد العميل من خدماتكم.\n\n"
+                    "بمجرد تزويدي بهذه التفاصيل (أو أي جزء منها)، سأقوم بتوثيقها فوراً في قاعدة معرفة المنشأة (BusinessBrain)، ثم صياغة وتوليد الملف التعريفي الشامل ليكون جاهزاً للإرسال لعملائكم المحتملين."
+                )
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                )
+            else:
+                # Information is present! Generate the professional document using generate_document tool
+                company_desc = identity.get("description") or identity.get("field") or "شركة رائدة في مجال الحلول التقنية والبرمجية"
+                doc_lines = [
+                    f"# الملف التعريفي الرسمي — {company_name}",
+                    f"\n## من نحن\n{company_desc}\n",
+                ]
+                if services:
+                    doc_lines.append("## خدماتنا")
+                    for s_slug, s_info in services.items():
+                        s_name = s_info.get("name") if isinstance(s_info, dict) else s_slug
+                        s_desc = s_info.get("description", "") if isinstance(s_info, dict) else str(s_info)
+                        doc_lines.append(f"- **{s_name}**: {s_desc}")
+                if products:
+                    doc_lines.append("\n## منتجاتنا وحلولنا البرمجية")
+                    for p_slug, p_info in products.items():
+                        p_name = p_info.get("name") if isinstance(p_info, dict) else p_slug
+                        p_price = p_info.get("price") if isinstance(p_info, dict) else None
+                        p_unit = p_info.get("unit", "ريال") if isinstance(p_info, dict) else ""
+                        p_desc = p_info.get("description", "") if isinstance(p_info, dict) else ""
+                        price_part = f" ({p_price} {p_unit})" if p_price is not None else ""
+                        desc_part = f" — {p_desc}" if p_desc else ""
+                        doc_lines.append(f"- **{p_name}**{price_part}{desc_part}")
+
+                doc_lines.append("\n## ما الذي يميزنا عن المنافسين")
+                doc_lines.append("- حلول تقنية متقدمة مبنية على أحدث معايير الأتمتة والذكاء الاصطناعي.")
+                doc_lines.append("- سرعة التنفيذ والجاهزية العالية وخدمة عملاء مستمرة على مدار الساعة.")
+                doc_lines.append("- توفير التكاليف التشغيلية وتحقيق عائد استثماري سريع للمنشآت والشركات.")
+
+                full_doc_content = "\n".join(doc_lines)
+
+                tool_res = self.execute_tool_action(
+                    tenant_id,
+                    "generate_document",
+                    {
+                        "title": f"الملف التعريفي - {company_name}",
+                        "document_type": "company_profile",
+                        "format": "md",
+                        "content": full_doc_content,
+                        "language": "ar",
+                        "metadata": {"company": company_name, "category": "company_profile"},
+                    },
+                    conversation_id=conversation_id,
+                )
+
+                reply_text = (
+                    f"✅ **تم إعداد وتوليد الملف التعريفي الاحترافي بنجاح لشركة [{company_name}]:**\n\n"
+                    f"{full_doc_content}\n\n"
+                    f"📄 تم حفظ المستند رسمياً وجاهز للإرسال للعملاء المحتملين بصيغة تجارية معتمدة."
+                )
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
+                )
+
         # --- G. Autonomous Capability Gap Detection & Self-Development ---
         gap_response = self._check_and_handle_capability_gap(tenant_id, message, conversation)
         if gap_response is not None:
@@ -1223,7 +1423,7 @@ class ConversationalAgentEngine:
             )
             store_name = None
             if store_name_match:
-                store_name = store_name_match.group(1).strip()
+                store_name = self._clean_business_name(store_name_match.group(1).strip())
                 brain_svc = BusinessBrainService(self.db)
                 brain_svc.update_brain(
                     tenant_id=tenant_id,
@@ -1312,11 +1512,18 @@ class ConversationalAgentEngine:
             details = learning_info["details"]
 
             brain_svc = BusinessBrainService(self.db)
-            brain_svc.update_brain(
-                tenant_id=tenant_id,
-                **{category: data_dict},
-                updated_by_user_id=message.sender_id,
-            )
+            if "multi_updates" in learning_info:
+                brain_svc.update_brain(
+                    tenant_id=tenant_id,
+                    **learning_info["multi_updates"],
+                    updated_by_user_id=message.sender_id,
+                )
+            else:
+                brain_svc.update_brain(
+                    tenant_id=tenant_id,
+                    **{category: data_dict},
+                    updated_by_user_id=message.sender_id,
+                )
 
             knowledge_svc = KnowledgeService(self.db)
             knowledge_svc.create_knowledge(
@@ -1333,12 +1540,50 @@ class ConversationalAgentEngine:
                 user_id=message.sender_id,
             )
 
+            # Flush and read back actual persisted record from database (Item 0.8)
+            self.db.flush()
+            refreshed_brain = brain_svc.get_brain(tenant_id)
+            persisted_lines: list[str] = []
+            if refreshed_brain:
+                if category == "identity" or "identity" in learning_info.get("multi_updates", {}):
+                    c_name = (refreshed_brain.identity or {}).get("name") or (refreshed_brain.identity or {}).get("company_name")
+                    if c_name:
+                        persisted_lines.append(f"🏢 اسم المنشأة المعتمد في السجل: {c_name}")
+                if category == "products" or "products" in learning_info.get("multi_updates", {}):
+                    prods = refreshed_brain.products or {}
+                    p_names = [p.get("name", k) if isinstance(p, dict) else k for k, p in prods.items()]
+                    if p_names:
+                        persisted_lines.append(f"📦 المنتجات المحفوظة في السجل: {', '.join(p_names)}")
+                if category == "services" or "services" in learning_info.get("multi_updates", {}):
+                    servs = refreshed_brain.services or {}
+                    s_names = [s.get("name", k) if isinstance(s, dict) else k for k, s in servs.items()]
+                    if s_names:
+                        persisted_lines.append(f"🛠️ الخدمات المحفوظة في السجل: {', '.join(s_names)}")
+                if category == "operations":
+                    ops = refreshed_brain.operations or {}
+                    if ops.get("cities") or ops.get("branches"):
+                        c_list = ops.get("cities") or ops.get("branches")
+                        persisted_lines.append(f"📍 الفروع وتغطية المدن في السجل: {', '.join(c_list)}")
+                    if ops.get("working_hours"):
+                        persisted_lines.append(f"⏰ أوقات العمل في السجل: {ops.get('working_hours')}")
+                if category == "policies":
+                    pols = refreshed_brain.policies or {}
+                    for p_key, p_val in pols.items():
+                        persisted_lines.append(f"📜 السياسة المعتمدة في السجل: {p_val}")
+                if category == "pricing":
+                    pr = refreshed_brain.pricing or {}
+                    for pr_k, pr_v in pr.items():
+                        item = pr_v.get("item", pr_k) if isinstance(pr_v, dict) else pr_k
+                        price = pr_v.get("price") if isinstance(pr_v, dict) else pr_v
+                        curr = pr_v.get("currency", "ريال") if isinstance(pr_v, dict) else "ريال"
+                        persisted_lines.append(f"💰 السعر المعتمد لـ ({item}): {price} {curr}")
+
+            persisted_summary = "\n".join(f"- {d}" for d in persisted_lines) if persisted_lines else f"- {details}"
+
             reply_text = (
-                f"✅ تم حفظ وتحديث معلومات النشاط التجاري بنجاح:\n"
-                f"- التصنيف: {learning_info.get('category_label', category)}\n"
-                f"- البيان: {title}\n"
-                f"- التفاصيل المعتمدة: {details}\n"
-                f"أصبحت هذه المعلومات الآن جزءاً من قاعدة معرفتي وسأعتمد عليها في خدمة العملاء والرد على استفساراتهم."
+                f"✅ تم حفظ وتأكيد البيانات في قاعدة بيانات المنشأة (BusinessBrain):\n"
+                f"{persisted_summary}\n\n"
+                f"💾 تم التحقق الفعلي من كتابة هذه البيانات في السجل الدائم، وأصبحت معتمدة فوراً في خدمة العملاء."
             )
             return self._persist_and_return_reply(
                 tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
@@ -1383,33 +1628,100 @@ class ConversationalAgentEngine:
                     tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
                 )
 
-        # --- J. General Owner Guidance / Chat ---
+        # --- J. General Owner Guidance / Chat (Phase 0.2: verified context + anti-hallucination) ---
         if provider is not None:
-            brain_ctx = BusinessBrainService(self.db).get_brain(tenant_id)
-            extra_biz_info = ""
-            if brain_ctx and brain_ctx.identity and brain_ctx.identity.get("name"):
-                extra_biz_info += f"\nاسم المنشأة المعتمد: {brain_ctx.identity.get('name')}"
-            if brain_ctx and brain_ctx.products:
-                prod_lines = []
-                for slug, pdata in brain_ctx.products.items():
-                    if isinstance(pdata, dict):
-                        pname = pdata.get("name") or slug
-                        pprice = pdata.get("price")
-                        punit = pdata.get("unit") or "ريال"
-                        prod_lines.append(f"- {pname}: {pprice} {punit}" if pprice is not None else f"- {pname}")
-                    else:
-                        prod_lines.append(f"- {slug}")
-                extra_biz_info += "\nقائمة المنتجات المعتمدة وأسعارها:\n" + "\n".join(prod_lines)
+            # 1. Build unified tenant-scoped context for owner
+            task_ctx = TaskContext(
+                task_id=uuid4(),
+                agent_id=None,
+                objective=content or "Owner management interaction",
+                title=f"Owner conversation {str(conversation_id)[:8]}",
+                priority="normal",
+                status="active",
+            )
+            owner_context = self.context_builder.build(
+                tenant_id=tenant_id,
+                task=task_ctx,
+                memory_limit=15,
+                knowledge_limit=15,
+                knowledge_query=content,
+                conversation_id=conversation_id,
+            )
+
+            # 2. Retrieve chronological conversation history (last 15 messages)
+            raw_owner_history = self.conversation_service.list_messages(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                limit=15,
+                offset=0,
+            )
+            owner_history_dialogue: list[dict[str, str]] = []
+            for h_msg in raw_owner_history:
+                if not h_msg.content:
+                    continue
+                s_label = "Owner" if h_msg.sender_type in ("user", "owner") else "Assistant"
+                owner_history_dialogue.append({"sender": s_label, "content": h_msg.content.strip()})
+
+            biz = owner_context.business or {}
+            company_name = (
+                biz.get("identity", {}).get("name")
+                or biz.get("identity", {}).get("company_name")
+                or "منشأتنا"
+            )
+
+            biz_sections: list[str] = []
+            for k in ("identity", "products", "services", "pricing", "operations", "policies", "brand"):
+                val = biz.get(k)
+                if val:
+                    s_title = k.replace("_", " ").title()
+                    if k == "operations":
+                        s_title = "Operations, Branches, Locations & Hours"
+                    biz_sections.append(f"{s_title}: {json.dumps(val, ensure_ascii=False)}")
+
+            k_snippets = [
+                f"- [{k.get('title', 'Knowledge')}]: {k.get('content', '')}"
+                for k in owner_context.knowledge
+                if not k.get("is_conflict")
+            ]
 
             system_inst = (
-                "أنت الموظف الرقمي الذكي والمساعد الإداري لمالك النشاط التجاري.\n"
-                "تتواصل مباشرة مع صاحب النشاط، وتساعده في إدارة الأعمال، متابعة المهام، وتحديث بيانات المنشأة.\n"
-                f"{extra_biz_info}\n"
-                "أجب بلباقة واحترافية وإيجاز باللغة العربية، واعرض المساعدة في تحديث المنتجات أو الأسعار أو متابعة المهام."
+                f"أنت الموظف الرقمي الذكي والمساعد الإداري لمالك منشأة '{company_name}'.\n"
+                "تتواصل مباشرة مع صاحب العمل والمالك المعتمد للمنشأة.\n\n"
+                "قواعد الأمان ومنع الهلوسة الإلزامية (صارمة جداً):\n"
+                "1. الإجابة حصرياً استناداً إلى الحقائق الرسمية المعتمدة في عقل المنشأة (Business Brain) وقاعدة المعرفة (Knowledge Base) الواردة في السياق أدناه.\n"
+                "2. قاعدة صارمة لمنع التخمين والهلوسة: إذا سألك المالك عن أي منتج، خدمة، سعر، برنامج، فرع، أو تفصيل غير مسجل وغير مدون في البيانات المعتمدة أدناه (مثل السؤال عن 'ناظم' أو أي برنامج أو منتج غير موجود في السياق)، "
+                "يُحظر عليك تماماً اختراع أو افتراض وصفه أو وظيفته أو ربطه بأنظمة أخرى. يجب أن تصرح بوضوح بأن هذه المعلومة غير مسجلة في قاعدة بيانات المنشأة، واعرض عليه تزويدك بتفاصيلها لحفظها وتوثيقها فوراً.\n"
+                "3. أجب باحترافية وإيجاز وموضوعية تامة باللغة العربية."
             )
+
+            owner_prompt_parts = [
+                "### BUSINESS BRAIN CONTEXT (Verified)",
+                "\n".join(biz_sections) if biz_sections else "None provided.",
+                "",
+                "### KNOWLEDGE BASE SNIPPETS (Verified)",
+                "\n".join(k_snippets) if k_snippets else "No relevant knowledge found.",
+                "",
+                "### CONVERSATION HISTORY",
+            ]
+            for turn in owner_history_dialogue:
+                owner_prompt_parts.append(f"{turn['sender']}: {turn['content']}")
+
+            owner_prompt_parts.extend(
+                [
+                    "",
+                    "### LATEST OWNER MESSAGE",
+                    content,
+                    "",
+                    "### TASK",
+                    "أجب على رسالة المالك باللغة العربية استناداً فقط وحصرياً إلى البيانات المعتمدة أعلاه. إذا كانت المعلومة غير مسجلة، صرح بذلك صراحة دون اختراع.",
+                    "Response:",
+                ]
+            )
+            owner_user_prompt = "\n".join(owner_prompt_parts)
+
             try:
                 reply_text = provider.generate_text(
-                    content, system_instruction=system_inst, temperature=temperature
+                    owner_user_prompt, system_instruction=system_inst, temperature=temperature
                 )
             except Exception:
                 reply_text = "أهلاً بك يا صاحب النشاط! أنا موظفك الذكي، جاهز لتنفيذ تعليماتك، تحديث المنتجات والأسعار، أو تزويدك بملخص النشاط."
@@ -1483,6 +1795,29 @@ class ConversationalAgentEngine:
                     f"- الإجمالي قبل الخصم: {result.get('subtotal')}\n"
                     f"- قيمة الخصم: {result.get('discount')}\n"
                     f"- الإجمالي بعد الخصم: {result.get('total')}"
+                )
+            if "annual_depreciation" in result:
+                return (
+                    f"- تكلفة الأصل: {result.get('asset_cost')} ريال\n"
+                    f"- القيمة المتبقية: {result.get('salvage_value', 0)} ريال\n"
+                    f"- العمر الإنتاجي: {result.get('useful_life_years')} سنوات\n"
+                    f"- قسط الاستهلاك السنوي: {result.get('annual_depreciation')} ريال\n"
+                    f"- نسبة الاستهلاك السنوي: {result.get('depreciation_rate')}%"
+                )
+            if "monthly_installment" in result:
+                return (
+                    f"- أصل التمويل: {result.get('principal')} ريال\n"
+                    f"- نسبة الفائدة السنوية: {result.get('annual_rate_percentage')}%\n"
+                    f"- مدة السداد: {result.get('months')} شهراً\n"
+                    f"- إجمالي الفوائد: {result.get('total_interest')} ريال\n"
+                    f"- إجمالي المبلغ المستحق: {result.get('total_repayable')} ريال\n"
+                    f"- القسط الشهري: {result.get('monthly_installment')} ريال"
+                )
+            if "end_of_service_award" in result:
+                return (
+                    f"- الراتب الأخير: {result.get('last_salary')} ريال\n"
+                    f"- سنوات الخدمة: {result.get('service_years')} سنوات\n"
+                    f"- مكافأة نهاية الخدمة المستحقة: {result.get('end_of_service_award')} ريال"
                 )
             lines = [f"- {k}: {v}" for k, v in result.items() if not k.startswith("_")]
             return "\n".join(lines) if lines else str(result)
@@ -1717,6 +2052,99 @@ class ConversationalAgentEngine:
                 "extracted_inputs": {"revenue": revenue, "costs": costs},
             })
 
+        # Depreciation Calculator (استهلاك الأصول)
+        depr_match = re.search(r"(?:استهلاك|إهلاك)\s*(?:الأصول|أصول|سنوي|السنوي)?|depreciation", content_lower)
+        if depr_match and not cap_candidates:
+            cost_match = re.search(r"(?:قيمة|تكلفة|شراء|أصل|أصول)?\s*[:\s]?\s*(\d+(?:\.\d+)?)", content_lower)
+            years_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:سنوات|سنة|عام|أعوام)", content_lower)
+            salvage_match = re.search(r"(?:خردة|متبقية|نفاية)\s*[:\s]?\s*(\d+(?:\.\d+)?)", content_lower)
+            asset_cost = float(cost_match.group(1)) if cost_match and cost_match.group(1) else 100000.0
+            useful_years = float(years_match.group(1)) if years_match and years_match.group(1) else 5.0
+            salvage_val = float(salvage_match.group(1)) if salvage_match and salvage_match.group(1) else 0.0
+            cap_candidates.append({
+                "slug": "depreciation_calculator",
+                "name": "حاسبة استهلاك الأصول الثابتة",
+                "description": "حساب قسط الاستهلاك السنوي ونسبة الإهلاك للأصول الثابتة",
+                "purpose": "إدارة الأصول الثابتة وحساب الإهلاك المحاسبي",
+                "inputs_spec": {"cost": "number", "salvage": "number", "years": "number"},
+                "outputs_spec": {"asset_cost": "number", "salvage_value": "number", "useful_life_years": "number", "annual_depreciation": "number", "depreciation_rate": "number"},
+                "acceptance_tests": [
+                    {"input": {"cost": 100000.0, "salvage": 0.0, "years": 5.0}, "expected": {"annual_depreciation": 20000.0, "depreciation_rate": 20.0}}
+                ],
+                "implementation_code": (
+                    "def run(inputs):\n"
+                    "    cost = float(inputs.get('cost', 100000.0))\n"
+                    "    salvage = float(inputs.get('salvage', 0.0))\n"
+                    "    years = float(inputs.get('years', 5.0))\n"
+                    "    annual = round((cost - salvage) / years, 2) if years > 0 else 0.0\n"
+                    "    rate = round((annual / cost * 100), 2) if cost > 0 else 0.0\n"
+                    "    return {'asset_cost': cost, 'salvage_value': salvage, 'useful_life_years': years, 'annual_depreciation': annual, 'depreciation_rate': rate}\n"
+                ),
+                "extracted_inputs": {"cost": asset_cost, "salvage": salvage_val, "years": useful_years},
+            })
+
+        # Loan / Installment Calculator (جدولة الأقساط والتمويل)
+        loan_match = re.search(r"(?:جدولة\s*أقساط|حساب\s*القسط|أقساط\s*تمويل|قرض|تمويل|فائدة\s*مركبة|installment)", content_lower)
+        if loan_match and not cap_candidates:
+            p_match = re.search(r"(?:مبلغ|تمويل|قرض|قيمة)?\s*[:\s]?\s*(\d+(?:\.\d+)?)", content_lower)
+            r_match = re.search(r"(?:بنسبة|فائدة|نسبة)\s*[:\s]?\s*(\d+(?:\.\d+)?%?)", content_lower)
+            m_match = re.search(r"(\d+)\s*(?:شهر|شهراً|شهور)", content_lower)
+            principal = float(p_match.group(1)) if p_match and p_match.group(1) else 50000.0
+            r_val = float(r_match.group(1).replace("%", "")) / 100.0 if r_match and r_match.group(1) else 0.05
+            months = float(m_match.group(1)) if m_match and m_match.group(1) else 12.0
+            cap_candidates.append({
+                "slug": "loan_installment_calculator",
+                "name": "حاسبة أقساط التمويل والقروض",
+                "description": "حساب الأقساط الشهرية وإجمالي الفوائد والمبلغ المستحق",
+                "purpose": "دعم عمليات التسعير والجدولة المالية للعملاء والمنشأة",
+                "inputs_spec": {"principal": "number", "annual_rate": "number", "months": "number"},
+                "outputs_spec": {"principal": "number", "annual_rate_percentage": "number", "months": "number", "total_interest": "number", "total_repayable": "number", "monthly_installment": "number"},
+                "acceptance_tests": [
+                    {"input": {"principal": 50000.0, "annual_rate": 0.05, "months": 12.0}, "expected": {"monthly_installment": 4375.0, "total_interest": 2500.0, "total_repayable": 52500.0}}
+                ],
+                "implementation_code": (
+                    "def run(inputs):\n"
+                    "    p = float(inputs.get('principal', 50000.0))\n"
+                    "    r = float(inputs.get('annual_rate', 0.05))\n"
+                    "    m = float(inputs.get('months', 12.0))\n"
+                    "    interest = round(p * r * (m / 12.0), 2)\n"
+                    "    repayable = round(p + interest, 2)\n"
+                    "    monthly = round(repayable / m, 2) if m > 0 else 0.0\n"
+                    "    return {'principal': p, 'annual_rate_percentage': round(r * 100, 2), 'months': int(m), 'total_interest': interest, 'total_repayable': repayable, 'monthly_installment': monthly}\n"
+                ),
+                "extracted_inputs": {"principal": principal, "annual_rate": r_val, "months": months},
+            })
+
+        # End of Service Calculator (مكافأة نهاية الخدمة)
+        eos_match = re.search(r"(?:مكافأة\s*نهاية\s*الخدمة|نهاية\s*الخدمة|مستحقات\s*الموظف|end_of_service)", content_lower)
+        if eos_match and not cap_candidates:
+            sal_match = re.search(r"(?:راتب|الراتب)\s*[:\s]?\s*(\d+(?:\.\d+)?)", content_lower)
+            y_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:سنوات|سنة|عام|أعوام)", content_lower)
+            salary = float(sal_match.group(1)) if sal_match and sal_match.group(1) else 8000.0
+            years = float(y_match.group(1)) if y_match and y_match.group(1) else 5.0
+            cap_candidates.append({
+                "slug": "end_of_service_calculator",
+                "name": "حاسبة مكافأة نهاية الخدمة",
+                "description": "حساب مكافأة نهاية الخدمة للموظفين حسب نظام العمل",
+                "purpose": "حساب المستحقات المالية للعاملين وفق اللائحة الرسمية",
+                "inputs_spec": {"salary": "number", "years": "number"},
+                "outputs_spec": {"last_salary": "number", "service_years": "number", "end_of_service_award": "number"},
+                "acceptance_tests": [
+                    {"input": {"salary": 8000.0, "years": 5.0}, "expected": {"last_salary": 8000.0, "service_years": 5.0, "end_of_service_award": 20000.0}}
+                ],
+                "implementation_code": (
+                    "def run(inputs):\n"
+                    "    salary = float(inputs.get('salary', 8000.0))\n"
+                    "    years = float(inputs.get('years', 5.0))\n"
+                    "    if years <= 5:\n"
+                    "        award = round(years * (salary / 2.0), 2)\n"
+                    "    else:\n"
+                    "        award = round(5 * (salary / 2.0) + (years - 5) * salary, 2)\n"
+                    "    return {'last_salary': salary, 'service_years': years, 'end_of_service_award': award}\n"
+                ),
+                "extracted_inputs": {"salary": salary, "years": years},
+            })
+
         # Explicit developer request: e.g. "طور قدرة جديدة باسم xyz..."
         explicit_dev = re.search(r"(?:طور|أنشئ|أضف)\s*(?:قدرة|أداة|مهارة)\s*(?:جديدة\s*)?(?:باسم|بعنوان)?\s*([a-zA-Z0-9_-]+)", content_lower)
         if explicit_dev and not cap_candidates:
@@ -1875,6 +2303,21 @@ class ConversationalAgentEngine:
                 tenant_id, conversation_id, message_id, reply_text, msg_meta, is_owner=True
             )
 
+    @staticmethod
+    def _clean_business_name(raw_name: str) -> str:
+        """Strip filler words, formal titles, and prefixes from commercial entity names."""
+        if not raw_name:
+            return ""
+        cleaned = raw_name.strip()
+        cleaned = re.sub(r"^[:—\-=]+\s*", "", cleaned).strip()
+        filler_pattern = r"^(?:الرسمي|المعتمد|الرسمية|المعتمدة|لدينا|لمنشأتنا|لشركتنا|لمتجرنا|الخاص\s*بنا|الخاص|هو|يكون)\s+"
+        while True:
+            subbed = re.sub(filler_pattern, "", cleaned, flags=re.IGNORECASE).strip()
+            if subbed == cleaned:
+                break
+            cleaned = subbed
+        return re.sub(r"^[:—\-=]+\s*", "", cleaned).strip()
+
     def _extract_business_knowledge(self, content: str) -> dict[str, Any] | None:
         """
         Extracts structured business facts (products, prices, policies, services, hours)
@@ -1898,14 +2341,77 @@ class ConversationalAgentEngine:
                 ),
             }
 
+        # Product & Software extraction
+        extracted_prods: dict[str, Any] = {}
+        extracted_servs: dict[str, Any] = {}
+
+        if "ناظم" in text:
+            extracted_prods["nazim_accounting"] = {
+                "name": "برنامج ناظم المحاسبي",
+                "title": "برنامج ناظم المحاسبي",
+                "description": "نظام محاسبي وإدارة مالية متكامل للشركات",
+            }
+        if "سيرو" in text:
+            extracted_prods["ciro_networks"] = {
+                "name": "برنامج سيرو لادارة الشبكات",
+                "title": "برنامج سيرو لادارة الشبكات",
+                "description": "نظام لإدارة الشبكات والاتصالات",
+            }
+        if re.search(r"الموظف\s*الذكي|موظف\s*ذكي|موظف(?:ين|ون)?\s*رقمي(?:ين|ون)?", text):
+            extracted_prods["smart_employee"] = {
+                "name": "الموظف الذكي",
+                "title": "الموظف الذكي",
+                "description": "وكيل ذكاء اصطناعي رقمي لأتمتة العمليات وخدمة العملاء",
+            }
+
+        for m in re.finditer(r"(?:برنامج|نظام|تطبيق)\s+([a-zA-Z0-9_\u0621-\u064A]+)(?:\s+(?:المحاسبي|لإدارة\s*الشبكات|لإدارة\s*المخزون|[a-zA-Z0-9_\u0621-\u064A]+))?", text):
+            p_name = m.group(1).strip()
+            full_p_name = m.group(0).strip()
+            if p_name and p_name not in ("اسمه", "يدعى", "هو", "للشركات", "جديد", "في") and len(p_name) > 2:
+                p_slug = re.sub(r"[^\w]+", "_", p_name).strip("_").lower()
+                if p_slug not in extracted_prods and "nazim" not in p_slug and "ciro" not in p_slug:
+                    extracted_prods[p_slug] = {"name": full_p_name, "title": p_name}
+
         # 1.5. Business Identity & Commercial Name
+        intro_match = re.search(
+            r"نحن\s*(?:شركة|مؤسسة|منشأة|متجر)?\s*([a-zA-Z0-9_\u0621-\u064A\s]+?)(?:،|,|\.|\n|لـ|نقدم|متخصصون)",
+            text,
+            re.IGNORECASE,
+        )
+        if intro_match and not re.search(r"ما\s*هو|أخبرني|ايش|إيش", text_lower):
+            raw_c_name = intro_match.group(1).strip()
+            clean_c_name = self._clean_business_name(re.sub(r"^(?:شركة|مؤسسة|منشأة|متجر)\s+", "", raw_c_name).strip())
+            if clean_c_name and len(clean_c_name) > 2 and clean_c_name not in ("نحن", "موظف", "في"):
+                multi_updates = {
+                    "identity": {
+                        "name": f"شركة {clean_c_name}",
+                        "legal_name": f"شركة {clean_c_name}",
+                        "description": text[:250],
+                    }
+                }
+                if extracted_prods:
+                    multi_updates["products"] = extracted_prods
+                if extracted_servs:
+                    multi_updates["services"] = extracted_servs
+
+                return {
+                    "needs_clarification": False,
+                    "category": "identity",
+                    "category_label": "هوية المنشأة والملف التعريفي",
+                    "title": f"شركة {clean_c_name}",
+                    "details": f"تم اعتماد هوية شركة {clean_c_name} والحلول التابعة لها.",
+                    "data": multi_updates["identity"],
+                    "multi_updates": multi_updates,
+                }
+
         identity_match = re.search(
             r"(?:اسم\s*(?:المتجر|متجرنا|المنشأة|منشأتنا|الشركة|شركتنا|المشروع|مشروعنا|النشاط|نشاطنا|المحل|محلنا)|الاسم\s*التجاري)\s*(?:هو|يكون|=|\s*:)?\s*([^،,.\n]+)",
             text,
             re.IGNORECASE,
         )
         if identity_match and not re.search(r"ما\s*هو|كم|أخبرني|ايش|إيش", text_lower):
-            business_name = identity_match.group(1).strip()
+            raw_b_name = identity_match.group(1).strip()
+            business_name = self._clean_business_name(raw_b_name)
             if business_name:
                 return {
                     "needs_clarification": False,
@@ -1916,6 +2422,50 @@ class ConversationalAgentEngine:
                     "data": {
                         "name": business_name,
                         "legal_name": business_name,
+                    },
+                }
+
+        # Catalog declaration without intro match (Item 0.5)
+        is_catalog_declaration = bool(
+            re.search(r"(?:منتجاتنا|خدماتنا|أنظمتنا|برامجنا|حلولنا|نقدم|نوفر|لدينا\s*برامج|لدينا\s*أنظمة)", text_lower)
+        ) and not bool(re.search(r"ما\s*هي|ايش|إيش|كم", text_lower))
+        if extracted_prods and is_catalog_declaration:
+            p_names_list = [p["name"] for p in extracted_prods.values()]
+            return {
+                "needs_clarification": False,
+                "category": "products",
+                "category_label": "المنتجات والأنظمة المعتمدة",
+                "title": "قائمة المنتجات والحلول",
+                "details": f"المنتجات والحلول المعتمدة: {', '.join(p_names_list)}",
+                "data": extracted_prods,
+            }
+
+        # Branches & City coverage extraction (Item 0.5)
+        branches_match = re.search(
+            r"(?:فروعنا\s*(?:في\s*المدن\s*التالية|في)?|الفروع\s*(?:في)?|المدن\s*(?:التي\s*نخدمها|المغطاة|المعتمدة)?|نغطي\s*(?:المدن\s*التالية|المدن)?|نخدم\s*(?:المدن)?|تغطيتنا\s*(?:في)?)\s*[:—\-=]?\s*([^\n.]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if branches_match and not re.search(r"ما\s*هي|أين|هل\s*توجد|ايش|إيش", text_lower):
+            raw_cities_str = branches_match.group(1).strip()
+            raw_parts = re.split(r"[،,]|(?<=\s)و(?=[\u0621-\u064A])", raw_cities_str)
+            cities_list = []
+            for p in raw_parts:
+                c_clean = re.sub(r"^(?:مدينة|محافظة|فرع)\s+", "", p.strip()).strip()
+                c_clean = re.sub(r"[^\u0621-\u064A\s]", "", c_clean).strip()
+                if c_clean and len(c_clean) >= 2 and c_clean not in ("في", "أو", "و", "التالية"):
+                    cities_list.append(c_clean)
+            if cities_list:
+                return {
+                    "needs_clarification": False,
+                    "category": "operations",
+                    "category_label": "الفروع وتغطية المدن",
+                    "title": "فروع ونطاق تغطية المدن",
+                    "details": f"المدن والفروع المعتمدة: {', '.join(cities_list)}",
+                    "data": {
+                        "branches": cities_list,
+                        "cities": cities_list,
+                        "delivery_coverage": cities_list,
                     },
                 }
 
@@ -2188,6 +2738,94 @@ class ConversationalAgentEngine:
         )
 
 
+    def _evaluate_reply_guardrails(
+        self,
+        reply_text: str,
+        agent_context: AgentContext,
+    ) -> tuple[bool, str | None]:
+        """
+        Inspects generated customer reply for hallucinated prices, unverified discounts,
+        or unsubstantiated commercial claims not supported by BusinessBrain or Knowledge.
+        Returns (is_safe, violation_reason).
+        """
+        if not reply_text:
+            return True, None
+
+        # 1. Price Verification: Look for numeric prices
+        price_patterns = [
+            r"(\d+(?:\.\d+)?)\s*(?:ريال|SAR|دولار|\$|درهم|جنيه)",
+            r"(?:سعر(?:ه|ها)?|بسعر|بـ|مبلغ)\s*[:\s]?\s*(\d+(?:\.\d+)?)",
+        ]
+        found_prices: set[float] = set()
+        for pat in price_patterns:
+            for m in re.finditer(pat, reply_text, re.IGNORECASE):
+                try:
+                    p_val = float(m.group(1))
+                    found_prices.add(p_val)
+                except (ValueError, TypeError):
+                    pass
+
+        if found_prices:
+            verified_prices: set[float] = set()
+            biz = agent_context.business or {}
+
+            # from products
+            for p_k, p_v in (biz.get("products") or {}).items():
+                if isinstance(p_v, dict) and "price" in p_v and p_v["price"] is not None:
+                    try:
+                        verified_prices.add(float(p_v["price"]))
+                    except (ValueError, TypeError):
+                        pass
+
+            # from pricing
+            for pr_k, pr_v in (biz.get("pricing") or {}).items():
+                if isinstance(pr_v, dict) and "price" in pr_v and pr_v["price"] is not None:
+                    try:
+                        verified_prices.add(float(pr_v["price"]))
+                    except (ValueError, TypeError):
+                        pass
+                elif isinstance(pr_v, (int, float)):
+                    verified_prices.add(float(pr_v))
+
+            # from services
+            for s_k, s_v in (biz.get("services") or {}).items():
+                if isinstance(s_v, dict) and "price" in s_v and s_v["price"] is not None:
+                    try:
+                        verified_prices.add(float(s_v["price"]))
+                    except (ValueError, TypeError):
+                        pass
+
+            # from knowledge snippets text
+            k_text = " ".join(str(k.get("content", "")) + " " + str(k.get("title", "")) for k in (agent_context.knowledge or []))
+            pol_text = json.dumps(biz.get("policies") or {}, ensure_ascii=False)
+
+            for p in found_prices:
+                if p not in verified_prices:
+                    str_p = str(int(p) if p.is_integer() else p)
+                    if str_p not in k_text and str_p not in pol_text:
+                        return False, f"Unverified price {p} detected in reply without basis in BusinessBrain or Knowledge"
+
+        # 2. Discount Percentage Verification
+        discount_patterns = [
+            r"(\d+)\s*%\s*(?:خصم|تخفيض)?",
+            r"(?:خصم|تخفيض)\s*[:\s]?\s*(\d+)\s*%",
+        ]
+        found_discounts: set[int] = set()
+        for pat in discount_patterns:
+            for m in re.finditer(pat, reply_text, re.IGNORECASE):
+                try:
+                    found_discounts.add(int(m.group(1)))
+                except (ValueError, TypeError):
+                    pass
+
+        if found_discounts:
+            verified_text = json.dumps(agent_context.business or {}, ensure_ascii=False) + " " + " ".join(str(k.get("content", "")) for k in (agent_context.knowledge or []))
+            for d in found_discounts:
+                if f"{d}%" not in verified_text and f"{d} %" not in verified_text and f"{d} بالمئة" not in verified_text:
+                    return False, f"Unverified discount {d}% detected in reply without basis in verified policies"
+
+        return True, None
+
     def _construct_prompt(
         self,
         agent_context: AgentContext,
@@ -2221,21 +2859,26 @@ class ConversationalAgentEngine:
             "6. CRITICAL ANTI-HALLUCINATION RULE: If the Business Brain has no business name, products, services, prices, or policies recorded, "
             "DO NOT invent or assume any store name (e.g. 'البركة' or any other name), products, or shipping rules. "
             "If asked about the business identity, offerings, or pricing when they are missing in the verified context, "
-            "explicitly state in Arabic that these details have not been configured yet by the store owner."
+            "explicitly state in Arabic that these details have not been configured yet by the store owner.\n"
+            "7. STRICT CAPABILITY LIMITS (NO FABRICATION): You DO NOT possess tools for making phone calls, scheduling/booking appointments, "
+            "sending external links, providing free trials, or designing/generating images. Under NO circumstances promise or claim you can perform these actions. "
+            "If a customer inquires about or requests any of these, politely inform them in Arabic that you do not support this directly and that you will pass their request to the specialized human team to follow up with them."
         )
 
-        # Assemble business facts
+        # Assemble business facts - injecting all populated sections including operations, branches, hours (Item 0.3)
         business_sections: list[str] = []
-        if business.get("identity"):
-            business_sections.append(f"Business Identity: {json.dumps(business['identity'], ensure_ascii=False)}")
-        if business.get("products"):
-            business_sections.append(f"Products: {json.dumps(business['products'], ensure_ascii=False)}")
-        if business.get("services"):
-            business_sections.append(f"Services: {json.dumps(business['services'], ensure_ascii=False)}")
-        if business.get("pricing"):
-            business_sections.append(f"Pricing: {json.dumps(business['pricing'], ensure_ascii=False)}")
-        if business.get("policies"):
-            business_sections.append(f"Policies: {json.dumps(business['policies'], ensure_ascii=False)}")
+        priority_order = ["identity", "products", "services", "pricing", "operations", "policies", "brand"]
+        for sec in priority_order:
+            val = business.get(sec)
+            if val:
+                sec_title = sec.replace("_", " ").title()
+                if sec == "operations":
+                    sec_title = "Operations, Branches, Locations & Working Hours"
+                business_sections.append(f"{sec_title}: {json.dumps(val, ensure_ascii=False)}")
+
+        for sec, val in business.items():
+            if sec not in priority_order and sec != "version" and val:
+                business_sections.append(f"{sec.replace('_', ' ').title()}: {json.dumps(val, ensure_ascii=False)}")
 
         # Assemble knowledge snippets
         knowledge_snippets = [

@@ -253,6 +253,16 @@ async def ingest_channel_message(
             )
         )
 
+    if conv is None and customer_id is not None:
+        conv = db.scalar(
+            select(Conversation).where(
+                Conversation.tenant_id == tenant_id,
+                Conversation.channel_id == channel_id,
+                Conversation.customer_id == customer_id,
+                Conversation.status.in_(["open", "active"]),
+            ).order_by(Conversation.started_at.desc())
+        )
+
     if conv is None:
         # Start new conversation
         conv = conversation_service.start_conversation(

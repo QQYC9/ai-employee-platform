@@ -198,16 +198,37 @@ class OwnerIntentRouter:
             )
 
         # Step 1: Check for Approval Confirmation ("أوافق على الطلب...")
-        is_approval = any(
-            re.search(pat, text_lower)
-            for pat in [
-                r"أوافق|موافق|نعم أوافق|تأكيد|تمت الموافقة|نفذ الأمر|اعتمد|اعتمدت|اعتمدت التنفيذ",
-                r"\b(approve|confirm|proceed|authorized)\b",
-            ]
+        is_approval_disqualified = bool(
+            re.search(
+                r"(?:اطلب|طلب|تتطلب|يتطلب|يلزم|يلزمنا|تحتاج|نحتاج|بدون|دون|في\s*انتظار|بانتظار)\s*(?:ذلك\s*)?(?:الموافقة|موافقة|موافقتي|موافقتك)|(?:هل\s*توجد|ما\s*هي|عرض|قائمة)\s*(?:طلبات\s*)?الموافق",
+                text_lower,
+            )
+        )
+        uuid_matches = re.findall(r"[0-9a-fA-F-]{36}", text)
+        slug_match = re.search(r"(?:تفعيل|اعتماد)\s*(?:القدرة|الأداة|المهارة)?\s*([a-zA-Z0-9_-]+)", text_lower)
+        affirmative_patterns = [
+            r"(?<![\u0621-\u064A])(?:نعم\s+)?(?:أوافق|موافق|تأكيد|تمت\s*الموافقة|نفذ\s*الأمر|اعتمد|اعتمدت|اعتمدت\s*التنفيذ)(?![\u0621-\u064A])",
+            r"\b(approve|confirm|proceed|authorized)\b",
+        ]
+        has_affirmative = any(re.search(pat, text_lower) for pat in affirmative_patterns)
+        is_concise_affirmation = bool(
+            re.search(
+                r"^\s*(?:نعم\s+)?(?:أوافق|موافق|تأكيد|تمت\s*الموافقة|اعتمد|اعتمدت|نفذ\s*الأمر)(?:\s+(?:على\s+الطلب|التنفيذ))?[\.!\s]*$",
+                text_lower,
+            )
+            or re.search(r"^\s*(?:yes\s+)?(?:approve|confirm|proceed|authorized)[\.!\s]*$", text_lower)
+        )
+
+        is_approval = (
+            not is_approval_disqualified
+            and (
+                bool(uuid_matches and has_affirmative)
+                or bool(slug_match and has_affirmative)
+                or is_concise_affirmation
+            )
         )
         if is_approval:
-            approval_uuid_match = re.search(r"[0-9a-fA-F-]{36}", text)
-            approval_id_str = approval_uuid_match.group(0) if approval_uuid_match else None
+            approval_id_str = uuid_matches[0] if uuid_matches else None
             return OwnerIntentContract(
                 raw_query=text,
                 intent="approval_response",
@@ -493,7 +514,15 @@ class OwnerIntentRouter:
             re.IGNORECASE,
         )
         if name_match and not re.search(r"ما\s*هو|كم|أخبرني|ايش|إيش", text_lower):
-            name = name_match.group(1).strip()
+            raw_name = name_match.group(1).strip()
+            cleaned = re.sub(r"^[:—\-=]+\s*", "", raw_name).strip()
+            filler_pattern = r"^(?:الرسمي|المعتمد|الرسمية|المعتمدة|لدينا|لمنشأتنا|لشركتنا|لمتجرنا|الخاص\s*بنا|الخاص|هو|يكون)\s+"
+            while True:
+                subbed = re.sub(filler_pattern, "", cleaned, flags=re.IGNORECASE).strip()
+                if subbed == cleaned:
+                    break
+                cleaned = subbed
+            name = re.sub(r"^[:—\-=]+\s*", "", cleaned).strip()
             if name:
                 return {
                     "category": "identity",

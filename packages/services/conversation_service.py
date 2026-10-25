@@ -290,9 +290,11 @@ class ConversationService:
                 Message.conversation_id == conversation_id,
                 Message.tenant_id == tenant_id,
             )
-            .order_by(Message.created_at.asc())
+            .order_by(Message.created_at.desc())
             .offset(offset)
             .limit(limit)
         )
 
-        return list(self.db.scalars(stmt).all())
+        messages = list(self.db.scalars(stmt).all())
+        messages.reverse()
+        return messages
