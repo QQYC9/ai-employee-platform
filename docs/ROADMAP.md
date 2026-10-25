@@ -4,6 +4,12 @@ This document outlines the phased plan to evolve the Digital Employee platform f
 
 ---
 
+## Open Issues
+- **Runtime hallucination still observed after Phase 0.5**: with only the product name stored, the owner chat still returned an invented feature list, a 14-day free trial, and Saudi VAT/e-invoicing support. Unit tests pass (mocked model), so either the guardrail is not on this runtime path or it misses these phrasings. Re-test with the real Gemini after Phase 3; then decide between fixing the guardrail and building the groundedness verifier.
+- **Unreviewed legacy code swept into commit 60ad507 (approval tokens, company profile intent, depreciation calculator)**: review before launch.
+
+---
+
 ## Phase 0: Fix the Discovered Bugs
 - **Status**: done
 - **Objective**: Fix confirmed architectural bugs in message retrieval, context building, business learning, entity extraction, prompt generation, conversation scoping, and post-generation safety.
