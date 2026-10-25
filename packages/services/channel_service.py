@@ -130,6 +130,13 @@ class ChannelService:
         self.db.add(channel)
         self.db.flush()
 
+        if clean_type == "telegram":
+            raw_bot_token = (config or {}).get("bot_token") or (config or {}).get("token")
+            if raw_bot_token:
+                ok, err_msg = self.register_telegram_webhook(channel, drop_pending_updates=False)
+                if not ok:
+                    raise ValueError(f"Telegram webhook registration failed: {err_msg}")
+
         self.audit_service.record_event(
             tenant_id=tenant_id,
             event_type="channel_registered",
@@ -223,6 +230,12 @@ class ChannelService:
             updated_cfg = dict(channel.config or {})
             updated_cfg.update(encrypted_config)
             channel.config = updated_cfg
+            flag_modified(channel, "config")
+
+            if channel.channel_type == "telegram" and any(k in config for k in ("bot_token", "token", "secret_token", "webhook_url")):
+                ok, err_msg = self.register_telegram_webhook(channel, drop_pending_updates=False)
+                if not ok:
+                    raise ValueError(f"Telegram webhook registration failed: {err_msg}")
 
         self.db.flush()
 
@@ -262,6 +275,83 @@ class ChannelService:
 
         return channel
 
+    def _compute_telegram_webhook_url(self, channel_id: UUID, base_url: str | None = None) -> str:
+        from packages.core.config import settings
+        raw_base = base_url or settings.effective_webhook_base_url
+        clean_base = (raw_base or "").strip().rstrip("/")
+        if not clean_base:
+            raise ValueError("Public webhook URL is missing. Please configure WEBHOOK_BASE_URL.")
+        return f"{clean_base}/api/v1/webhooks/telegram/{channel_id}"
+
+    def register_telegram_webhook(
+        self,
+        channel: Channel,
+        public_base_url: str | None = None,
+        drop_pending_updates: bool = False,
+    ) -> tuple[bool, str | None]:
+        """
+        Registers Telegram webhook at Telegram Bot API via setWebhook and updates channel.config.
+        Generates and securely stores per-channel secret_token if not already set.
+        """
+        import secrets
+        from packages.connectors.telegram import TelegramConnector
+
+        if channel.channel_type != "telegram":
+            return False, "Channel is not a Telegram channel"
+
+        cfg = dict(channel.config or {})
+        raw_token = cfg.get("bot_token") or cfg.get("token") or ""
+        bot_token = self.crypto.decrypt(raw_token) if raw_token.startswith(SecretsEncryptionService.PREFIX) else raw_token
+        if not bot_token:
+            return False, "Bot token is missing or invalid"
+
+        raw_secret = cfg.get("secret_token")
+        secret_token = (
+            self.crypto.decrypt(raw_secret)
+            if raw_secret and raw_secret.startswith(SecretsEncryptionService.PREFIX)
+            else raw_secret
+        )
+        if not secret_token:
+            secret_token = secrets.token_urlsafe(32)
+            cfg["secret_token"] = self.crypto.encrypt(secret_token)
+
+        try:
+            webhook_url = self._compute_telegram_webhook_url(channel.id, public_base_url)
+        except ValueError as exc:
+            cfg["webhook_status"] = "failed"
+            cfg["last_webhook_error"] = str(exc)
+            channel.config = cfg
+            flag_modified(channel, "config")
+            self.db.flush()
+            return False, str(exc)
+
+        connector = TelegramConnector(
+            tenant_id=channel.tenant_id,
+            channel_id=channel.id,
+            bot_token=bot_token,
+            secret_token=secret_token,
+        )
+
+        ok, desc = connector.set_webhook(
+            webhook_url=webhook_url,
+            secret_token=secret_token,
+            drop_pending_updates=drop_pending_updates,
+        )
+
+        if ok:
+            cfg["webhook_url"] = webhook_url
+            cfg["webhook_status"] = "active"
+            cfg["webhook_registered_at"] = datetime.now(timezone.utc).isoformat()
+            cfg["last_webhook_error"] = None
+        else:
+            cfg["webhook_status"] = "failed"
+            cfg["last_webhook_error"] = desc
+
+        channel.config = cfg
+        flag_modified(channel, "config")
+        self.db.flush()
+        return ok, desc
+
     def get_connector(self, tenant_id: UUID, channel_id: UUID) -> BaseConnector:
         """Resolves and returns the instantiated BaseConnector for the given channel."""
         channel = self.get_channel(tenant_id, channel_id)
@@ -271,18 +361,29 @@ class ChannelService:
 
     def test_channel_connection(self, tenant_id: UUID, channel_id: UUID) -> ConnectionTestResult:
         """Probes channel connectivity, updates channel config telemetry, and logs audit event."""
-        connector = self.get_connector(tenant_id, channel_id)
-        result = connector.test_connection()
-
         channel = self.get_channel(tenant_id, channel_id)
-        if channel:
-            cfg = dict(channel.config or {})
-            cfg["last_test_status"] = "success" if result.connected else "failed"
-            cfg["last_test_result"] = result.to_dict()
-            cfg["last_tested_at"] = datetime.now(timezone.utc).isoformat()
-            channel.config = cfg
-            flag_modified(channel, "config")
-            self.db.flush()
+        if channel is None:
+            raise ValueError(f"Channel '{channel_id}' not found for tenant '{tenant_id}'")
+
+        connector = self.connector_factory.create_connector(channel)
+        if channel.channel_type == "telegram":
+            expected_url = (channel.config or {}).get("webhook_url")
+            if not expected_url:
+                try:
+                    expected_url = self._compute_telegram_webhook_url(channel.id)
+                except Exception:
+                    expected_url = None
+            result = connector.test_connection(expected_webhook_url=expected_url)
+        else:
+            result = connector.test_connection()
+
+        cfg = dict(channel.config or {})
+        cfg["last_test_status"] = "success" if result.connected else "failed"
+        cfg["last_test_result"] = result.to_dict()
+        cfg["last_tested_at"] = datetime.now(timezone.utc).isoformat()
+        channel.config = cfg
+        flag_modified(channel, "config")
+        self.db.flush()
 
         self.audit_service.record_event(
             tenant_id=tenant_id,
@@ -298,6 +399,43 @@ class ChannelService:
             },
         )
         return result
+
+    def re_register_telegram_webhook(
+        self,
+        tenant_id: UUID,
+        channel_id: UUID,
+        public_base_url: str | None = None,
+    ) -> ConnectionTestResult:
+        """
+        Re-registers webhook at Telegram Bot API and executes dual-check connectivity test.
+        """
+        channel = self.get_channel(tenant_id, channel_id)
+        if channel is None:
+            raise ValueError(f"Channel '{channel_id}' not found")
+        if channel.channel_type != "telegram":
+            raise ValueError(f"Re-register webhook is not supported for channel type '{channel.channel_type}'")
+
+        ok, err_msg = self.register_telegram_webhook(
+            channel,
+            public_base_url=public_base_url,
+            drop_pending_updates=False,
+        )
+        if not ok:
+            cfg = dict(channel.config or {})
+            cfg["last_test_status"] = "failed"
+            cfg["last_test_result"] = {"connected": False, "error": err_msg}
+            cfg["last_tested_at"] = datetime.now(timezone.utc).isoformat()
+            channel.config = cfg
+            flag_modified(channel, "config")
+            self.db.flush()
+            return ConnectionTestResult(
+                connected=False,
+                status="failed",
+                error=f"Failed to register webhook: {err_msg}",
+                details={"webhook_registered": False, "error": err_msg},
+            )
+
+        return self.test_channel_connection(tenant_id, channel_id)
 
     def send_channel_message(
         self,

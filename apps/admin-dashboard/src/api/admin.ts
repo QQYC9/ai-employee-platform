@@ -278,6 +278,15 @@ export const adminApi = {
     });
   },
 
+  async reregisterTenantChannelWebhook(
+    tenantId: string,
+    channelId: string
+  ): Promise<TenantChannelTestResult> {
+    return apiClient<TenantChannelTestResult>(`/api/v1/admin/platform/tenants/${tenantId}/channels/${channelId}/re-register-webhook`, {
+      method: 'POST',
+    });
+  },
+
   async deleteTenantChannel(
     tenantId: string,
     channelId: string

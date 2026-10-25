@@ -195,6 +195,30 @@ def test_channel_connection(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.post("/{channel_id}/re-register-webhook")
+def reregister_channel_webhook(
+    channel_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-registers external webhook (e.g. Telegram) for the channel."""
+    _require_admin(current_user)
+    service = ChannelService(db)
+    try:
+        result = service.re_register_telegram_webhook(current_user.tenant_id, channel_id)
+        db.commit()
+        return result.to_dict()
+    except ValueError as exc:
+        db.rollback()
+        detail_msg = str(exc)
+        if "not found" in detail_msg.lower():
+            raise HTTPException(status_code=404, detail=detail_msg)
+        raise HTTPException(status_code=400, detail=detail_msg)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.post("/{channel_id}/send")
 def send_channel_message(
     channel_id: UUID,

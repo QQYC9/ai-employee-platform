@@ -113,6 +113,11 @@ class TestSecretsEncryptionServiceHardening:
 # ==============================================================================
 
 class TestChannelConfigSecretPreservation:
+    @pytest.fixture(autouse=True)
+    def mock_telegram_webhook(self, monkeypatch):
+        from packages.connectors.telegram import TelegramConnector
+        monkeypatch.setattr(TelegramConnector, "set_webhook", lambda self, *args, **kwargs: (True, "Webhook registered"))
+
     def test_update_channel_preserves_masked_secrets(self, db_session: Session, test_tenant: Tenant):
         service = ChannelService(db_session)
         real_token = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
@@ -173,6 +178,11 @@ class TestChannelConfigSecretPreservation:
 # ==============================================================================
 
 class TestTelegramCallbackQueryAndRouting:
+    @pytest.fixture(autouse=True)
+    def mock_telegram_webhook(self, monkeypatch):
+        from packages.connectors.telegram import TelegramConnector
+        monkeypatch.setattr(TelegramConnector, "set_webhook", lambda self, *args, **kwargs: (True, "Webhook registered"))
+
     def test_parse_inbound_callback_query(self):
         connector = TelegramConnector(
             tenant_id=uuid.uuid4(),

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # Secrets Encryption Key (AES-256-GCM)
     secrets_encryption_key: str = ""
 
+    # Webhook Base URL
+    webhook_base_url: str | None = None
+
     ai_planning_enabled: bool = False
 
     # Background Worker Settings
@@ -77,6 +80,17 @@ class Settings(BaseSettings):
         if self.environment.lower() in ("production", "prod", "staging"):
             return False
         return self.allow_dev_auth_header
+
+    @property
+    def effective_webhook_base_url(self) -> str:
+        """
+        Returns the resolved public base URL for webhooks.
+        Reads WEBHOOK_BASE_URL env var or defaults to active public tunnel.
+        """
+        clean_url = (self.webhook_base_url or "").strip().rstrip("/")
+        if clean_url:
+            return clean_url
+        return "https://nov-marie-passport-pet.trycloudflare.com"
 
     @property
     def effective_tenant_dashboard_url(self) -> str:

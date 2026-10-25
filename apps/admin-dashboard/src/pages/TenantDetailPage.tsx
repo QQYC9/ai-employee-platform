@@ -81,6 +81,7 @@ export const TenantDetailPage: React.FC = () => {
   const [channels, setChannels] = useState<TenantChannelItem[]>([]);
   const [updatingChannelId, setUpdatingChannelId] = useState<string | null>(null);
   const [testingChannelId, setTestingChannelId] = useState<string | null>(null);
+  const [reregisteringChannelId, setReregisteringChannelId] = useState<string | null>(null);
   const [deletingChannelId, setDeletingChannelId] = useState<string | null>(null);
   const [isAddChannelOpen, setIsAddChannelOpen] = useState<boolean>(false);
   const [channelModalError, setChannelModalError] = useState<string | null>(null);
@@ -378,6 +379,27 @@ export const TenantDetailPage: React.FC = () => {
       setTabError(err?.message || 'تعذر استدعاء اختبار اتصال القناة');
     } finally {
       setTestingChannelId(null);
+    }
+  };
+
+  const handleReregisterTenantChannel = async (channelId: string) => {
+    if (!tenantId) return;
+    setReregisteringChannelId(channelId);
+    setTabError(null);
+    try {
+      const result = await adminApi.reregisterTenantChannelWebhook(tenantId, channelId);
+      const isSuccess = result.connected || result.success || result.status === 'connected';
+      if (isSuccess) {
+        setActionSuccess(`تمت إعادة تسجيل Webhook بنجاح واختبار الاتصال (زمن الاستجابة: ${result.latency_ms ?? 0}ms)`);
+      } else {
+        const errorMsg = result.error || result.error_message || result.error_type || result.status || 'فشل تسجيل Webhook لدى تيليجرام';
+        setTabError(`فشل إعادة تسجيل Webhook: ${errorMsg}`);
+      }
+      await loadTabData('channels');
+    } catch (err: any) {
+      setTabError(err?.message || 'تعذر استدعاء إعادة تسجيل Webhook');
+    } finally {
+      setReregisteringChannelId(null);
     }
   };
 
@@ -1220,25 +1242,49 @@ export const TenantDetailPage: React.FC = () => {
                         </div>
 
                         {/* Actions */}
-                        <div className="flex items-center justify-between pt-2 border-t border-slate-800/60">
-                          <button
-                            type="button"
-                            onClick={() => handleTestTenantChannel(ch.id)}
-                            disabled={testingChannelId === ch.id}
-                            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-950 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 transition flex items-center gap-1.5 disabled:opacity-50"
-                          >
-                            {testingChannelId === ch.id ? (
-                              <>
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                <span>جاري الاختبار...</span>
-                              </>
-                            ) : (
-                              <>
-                                <Zap className="w-3.5 h-3.5 text-emerald-400" />
-                                <span>اختبار الاتصال</span>
-                              </>
+                        <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 flex-wrap gap-2">
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleTestTenantChannel(ch.id)}
+                              disabled={testingChannelId === ch.id || reregisteringChannelId === ch.id}
+                              className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-950 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 transition flex items-center gap-1.5 disabled:opacity-50"
+                            >
+                              {testingChannelId === ch.id ? (
+                                <>
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  <span>جاري الاختبار...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>اختبار الاتصال</span>
+                                </>
+                              )}
+                            </button>
+
+                            {ch.channel_type === 'telegram' && (
+                              <button
+                                type="button"
+                                onClick={() => handleReregisterTenantChannel(ch.id)}
+                                disabled={testingChannelId === ch.id || reregisteringChannelId === ch.id}
+                                className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-blue-950 hover:bg-blue-900 border border-blue-800 text-blue-300 transition flex items-center gap-1.5 disabled:opacity-50"
+                                title="إعادة تسجيل الويب هوك لدى تيليجرام وتحديث الرابط العام"
+                              >
+                                {reregisteringChannelId === ch.id ? (
+                                  <>
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    <span>جاري التسجيل...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Webhook className="w-3.5 h-3.5 text-blue-400" />
+                                    <span>إعادة تسجيل Webhook</span>
+                                  </>
+                                )}
+                              </button>
                             )}
-                          </button>
+                          </div>
 
                           <div className="flex items-center gap-2">
                             <button

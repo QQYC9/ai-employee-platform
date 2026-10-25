@@ -1268,6 +1268,41 @@ def test_tenant_channel_admin(
         raise HTTPException(status_code=400, detail=detail_msg)
 
 
+@router.post("/platform/tenants/{tenant_id}/channels/{channel_id}/re-register-webhook", status_code=status.HTTP_200_OK)
+def reregister_tenant_channel_webhook_admin(
+    tenant_id: UUID,
+    channel_id: UUID,
+    current_user: User = Depends(require_platform_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Re-registers external webhook (e.g. Telegram) for a tenant channel and verifies connectivity.
+    """
+    target_tenant_id = resolve_target_tenant_id(current_user, tenant_id)
+    tenant = db.scalar(select(Tenant).where(Tenant.id == target_tenant_id))
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    service = ChannelService(db)
+    channel = service.get_channel(tenant_id=target_tenant_id, channel_id=channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail=f"Channel '{channel_id}' not found for tenant '{target_tenant_id}'")
+
+    try:
+        result = service.re_register_telegram_webhook(tenant_id=target_tenant_id, channel_id=channel_id)
+        db.commit()
+        return result.to_dict()
+    except ValueError as exc:
+        db.rollback()
+        detail_msg = str(exc)
+        if "not found" in detail_msg.lower():
+            raise HTTPException(status_code=404, detail=detail_msg)
+        raise HTTPException(status_code=400, detail=detail_msg)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.delete("/platform/tenants/{tenant_id}/channels/{channel_id}", status_code=status.HTTP_200_OK)
 def delete_tenant_channel_admin(
     tenant_id: UUID,

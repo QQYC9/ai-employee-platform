@@ -58,4 +58,16 @@ export const channelsApi = {
       method: 'POST',
     });
   },
+
+  async reregisterWebhook(channelId: string): Promise<{
+    connected: boolean;
+    status: string;
+    latency_ms: number;
+    error?: string | null;
+    details?: Record<string, any>;
+  }> {
+    return apiClient(`/api/v1/channels/${channelId}/re-register-webhook`, {
+      method: 'POST',
+    });
+  },
 };

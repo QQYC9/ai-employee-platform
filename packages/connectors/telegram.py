@@ -243,9 +243,81 @@ class TelegramConnector(BaseConnector):
             if should_close:
                 client.close()
 
-    def test_connection(self) -> ConnectionTestResult:
+    def set_webhook(
+        self,
+        webhook_url: str,
+        secret_token: str | None = None,
+        drop_pending_updates: bool = False,
+    ) -> tuple[bool, str | None]:
         """
-        Tests Bot API credentials via getMe.
+        Registers a webhook endpoint with Telegram Bot API via setWebhook.
+        Returns: (success: bool, description_or_error: str | None)
+        """
+        clean_url = str(webhook_url).strip()
+        if not clean_url:
+            return False, "Webhook URL cannot be empty"
+        if not (clean_url.startswith("https://") or clean_url.startswith("http://")):
+            return False, "Webhook URL must start with https:// (or http:// in dev)"
+
+        url = f"{self.BASE_URL}/bot{self.bot_token}/setWebhook"
+        payload: dict[str, Any] = {
+            "url": clean_url,
+            "drop_pending_updates": drop_pending_updates,
+        }
+        effective_secret = (secret_token or self.secret_token or "").strip()
+        if effective_secret:
+            payload["secret_token"] = effective_secret
+
+        client = self._client or httpx.Client(timeout=15.0)
+        should_close = self._client is None
+        try:
+            resp = client.post(url, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("ok"):
+                    return True, data.get("description", "Webhook registered successfully")
+                return False, data.get("description", "Failed to register webhook")
+
+            err_msg = resp.text
+            try:
+                err_msg = resp.json().get("description", err_msg)
+            except Exception:
+                pass
+            return False, f"Telegram API error ({resp.status_code}): {err_msg}"
+        except Exception as exc:
+            return False, f"Connection error: {str(exc)}"
+        finally:
+            if should_close:
+                client.close()
+
+    def get_webhook_info(self) -> dict[str, Any]:
+        """
+        Queries current webhook status from Telegram Bot API via getWebhookInfo.
+        """
+        url = f"{self.BASE_URL}/bot{self.bot_token}/getWebhookInfo"
+        client = self._client or httpx.Client(timeout=10.0)
+        should_close = self._client is None
+        try:
+            resp = client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("result", {})
+            err_msg = resp.text
+            try:
+                err_msg = resp.json().get("description", err_msg)
+            except Exception:
+                pass
+            return {"error": f"Telegram API error ({resp.status_code}): {err_msg}"}
+        except Exception as exc:
+            return {"error": str(exc)}
+        finally:
+            if should_close:
+                client.close()
+
+    def test_connection(self, expected_webhook_url: str | None = None) -> ConnectionTestResult:
+        """
+        Tests Bot API credentials via getMe AND verifies webhook registration via getWebhookInfo.
+        Shows specifically which of the two failed.
         """
         url = f"{self.BASE_URL}/bot{self.bot_token}/getMe"
         client = self._client or httpx.Client(timeout=10.0)
@@ -253,36 +325,84 @@ class TelegramConnector(BaseConnector):
         start_time = time.perf_counter()
 
         try:
+            # 1. Probe credentials via getMe
             resp = client.get(url)
             duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
 
-            if resp.status_code == 200:
-                data = resp.json()
-                bot_info = data.get("result", {})
+            if resp.status_code != 200:
+                err_msg = resp.text
+                try:
+                    err_msg = resp.json().get("description", err_msg)
+                except Exception:
+                    pass
                 return ConnectionTestResult(
-                    connected=True,
-                    status="connected",
+                    connected=False,
+                    status="failed",
                     latency_ms=duration_ms,
+                    error=f"Token verification failed (getMe error {resp.status_code}): {err_msg}",
                     details={
-                        "bot_id": bot_info.get("id"),
-                        "username": bot_info.get("username"),
-                        "first_name": bot_info.get("first_name"),
-                        "can_join_groups": bot_info.get("can_join_groups"),
+                        "token_verified": False,
+                        "webhook_verified": False,
+                        "failure_stage": "token_verification",
                     },
                 )
 
-            err_msg = resp.text
-            try:
-                err_json = resp.json()
-                err_msg = err_json.get("description", err_msg)
-            except Exception:
-                pass
+            bot_info = resp.json().get("result", {})
 
+            # 2. Probe webhook registration via getWebhookInfo
+            wh_url = f"{self.BASE_URL}/bot{self.bot_token}/getWebhookInfo"
+            wh_resp = client.get(wh_url)
+            wh_info = wh_resp.json().get("result", {}) if wh_resp.status_code == 200 else {}
+            current_wh_url = wh_info.get("url", "")
+            pending_updates = wh_info.get("pending_update_count", 0)
+            last_error = wh_info.get("last_error_message")
+
+            webhook_details = {
+                "bot_id": bot_info.get("id"),
+                "username": bot_info.get("username"),
+                "first_name": bot_info.get("first_name"),
+                "can_join_groups": bot_info.get("can_join_groups"),
+                "token_verified": True,
+                "webhook_verified": False,
+                "current_webhook_url": current_wh_url,
+                "expected_webhook_url": expected_webhook_url,
+                "pending_update_count": pending_updates,
+                "last_error_message": last_error,
+            }
+
+            if not current_wh_url:
+                return ConnectionTestResult(
+                    connected=False,
+                    status="failed",
+                    latency_ms=duration_ms,
+                    error="Webhook verification failed: No webhook registered at Telegram (URL is empty). Click 'Re-register webhook'.",
+                    details={**webhook_details, "failure_stage": "webhook_verification"},
+                )
+
+            if expected_webhook_url and current_wh_url.strip() != expected_webhook_url.strip():
+                return ConnectionTestResult(
+                    connected=False,
+                    status="failed",
+                    latency_ms=duration_ms,
+                    error=f"Webhook verification failed: Telegram URL ('{current_wh_url}') does not match expected URL ('{expected_webhook_url}'). Click 'Re-register webhook'.",
+                    details={**webhook_details, "failure_stage": "webhook_verification"},
+                )
+
+            if last_error:
+                return ConnectionTestResult(
+                    connected=False,
+                    status="failed",
+                    latency_ms=duration_ms,
+                    error=f"Webhook verification failed: Telegram reports webhook error: {last_error}",
+                    details={**webhook_details, "failure_stage": "webhook_verification"},
+                )
+
+            webhook_details["webhook_verified"] = True
             return ConnectionTestResult(
-                connected=False,
-                status="failed",
+                connected=True,
+                status="connected",
                 latency_ms=duration_ms,
-                error=f"Telegram Bot API ({resp.status_code}): {err_msg}",
+                details=webhook_details,
             )
         except Exception as exc:
             duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
@@ -291,6 +411,7 @@ class TelegramConnector(BaseConnector):
                 status="failed",
                 latency_ms=duration_ms,
                 error=f"Connection test error: {str(exc)}",
+                details={"token_verified": False, "webhook_verified": False, "failure_stage": "network_error"},
             )
         finally:
             if should_close:

@@ -34,6 +34,7 @@ export const ChannelsPage: React.FC = () => {
 
   // Testing channel connectivity
   const [testingChannelId, setTestingChannelId] = useState<string | null>(null);
+  const [reregisteringChannelId, setReregisteringChannelId] = useState<string | null>(null);
 
   // Connect Channel Modal
   const [isConnectOpen, setIsConnectOpen] = useState(false);
@@ -225,6 +226,25 @@ export const ChannelsPage: React.FC = () => {
     }
   };
 
+  const handleReregisterWebhook = async (channelId: string) => {
+    setReregisteringChannelId(channelId);
+    setError(null);
+    try {
+      const res = await channelsApi.reregisterWebhook(channelId);
+      const isSuccess = res.connected || res.status === 'connected';
+      if (isSuccess) {
+        setActionSuccess(`تمت إعادة تسجيل Webhook بنجاح واختبار الاتصال (زمن الاستجابة: ${res.latency_ms ?? 0}ms)`);
+      } else {
+        setError(`فشل تسجيل Webhook: ${res.error || res.status || 'تعذر تسجيل Webhook لدى تيليجرام'}`);
+      }
+      await loadChannels();
+    } catch (err: any) {
+      setError(err?.message || 'تعذر إعادة تسجيل Webhook');
+    } finally {
+      setReregisteringChannelId(null);
+    }
+  };
+
   const handleDelete = async () => {
     if (!deletingChannel) return;
     setDeleteLoading(true);
@@ -365,6 +385,7 @@ export const ChannelsPage: React.FC = () => {
           {channels.map((channel) => {
             const isActive = channel.status === 'active';
             const isTesting = testingChannelId === channel.id;
+            const isReregistering = reregisteringChannelId === channel.id;
 
             return (
               <div
@@ -512,25 +533,49 @@ export const ChannelsPage: React.FC = () => {
                 </div>
 
                 {/* Bottom Actions */}
-                <div className="pt-4 mt-4 border-t border-slate-800 flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={() => handleTestChannel(channel.id)}
-                    disabled={isTesting}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/40 border border-emerald-900/40 transition disabled:opacity-50"
-                  >
-                    {isTesting ? (
-                      <>
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        <span>جاري الفحص...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Zap className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>اختبار الاتصال</span>
-                      </>
+                <div className="pt-4 mt-4 border-t border-slate-800 flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleTestChannel(channel.id)}
+                      disabled={isTesting || isReregistering}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/40 border border-emerald-900/40 transition disabled:opacity-50"
+                    >
+                      {isTesting ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>جاري الفحص...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>اختبار الاتصال</span>
+                        </>
+                      )}
+                    </button>
+
+                    {channel.channel_type === 'telegram' && (
+                      <button
+                        type="button"
+                        onClick={() => handleReregisterWebhook(channel.id)}
+                        disabled={isTesting || isReregistering}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-blue-400 hover:text-blue-300 hover:bg-blue-950/40 border border-blue-900/40 transition disabled:opacity-50"
+                        title="إعادة تسجيل الويب هوك لدى تيليجرام وتحديث الرابط العام"
+                      >
+                        {isReregistering ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>جاري التسجيل...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Webhook className="w-3.5 h-3.5 text-blue-400" />
+                            <span>إعادة تسجيل Webhook</span>
+                          </>
+                        )}
+                      </button>
                     )}
-                  </button>
+                  </div>
 
                   <button
                     onClick={() => setDeletingChannel(channel)}
