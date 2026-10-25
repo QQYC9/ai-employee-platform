@@ -134,6 +134,12 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - Enforced strict Arabic language: Guardrail Rule 11 blocks stray Latin words (e.g. `"Customer Replay"`, `"Support"`) unless verified as Latin product/brand names in confirmed facts (e.g. `"Ciro Networks"`). Sanitized prompt injection to omit Latin placeholder names.
   - Verified with 16 comprehensive tests in `tests/test_customer_path_confirmed_facts.py` (16/16 passed) and full regression suite (44 passing tests).
 
+- **2.12 Cleanups: Simple Catalog Listing & Identity Knowledge Suppression**:
+  - **Status**: done
+  - Catalog listing cleanup: when a product has no stored description, the catalog reply shows only its name (eliminating repeated name as description). Enforced simple Arabic list formatting, prohibiting Markdown tables.
+  - Knowledge snippet suppression: suppressed injection of knowledge snippets starting with "اسم المنشأة" into customer and owner prompts when a confirmed `company.identity` fact exists. Preserved all database rows intact.
+  - Verified with 4 comprehensive tests in `tests/test_part0_cleanups.py` (4/4 passed).
+
 ---
 
 ## Phase 3: Adaptive Owner Onboarding Interview

@@ -648,8 +648,12 @@ class ConversationalAgentEngine:
             msg_meta["handoff"] = True
             msg_meta["handoff_question"] = message.content or ""
 
-            # Safe fallback: If unsupported embellishment of products, build safe reply from stored facts only
-            if violation_reason and "Unsupported capability/benefit embellishment" in violation_reason:
+            # Safe fallback: If unsupported embellishment, markdown table, or repeated name in products, build safe reply from stored facts only
+            if violation_reason and (
+                "Unsupported capability/benefit embellishment" in violation_reason
+                or "Markdown table" in violation_reason
+                or "repeated as description" in violation_reason
+            ):
                 comp_name = agent_context.business.get("identity", {}).get("name") if agent_context.business else "منشأتنا"
                 reply_text = self._build_safe_products_reply(tenant_id=tenant_id, company_name=comp_name)
             else:
@@ -1971,8 +1975,13 @@ class ConversationalAgentEngine:
 
             # Precedence: Confirmed identity facts win over business_brain
             confirmed_owner_company_name = None
+            has_confirmed_owner_identity = False
             for f in owner_facts:
-                if f.topic in ("company.identity", "company.name") or f.subject in ("اسم الشركة", "الاسم التجاري", "اسم المنشأة", "اسم المتجر", "هوية المنشأة"):
+                if (
+                    f.topic in ("company.identity", "company.name")
+                    or f.subject in ("اسم الشركة", "الاسم التجاري", "اسم المنشأة", "اسم المتجر", "هوية المنشأة")
+                ) and getattr(f, "status", "confirmed") == "confirmed":
+                    has_confirmed_owner_identity = True
                     if isinstance(f.value, dict):
                         confirmed_owner_company_name = f.value.get("name") or f.value.get("identity")
                     elif isinstance(f.value, str):
@@ -2011,11 +2020,15 @@ class ConversationalAgentEngine:
                         s_title = "Operations, Branches, Locations & Hours"
                     biz_sections.append(f"{s_title}: {json.dumps(val, ensure_ascii=False)}")
 
-            k_snippets = [
-                f"- [{k.get('title', 'Knowledge')}]: {k.get('content', '')}"
-                for k in owner_context.knowledge
-                if not k.get("is_conflict")
-            ]
+            k_snippets = []
+            for k in owner_context.knowledge:
+                if k.get("is_conflict"):
+                    continue
+                k_title = (k.get("title") or "").strip()
+                # Do not inject knowledge snippets whose title starts with "اسم المنشأة" when a confirmed company.identity fact exists
+                if has_confirmed_owner_identity and k_title.startswith("اسم المنشأة"):
+                    continue
+                k_snippets.append(f"- [{k_title or 'Knowledge'}]: {k.get('content', '')}")
 
             system_inst = (
                 f"أنت الموظف الرقمي الذكي والمساعد الإداري لمالك منشأة '{company_name}'.\n"
@@ -3460,6 +3473,27 @@ class ConversationalAgentEngine:
                 if clean_emb.lower() not in corpus_text:
                     return False, f"Unsupported capability/benefit embellishment detected in product reply: '{clean_emb}'"
 
+        # 13. Catalog Presentation check (Markdown table or repeated name as description)
+        # Check if reply uses a Markdown table when presenting products/catalog
+        has_table = bool(
+            re.search(r"\|[^\n]+\|[^\n]+\|", reply_text)
+            and any(w in reply_text for w in ("منتج", "قائمة", "سعر", "كتالوج", "الأنظمة", "الخدمات"))
+        )
+        if has_table:
+            return False, "Markdown table detected in product reply; simple Arabic list required."
+
+        # Check for repeated product name as description (e.g. "الموظف الذكي: الموظف الذكي" or "ناظم - ناظم")
+        for line in reply_text.splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+            m_rep = re.match(r"^\s*(?:\d+[.-]|\*|-)?\s*([^:—\-]+?)\s*[:—\-]\s*(.+)$", line_str)
+            if m_rep:
+                item_name = m_rep.group(1).strip()
+                item_desc = m_rep.group(2).strip()
+                if item_name and item_desc and (item_name == item_desc or item_desc in (f"برنامج {item_name}", f"منتج {item_name}")):
+                    return False, f"Product name '{item_name}' repeated as description in catalog reply; simple Arabic list required."
+
         return True, None
 
     def _build_safe_products_reply(self, tenant_id: UUID, company_name: str | None = None) -> str:
@@ -3467,6 +3501,8 @@ class ConversationalAgentEngine:
         Builds a safe, deterministic product catalog reply derived exclusively
         from confirmed facts, strictly using verbatim names and descriptions without embellishment.
         Enforces precedence of confirmed facts over business_brain.
+        When a product has no stored description, shows only its name (no repeated name).
+        Uses a simple Arabic list instead of a table.
         """
         try:
             from packages.services.fact_service import FactService
@@ -3505,8 +3541,13 @@ class ConversationalAgentEngine:
             elif isinstance(f.value, str) and f.value.strip() != name:
                 desc = f.value.strip()
 
-            # Clean fabricated descriptions like "برنامج للموظف الذكي"
-            if desc in ("برنامج للموظف الذكي", "برنامج الموظف الذكي", name):
+            # Clean fabricated descriptions, repeated name as description, or name-repeating variations
+            if (
+                not desc
+                or desc == name
+                or desc.strip().lower() == name.strip().lower()
+                or desc in ("برنامج للموظف الذكي", "برنامج الموظف الذكي", f"برنامج {name}", f"منتج {name}")
+            ):
                 desc = ""
 
             if desc:
@@ -3552,8 +3593,13 @@ class ConversationalAgentEngine:
 
         # 1. Identity Precedence: Confirmed identity fact wins over business_brain
         confirmed_company_name = None
+        has_confirmed_identity = False
         for f in confirmed_facts:
-            if f.topic in ("company.identity", "company.name") or f.subject in ("اسم الشركة", "الاسم التجاري", "اسم المنشأة", "اسم المتجر", "هوية المنشأة"):
+            if (
+                f.topic in ("company.identity", "company.name")
+                or f.subject in ("اسم الشركة", "الاسم التجاري", "اسم المنشأة", "اسم المتجر", "هوية المنشأة")
+            ) and getattr(f, "status", "confirmed") == "confirmed":
+                has_confirmed_identity = True
                 if isinstance(f.value, dict):
                     confirmed_company_name = f.value.get("name") or f.value.get("identity")
                 elif isinstance(f.value, str):
@@ -3608,7 +3654,7 @@ class ConversationalAgentEngine:
             "8. NO FALSE PROMISES OR FORWARDING CLAIMS (CRITICAL): While the owner inquiry loop does not exist yet, you must NEVER say, imply, or promise that you have forwarded or will forward the request to a team (NEVER say 'سأنقل طلبك', 'سأقوم بتحويل طلبك', 'سيتواصل معك فريق', 'سيرد عليك أحد', or 'سنعود إليك بأسرع وقت'). If any requested information is missing from the verified facts, state that it is not recorded yet and use ONLY the single approved handoff sentence: 'هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك.' and nothing else.\n"
             "9. DO NOT OFFER UNRECORDED TOPICS: The reply must NEVER suggest or invite questions on unrecorded topics or features (such as 'مميزات البرنامج', 'المتطلبات التقنية', 'الخصائص التقنية', 'طرق الترخيص', 'طريقة الاستخدام', or 'الدعم الفني'). The only allowed follow-up invitation is asking the customer which of the stored products, services, or cities they are interested in.\n"
             "10. STRICT ARABIC LANGUAGE REQUIREMENT: Your entire reply must be in Arabic with zero stray English words or Latin letters (do not use English customer names like 'Customer Replay', English headings, or English phrases). Only officially verified product names that are registered in Latin characters in the verified context are permitted.\n"
-            "11. STRICT PRODUCT VERBATIM POLICY (NO EMBELLISHMENT): When listing, naming, or describing any product or service, you must describe each product ONLY using its exact stored fact text verbatim. You must NOT add, infer, or embellish any features, benefits, capabilities, or use-cases (for example, NEVER add 'أدوات ذكية', 'إدارة المهام اليومية', 'مراقبة الأداء', 'إدارة الأجهزة', 'الفواتير والتقارير المالية', 'زيادة الإنتاجية', or any other unrecorded descriptions). If a product has no description in the stored facts, state ONLY its name verbatim and add no description whatsoever."
+            "11. STRICT PRODUCT VERBATIM POLICY (NO EMBELLISHMENT): When listing, naming, or describing any product or service, you must describe each product ONLY using its exact stored fact text verbatim. You must NOT add, infer, or embellish any features, benefits, capabilities, or use-cases (for example, NEVER add 'أدوات ذكية', 'إدارة المهام اليومية', 'مراقبة الأداء', 'إدارة الأجهزة', 'الفواتير والتقارير المالية', 'زيادة الإنتاجية', or any other unrecorded descriptions). If a product has no description in the stored facts, state ONLY its name verbatim and add no description whatsoever (do not repeat its name as a description). Always format product listings and catalogs as a simple Arabic list (numbered or bulleted) instead of a Markdown table (|---|)."
         )
 
         # Assemble business facts - injecting all populated sections including operations, branches, hours (Item 0.3)
@@ -3627,11 +3673,15 @@ class ConversationalAgentEngine:
                 business_sections.append(f"{sec.replace('_', ' ').title()}: {json.dumps(val, ensure_ascii=False)}")
 
         # Assemble knowledge snippets
-        knowledge_snippets = [
-            f"- [{k.get('title', 'Knowledge')}]: {k.get('content', '')}"
-            for k in agent_context.knowledge
-            if not k.get("is_conflict")
-        ]
+        knowledge_snippets = []
+        for k in agent_context.knowledge:
+            if k.get("is_conflict"):
+                continue
+            k_title = (k.get("title") or "").strip()
+            # Do not inject knowledge snippets whose title starts with "اسم المنشأة" when a confirmed company.identity fact exists
+            if has_confirmed_identity and k_title.startswith("اسم المنشأة"):
+                continue
+            knowledge_snippets.append(f"- [{k_title or 'Knowledge'}]: {k.get('content', '')}")
 
         # Assemble customer memories
         customer_memories = [

@@ -192,3 +192,18 @@ This log records major design and implementation choices, including rationale an
        - `replace`: if replacement removes active cities ("نخدم صنعاء فقط" removes 5 cities), flags for owner confirmation before superseding existing coverage.
   6. **Customer Path Isolation**:
      - Verified end-to-end that customer query prompt assembly and reply generation use only `status == 'confirmed'` and `visibility == 'public'` facts; conflict, private, and pending facts are strictly excluded.
+
+
+---
+
+## Decision 2.4: Cleanups: Catalog List Presentation & Identity Knowledge Suppression
+- **Context**:
+  1. In catalog replies where a product lacks an explicit description, repetitions (e.g. "الموظف الذكي: الموظف الذكي") or Markdown table syntax (`|---|`) occurred, violating plain conversational Arabic norms.
+  2. Stale knowledge snippets starting with "اسم المنشأة" could be injected into prompts alongside confirmed `company.identity` facts, introducing ambiguity or contradictions.
+- **Decision**:
+  1. **Safe Catalog List Presentation**:
+     - When building product catalog replies, products lacking a stored description show only their name. Repeated names as descriptions are stripped.
+     - Enforced simple Arabic list formatting (numbered/bulleted list) and added post-generation guardrail rule intercepting Markdown tables in catalog replies.
+  2. **Knowledge Snippet Suppression for Company Identity**:
+     - In both customer (`_construct_prompt`) and owner (`_process_owner_message`) prompt builders, suppressed injection of knowledge snippets whose title starts with "اسم المنشأة" if a confirmed `company.identity` fact exists.
+     - All database rows in the `knowledge` table remain preserved and untouched.
