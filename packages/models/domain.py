@@ -2212,6 +2212,7 @@ class InterviewTopic(Base):
         nullable=True,
     )
     group_name: Mapped[str | None] = mapped_column(String(100), nullable=True, default="universal", server_default="universal")
+    decided_by: Mapped[str | None] = mapped_column(String(50), nullable=True)  # model, fallback
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2254,6 +2255,42 @@ class InterviewState(Base):
     last_interaction_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+class TenantLinkCode(Base):
+    """
+    Cryptographically secure, single-use, expiring link code connecting
+    a chat sender as the verified owner of a tenant channel.
+    Stored hashed with rate-limiting and comprehensive audit trail.
+    """
+
+    __tablename__ = "tenant_link_codes"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    code_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    code_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    is_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    used_by_sender_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attempts_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default=text("5"))
+    is_revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

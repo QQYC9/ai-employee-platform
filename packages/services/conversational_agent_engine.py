@@ -386,6 +386,23 @@ class ConversationalAgentEngine:
         # -----------------------------------------------------------------
         # CUSTOMER SERVICE MODE
         # -----------------------------------------------------------------
+        # Addendum X1: Neutral reply on link code failure
+        link_code_failure = msg_meta.get("link_code_failure")
+        if link_code_failure:
+            if link_code_failure == "rate_limited":
+                neutral_reply = "تم تجاوز الحد المسموح من المحاولات لرمز الربط. يرجى إنشاء رمز جديد من لوحة التحكم."
+            else:
+                neutral_reply = "تعذر إتمام عملية الربط. رمز الربط غير صحيح أو منتهي الصلاحية."
+            logger.info(
+                "Neutral response sent for link_code_failure=%s (tenant_id=%s, message_id=%s)",
+                link_code_failure,
+                tenant_id,
+                message_id,
+            )
+            return self._persist_and_return_reply(
+                tenant_id, conversation_id, message.id, neutral_reply, msg_meta, is_owner=False
+            )
+
         # Phase 3: Coverage and Go-Live Gate for customer messages
         try:
             from packages.services.interview_service import InterviewService

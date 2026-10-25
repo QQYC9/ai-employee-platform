@@ -21,6 +21,7 @@ from packages.core.crypto import SecretsEncryptionService
 from packages.models.domain import Channel, Conversation, Customer, Message, OutboxEvent, User
 from packages.services.audit_service import AuditService
 from packages.services.idempotency_service import IdempotencyService
+from packages.services.link_code_service import LinkCodeService
 from packages.services.outbox_service import OutboxService
 
 logger = logging.getLogger(__name__)
@@ -409,30 +410,44 @@ class ChannelService:
         channel = self.get_channel(tenant_id, channel_id)
         is_owner = self.is_owner_sender(channel, inbound.sender_id)
 
-        # Connection Code Link Flow (Phase 3 Entry Point A)
+        # Connection Code Link Flow (Phase 3.2 / Addendum X1: Secure Single-Use Link Code)
         just_linked_via_code = False
-        if not is_owner and channel and channel.config:
-            content_clean = (inbound.content or "").strip()
-            expected_code = channel.config.get("connection_code")
-            code_match = re.search(r"(?:/link|كود\s*الربط\s*:?|رمز\s*الربط\s*:?|link\s*:?)\s*([A-Za-z0-9_-]+)", content_clean, re.IGNORECASE)
-            extracted_code = code_match.group(1).strip() if code_match else content_clean
-
-            if expected_code and extracted_code.upper() == str(expected_code).strip().upper():
-                channel_cfg = dict(channel.config)
-                raw_owners = channel_cfg.get("owner_identifiers") or []
-                if isinstance(raw_owners, list):
-                    raw_owners.append(inbound.sender_id)
+        link_code_failure_reason: str | None = None
+        if not is_owner and channel:
+            candidate_code = LinkCodeService.extract_candidate_code(inbound.content)
+            if candidate_code:
+                link_svc = LinkCodeService(self.db)
+                success, reason, link_record = link_svc.verify_and_consume_code(
+                    tenant_id=tenant_id,
+                    channel_id=channel_id,
+                    sender_id=inbound.sender_id,
+                    candidate_code=candidate_code,
+                )
+                if success:
+                    channel_cfg = dict(channel.config or {})
+                    raw_owners = channel_cfg.get("owner_identifiers") or []
+                    if isinstance(raw_owners, list):
+                        raw_owners.append(inbound.sender_id)
+                    else:
+                        raw_owners = [str(raw_owners), inbound.sender_id]
+                    clean_owners = list(dict.fromkeys(raw_owners))
+                    channel_cfg["owner_identifiers"] = clean_owners
+                    channel_cfg["owner_sender_ids"] = clean_owners
+                    channel.config = channel_cfg
+                    flag_modified(channel, "config")
+                    self.db.add(channel)
+                    self.db.flush()
+                    is_owner = True
+                    just_linked_via_code = True
                 else:
-                    raw_owners = [str(raw_owners), inbound.sender_id]
-                clean_owners = list(dict.fromkeys(raw_owners))
-                channel_cfg["owner_identifiers"] = clean_owners
-                channel_cfg["owner_sender_ids"] = clean_owners
-                channel.config = channel_cfg
-                flag_modified(channel, "config")
-                self.db.add(channel)
-                self.db.flush()
-                is_owner = True
-                just_linked_via_code = True
+                    link_code_failure_reason = reason
+                    logger.warning(
+                        "Link code verification failed for tenant_id=%s, channel_id=%s, sender_id=%s: reason=%s",
+                        tenant_id,
+                        channel_id,
+                        inbound.sender_id,
+                        reason,
+                    )
 
         owner_user = self.resolve_owner_user(tenant_id) if is_owner else None
 
@@ -615,6 +630,7 @@ class ChannelService:
                     "sender_id": inbound.sender_id,
                     "recipient_id": inbound.recipient_id,
                     "raw_payload": inbound.raw_payload,
+                    "link_code_failure": link_code_failure_reason,
                 },
             )
             self.db.add(message)

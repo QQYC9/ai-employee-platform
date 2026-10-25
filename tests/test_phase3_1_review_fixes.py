@@ -35,6 +35,7 @@ from packages.models.domain import (
 )
 from packages.models.tenant import Tenant
 from packages.services.channel_service import ChannelService
+from packages.services.link_code_service import LinkCodeService
 from packages.services.conversational_agent_engine import ConversationalAgentEngine
 from packages.services.fact_service import FactService
 from packages.services.interview_service import InterviewService
@@ -458,15 +459,17 @@ def test_connection_code_link_starts_interview(db: Session):
     An owner sending '/link <connection_code>' links them as channel owner
     and starts the adaptive interview immediately.
     """
-    conn_code = "SECRET-LINK-789"
     setup = _create_tenant_and_channel(
         db,
         name="منشأة الريادة",
-        connection_code=conn_code,
         owner_sender_id="967770000001",
     )
     tenant_id = setup["tenant_id"]
     channel_id = setup["channel_id"]
+
+    link_svc = LinkCodeService(db)
+    raw_code, link_rec = link_svc.generate_link_code(tenant_id, channel_id)
+    db.commit()
 
     # New unlinked user sends link command
     new_owner_sender_id = "967779999999"
@@ -478,9 +481,9 @@ def test_connection_code_link_starts_interview(db: Session):
         external_message_id=f"msg_{uuid4().hex[:10]}",
         sender_id=new_owner_sender_id,
         sender_name="New Owner",
-        content=f"/link {conn_code}",
+        content=f"/link {raw_code}",
         content_type="text",
-        raw_payload={"text": f"/link {conn_code}", "from": {"id": new_owner_sender_id}},
+        raw_payload={"text": f"/link {raw_code}", "from": {"id": new_owner_sender_id}},
     )
     channel_svc = ChannelService(db)
     msg = channel_svc.process_inbound_message(inbound)

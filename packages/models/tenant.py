@@ -48,6 +48,11 @@ class Tenant(Base):
         server_default=text("80.0"),
     )
 
+    employee_name: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
