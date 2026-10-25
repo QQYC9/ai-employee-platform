@@ -160,26 +160,18 @@ def run_honey_shop_simulation(groq_provider):
         topic_table = []
         for t in topics:
             what_said = "-"
-            if t.slug == "honey_types":
-                what_said = "لدينا عسل سدر دوعني وعسل سمر وعسل مراعي طبيعي"
-            elif t.slug == "ordering_payment":
-                what_said = "الدفع عند الاستلام داخل صنعاء أو التحويل البنكي عبر الكريمي والنجم"
-            elif t.slug == "products_services_prices":
-                what_said = "عسل سدر دوعني بسعر 50000 ريال وعسل سمر بسعر 35000 ريال"
-            elif t.slug == "packaging_sizes":
-                what_said = "لا، نبيع فقط عبوة كيلو ونصف كيلو ولا نوفر أحجام أخرى"
-            elif t.slug in ("delivery_coverage", "delivery_zones_yemen", "between_governorates_yemen"):
-                what_said = "نوصل لجميع مناطق صنعاء ونشحن لباقي المحافظات اليمنية"
-            elif t.slug == "identity":
-                what_said = "متجر ومناحل البركة للعسل الطبيعي"
-            elif t.slug == "authenticity_guarantee":
-                what_said = "مفحوص مخبرياً"
+            if t.source_message_id:
+                src_msg = db.scalar(select(Message).where(Message.id == t.source_message_id))
+                if src_msg and src_msg.content:
+                    what_said = src_msg.content.strip()
 
             topic_table.append({
                 "slug": t.slug,
                 "label": t.label,
                 "status": t.status,
+                "coverage": f"{int((t.coverage or 0.0) * 100)}%",
                 "criticality": t.criticality,
+                "decided_by": getattr(t, "decided_by", None) or "model",
                 "what_owner_said": what_said,
             })
 
@@ -240,28 +232,18 @@ def run_software_company_simulation(groq_provider):
         topic_table = []
         for t in topics:
             what_said = "-"
-            if t.slug == "target_clients":
-                what_said = "أنظمتنا موجهة للمؤسسات والشركات المتوسطة والكبيرة"
-            elif t.slug == "software_licenses":
-                what_said = "نقدم تراخيص سنوية"
-            elif t.slug == "support_sla_policy":
-                what_said = "دعم فني مستمر طوال الأسبوع"
-            elif t.slug == "ordering_payment":
-                what_said = "الاشتراك سنوي بعقود رسمية والدفع عبر التحويل البنكي أو سداد إلكتروني"
-            elif t.slug == "products_services_prices":
-                what_said = "نظام الموظف الذكي السحابي، برنامج ناظم لإدارة الشركات، منصة الأفق للمتاجر"
-            elif t.slug == "service_coverage":
-                what_said = "سحابية بالكامل ونغطي اليمن وكافة دول الخليج العربي"
-            elif t.slug == "tone_and_manner":
-                what_said = "رسمية ومهنية وواضحة جداً"
-            elif t.slug == "identity":
-                what_said = "شركة المنذر للحلول البرمجية الذكية"
+            if t.source_message_id:
+                src_msg = db.scalar(select(Message).where(Message.id == t.source_message_id))
+                if src_msg and src_msg.content:
+                    what_said = src_msg.content.strip()
 
             topic_table.append({
                 "slug": t.slug,
                 "label": t.label,
                 "status": t.status,
+                "coverage": f"{int((t.coverage or 0.0) * 100)}%",
                 "criticality": t.criticality,
+                "decided_by": getattr(t, "decided_by", None) or "model",
                 "what_owner_said": what_said,
             })
 

@@ -13,7 +13,9 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from packages.ai_providers.base import AIProvider
+from packages.ai_providers.base import AIProvider, AIRateLimitError
+import time
+from packages.services.fact_service import ExtractedFactItem, FactService
 from packages.models.domain import Fact, InterviewState, InterviewTopic
 from packages.models.tenant import Tenant
 from packages.services.audit_service import AuditService
@@ -51,14 +53,19 @@ class TopicCoverageItem(BaseModel):
 
     slug: str
     status: Literal["covered", "partial", "not_covered", "skipped", "not_applicable"]
+    coverage: float = 1.0
     extracted_details: str | None = None
+    missing_details: str | None = None
 
 
 class ReplyCoverageEvaluation(BaseModel):
-    """Structured response from the LLM evaluating owner message coverage."""
+    """Structured response from the LLM evaluating owner message coverage and extracted facts."""
 
     evaluations: list[TopicCoverageItem] = Field(default_factory=list)
+    extracted_facts: list[ExtractedFactItem] = Field(default_factory=list)
     acknowledged_summary: str | None = None
+    missing_details_prompt: str | None = None
+    decided_by: str = "model" 
 
 
 # ---------------------------------------------------------------------------
@@ -717,6 +724,8 @@ class InterviewService:
         """
         Evaluates owner reply content against open topics via strict model call
         with deterministic semantic fallback.
+        Merges coverage evaluation and fact extraction into a single call.
+        Includes exponential backoff retry loop on AIRateLimitError.
         """
         content_clean = (content or "").strip()
         c_lower = content_clean.lower()
@@ -726,38 +735,69 @@ class InterviewService:
         is_na = bool(self.is_skip_or_na(content_clean) == "not_applicable")
         is_negative = not is_skip and bool(re.search(r"^\s*(?:لا(?!\s*(?:أعلم|اعلم|أعرف|اعرف|أدري|ادري))\b|لا\s*نوفر|غير\s*متاح|ما\s*في|ليس\s*لدينا|ما\s*عندنا|لا\s*يوجد)\b", content_clean))
 
+        # Cap open topics to at most 10 (ensuring current topic is included first)
+        ordered_topics = []
+        if current_topic_slug:
+            ordered_topics.extend([t for t in open_topics if t.slug == current_topic_slug])
+            ordered_topics.extend([t for t in open_topics if t.slug != current_topic_slug])
+        else:
+            ordered_topics = list(open_topics)
+        capped_open_topics = ordered_topics[:10]
+
         # 1. Attempt Live AI Provider evaluation if available and not a simple negative/skip
         if ai_provider is not None and not (is_negative or is_skip or is_na):
-            try:
-                system_instruction = (
-                    "You are the Adaptive Onboarding Topic Evaluation Engine.\n"
-                    "Analyze the owner's message and determine coverage status for each open interview topic.\n"
-                    "Status options: 'covered', 'partial', 'not_covered', 'skipped', 'not_applicable'.\n"
-                    "CRITICAL RULES:\n"
-                    "1. Answering one topic does NOT cover another (e.g. stating honey types does NOT cover payment methods; stating target clients does NOT cover payment methods).\n"
-                    "2. If the currently asked topic was NOT directly addressed by the owner, its status MUST be 'not_covered'.\n"
-                    "3. Extract exact verbatim details into extracted_details."
-                )
-                topics_payload = [
-                    {"slug": t.slug, "label": t.label, "question": t.question}
-                    for t in open_topics
-                ]
-                user_prompt = (
-                    f"Owner Message Content:\n\"\"\"{content_clean}\"\"\"\n\n"
-                    f"Currently Asked Topic Slug: {current_topic_slug or 'none'}\n\n"
-                    f"Open Topics:\n{json.dumps(topics_payload, ensure_ascii=False, indent=2)}"
-                )
-                res = ai_provider.generate_json(
-                    user_prompt,
-                    schema=ReplyCoverageEvaluation,
-                    system_instruction=system_instruction,
-                )
-                if isinstance(res, dict) and "evaluations" in res:
-                    parsed = ReplyCoverageEvaluation.model_validate(res)
-                    if parsed.evaluations:
-                        return parsed
-            except Exception as exc:
-                logger.warning("AI model coverage evaluation failed for tenant %s: %s; using semantic evaluator", tenant_id, exc)
+            max_retries = 3
+            backoff_sec = 1.0
+            for attempt in range(max_retries):
+                try:
+                    system_instruction = (
+                        "You are the Adaptive Onboarding Topic Evaluation and Fact Extraction Engine.\n"
+                        "Analyze the owner's message and perform TWO tasks simultaneously:\n"
+                        "1. Determine coverage status for each open interview topic ('covered', 'partial', 'not_covered', 'skipped', 'not_applicable').\n"
+                        "   - If the reply provides only partial information for a topic (e.g. mentions cities without prices/delivery times, or products without prices), mark status='partial', coverage=0.5, and populate missing_details.\n"
+                        "   - If fully answered, mark status='covered', coverage=1.0.\n"
+                        "   - Answering one topic does NOT cover another (e.g. stating honey types does NOT cover payment methods).\n"
+                        "   - If the currently asked topic was NOT addressed, status MUST be 'not_covered'.\n"
+                        "2. Extract atomic business facts into extracted_facts (topics like company.identity, products.catalog, etc.) with exact verbatim names.\n"
+                    )
+                    topics_payload = [
+                        {"slug": t.slug, "label": t.label, "question": t.question}
+                        for t in capped_open_topics
+                    ]
+                    user_prompt = (
+                        f"Owner Message Content:\n\"\"\"{content_clean}\"\"\"\n\n"
+                        f"Currently Asked Topic Slug: {current_topic_slug or 'none'}\n\n"
+                        f"Open Topics (max 10):\n{json.dumps(topics_payload, ensure_ascii=False, indent=2)}"
+                    )
+                    res = ai_provider.generate_json(
+                        user_prompt,
+                        schema=ReplyCoverageEvaluation,
+                        system_instruction=system_instruction,
+                    )
+                    if isinstance(res, dict) and "evaluations" in res:
+                        parsed = ReplyCoverageEvaluation.model_validate(res)
+                        if parsed.evaluations:
+                            parsed.decided_by = "model"
+                            for ev in parsed.evaluations:
+                                if ev.status == "covered":
+                                    ev.coverage = 1.0
+                                elif ev.status == "partial":
+                                    ev.coverage = 0.5
+                                else:
+                                    ev.coverage = 0.0
+                            return parsed
+                    break
+                except AIRateLimitError as rle:
+                    if attempt < max_retries - 1:
+                        logger.warning("Rate limit hit in interview evaluation (attempt %s/%s), backing off %ss: %s", attempt + 1, max_retries, backoff_sec, rle)
+                        time.sleep(backoff_sec)
+                        backoff_sec *= 2.0
+                    else:
+                        logger.error("Rate limit exhausted after %s attempts in interview evaluation for tenant %s: %s", max_retries, tenant_id, rle)
+                        raise
+                except Exception as exc:
+                    logger.warning("AI model coverage evaluation failed for tenant %s: %s; using semantic fallback", tenant_id, exc)
+                    break
 
         # 2. Deterministic Semantic Fallback Evaluator
         evaluations: list[TopicCoverageItem] = []
@@ -770,12 +810,16 @@ class InterviewService:
         has_software_licenses = bool(re.search(r"(?:تراخيص|ترخيص|اشتراك|سنوي|شهري|مدى\s*الحياة|سحابي|باقات)\b", c_lower)) and any(w in c_lower for w in ("ترخيص", "تراخيص", "اشتراك", "سنوية", "شهرية"))
         has_support = bool(re.search(r"(?:دعم\s*فني|صيانة|متابعة|مستمر|طوال\s*الأسبوع|خدمة\s*العملاء|sla)\b", c_lower))
         has_packaging = bool(re.search(r"(?:كيلو|نصف|ربع|جرام|عبوات|حجم|أحجام|علبة|علب)\b", c_lower))
-        has_coverage = bool(re.search(r"(?:نخدم|نوصل|فروعنا|تغطيتنا|نغطي|في\s*(?:صنعاء|عدن|الرياض|جدة|الخليج|المحافظات)|سحابيا|عالميا)\b", c_lower))
+        has_coverage = bool(re.search(r"(?:نخدم|نوصل|توصيل|التوصيل|فروعنا|تغطيتنا|نغطي|في\s*(?:صنعاء|عدن|الرياض|جدة|الخليج|المحافظات)|سحابيا|عالميا)\b", c_lower))
         has_branches = bool(re.search(r"(?:فروعنا|فرع\s*في|ساعات\s*العمل|دوامنا|نفتح\s*من|مقرنا|مقر\s*رئيسي)", c_lower))
         has_warranty = bool(re.search(r"(?:استرجاع|استبدال|ضمان|كفالة|استرداد|مشكلات\s*فنية)", c_lower))
         has_authenticity = bool(re.search(r"(?:مفحوص|مخبريا|فحص|نقي|أصلي|مضمون|نقاوة|مختبر)", c_lower))
         has_identity = bool(re.search(r"(?:اسمنا|اسم\s*(?:الشركة|المنشأة|المتجر)|نحن\s*شركة|شركة\s+\w+|منشأة\s+\w+|متجر\s+\w+)", c_lower))
         has_products = bool(re.search(r"(?:نبيع|نوفر|نقدم|منتجنا|منتجاتنا|أنظمتنا|حلولنا|برامجنا|خدماتنا|سعر|بسعر|باقاتنا)\b", c_lower))
+
+        # Check for partial delivery/products detail (e.g. mentions cities without prices/delivery times)
+        has_delivery_prices = bool(re.search(r"(?:ريال|رس|مجاني|مجانا|تكلفة|رسوم|شحن\s*بـ|\d+\s*ريال)", c_lower))
+        has_product_prices = bool(re.search(r"(?:ريال|دولار|\$|ر\.س|\d+\s*(?:ريال|الف|ألف))", c_lower))
 
         trigger_map = {
             "ordering_payment": has_payment,
@@ -797,31 +841,59 @@ class InterviewService:
 
         for t in open_topics:
             status = "not_covered"
+            coverage_val = 0.0
             extracted_val = None
+            missing_val = None
 
             if current_topic_slug and t.slug == current_topic_slug:
                 if is_skip:
                     status = "skipped"
+                    coverage_val = 0.0
                 elif is_na or is_negative:
                     status = "not_applicable"
+                    coverage_val = 0.0
                 elif trigger_map.get(t.slug) is True:
-                    status = "covered"
-                    extracted_val = content_clean
+                    # Check partial conditions
+                    if t.slug in ("delivery_coverage", "delivery_zones_yemen", "between_governorates_yemen") and not has_delivery_prices:
+                        status = "partial"
+                        coverage_val = 0.5
+                        extracted_val = content_clean
+                        missing_val = "تكلفة التوصيل ومواعيده التقريبية"
+                    elif t.slug == "products_services_prices" and not has_product_prices:
+                        status = "partial"
+                        coverage_val = 0.5
+                        extracted_val = content_clean
+                        missing_val = "أسعار المنتجات المذكورة"
+                    else:
+                        status = "covered"
+                        coverage_val = 1.0
+                        extracted_val = content_clean
                 else:
-                    # Current topic not answered by this content!
                     status = "not_covered"
+                    coverage_val = 0.0
             else:
                 if trigger_map.get(t.slug) is True:
                     status = "covered"
+                    coverage_val = 1.0
                     extracted_val = content_clean
 
-            if status == "covered":
+            if status in ("covered", "partial"):
                 acknowledged_points.append(t.label)
 
-            evaluations.append(TopicCoverageItem(slug=t.slug, status=status, extracted_details=extracted_val))
+            evaluations.append(TopicCoverageItem(
+                slug=t.slug,
+                status=status,
+                coverage=coverage_val,
+                extracted_details=extracted_val,
+                missing_details=missing_val,
+            ))
 
         ack_summary = "، ".join(dict.fromkeys(acknowledged_points)) if acknowledged_points else None
-        return ReplyCoverageEvaluation(evaluations=evaluations, acknowledged_summary=ack_summary)
+        return ReplyCoverageEvaluation(
+            evaluations=evaluations,
+            acknowledged_summary=ack_summary,
+            decided_by="fallback",
+        )
 
     def handle_branch_closure(self, tenant_id: UUID, closed_slug: str) -> None:
         """When an owner answers negatively (e.g. 'لا'), marks dependent topics as not_applicable."""
@@ -884,17 +956,22 @@ class InterviewService:
                 self.db.flush()
                 return "🎉 تم استكمال جلسة التعارف بنجاح! موظفك الرقمي جاهز الآن لخدمة العملاء.", True
 
-            # Evaluate content coverage across all open topics
-            evaluation = self.evaluate_reply_coverage(
-                tenant_id=tenant_id,
-                content=content_clean,
-                open_topics=open_topics,
-                current_topic_slug=curr_slug,
-                ai_provider=ai_provider,
-            )
+            # Evaluate content coverage across all open topics with backoff / delay notice on rate limit
+            try:
+                evaluation = self.evaluate_reply_coverage(
+                    tenant_id=tenant_id,
+                    content=content_clean,
+                    open_topics=open_topics,
+                    current_topic_slug=curr_slug,
+                    ai_provider=ai_provider,
+                )
+            except AIRateLimitError:
+                logger.warning("AIRateLimitError in interview turn for tenant %s, returning neutral delay notice", tenant_id)
+                return "نواجه ضغطاً مؤقتاً في معالجة طلبك، يرجى المحاولة بعد لحظات.", True
 
             curr_eval = next((e for e in evaluation.evaluations if e.slug == curr_slug), None) if curr_slug else None
             curr_status = curr_eval.status if curr_eval else "not_covered"
+            decided_by = getattr(evaluation, "decided_by", None) or "model"
 
             # Check negative answer ("لا") on current topic
             if curr_status == "not_applicable" and curr_slug:
@@ -908,6 +985,7 @@ class InterviewService:
                     curr_topic.status = "not_applicable"
                     curr_topic.coverage = 0.0
                     curr_topic.source_message_id = message_id
+                    curr_topic.decided_by = decided_by
                     self.db.add(curr_topic)
                     self.db.flush()
                     self.handle_branch_closure(tenant_id, curr_slug)
@@ -933,6 +1011,7 @@ class InterviewService:
                     curr_topic.status = "skipped"
                     curr_topic.coverage = 0.0
                     curr_topic.source_message_id = message_id
+                    curr_topic.decided_by = decided_by
                     self.db.add(curr_topic)
                     self.db.flush()
 
@@ -944,6 +1023,67 @@ class InterviewService:
                 self.db.add(state)
                 self.db.flush()
                 return f"{ack}\n\n🎉 تم استكمال جلسة التعارف بنجاح!", True
+
+            # Check partial answer on current topic (Phase 3.1 / Addendum X2)
+            if curr_status == "partial" and curr_slug:
+                curr_topic = self.db.scalar(
+                    select(InterviewTopic).where(
+                        InterviewTopic.tenant_id == tenant_id,
+                        InterviewTopic.slug == curr_slug,
+                    )
+                )
+                if curr_topic:
+                    curr_topic.status = "partial"
+                    curr_topic.coverage = 0.5
+                    curr_topic.source_message_id = message_id
+                    curr_topic.decided_by = decided_by
+                    self.db.add(curr_topic)
+                    self._save_covered_topic_facts(tenant_id, curr_slug, content_clean, message_id)
+
+                # Also mark other topics that were covered in this reply
+                for e in evaluation.evaluations:
+                    if e.slug != curr_slug and e.status == "covered":
+                        ot = next((t for t in open_topics if t.slug == e.slug), None)
+                        if ot:
+                            ot.status = "answered"
+                            ot.coverage = 1.0
+                            ot.source_message_id = message_id
+                            ot.decided_by = decided_by
+                            self.db.add(ot)
+                            self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
+                self.db.flush()
+
+                # Save unified extracted facts or fallback extract
+                if getattr(evaluation, "extracted_facts", None):
+                    self.fact_service.save_extracted_facts(
+                        tenant_id=tenant_id,
+                        extracted_facts=evaluation.extracted_facts,
+                        auto_confirm_direct=True,
+                        message_text=content_clean,
+                    )
+                else:
+                    try:
+                        ext_res = self.fact_service.extract_facts(
+                            tenant_id=tenant_id,
+                            message_text=content_clean,
+                            provider=ai_provider,
+                        )
+                        if ext_res and ext_res.facts:
+                            self.fact_service.save_extracted_facts(
+                                tenant_id=tenant_id,
+                                extracted_facts=ext_res.facts,
+                                auto_confirm_direct=True,
+                                message_text=content_clean,
+                            )
+                    except Exception as err:
+                        logger.warning("Fact extraction in partial turn failed: %s", err)
+
+                missing_part = curr_eval.missing_details if (curr_eval and curr_eval.missing_details) else None
+                ack_prefix = f"✅ تم تسجيل ما ذكرته بخصوص **{curr_topic.label}**." if curr_topic else "✅ تم تسجيل إجابتك."
+                if missing_part:
+                    return f"{ack_prefix}\nولكن هل يمكنك توضيح: **{missing_part}**؟", True
+                else:
+                    return f"{ack_prefix}\nولكن لاستكمال التفاصيل بخصوص هذا الموضوع:\n{curr_topic.question if curr_topic else ''}", True
 
             # Check if currently asked topic was NOT covered by the reply
             if curr_status == "not_covered" and curr_slug:
@@ -970,25 +1110,33 @@ class InterviewService:
                             ot.status = "answered"
                             ot.coverage = 1.0
                             ot.source_message_id = message_id
+                            ot.decided_by = decided_by
                             self.db.add(ot)
                             self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
                     self.db.flush()
 
-                    # Also extract products & general facts from this reply
-                    try:
-                        ext_res = self.fact_service.extract_facts(
+                    # Save unified facts or extract
+                    if getattr(evaluation, "extracted_facts", None):
+                        self.fact_service.save_extracted_facts(
                             tenant_id=tenant_id,
-                            message_text=content_clean,
-                            provider=ai_provider,
+                            extracted_facts=evaluation.extracted_facts,
+                            auto_confirm_direct=True,
                         )
-                        if ext_res and ext_res.facts:
-                            self.fact_service.save_extracted_facts(
+                    else:
+                        try:
+                            ext_res = self.fact_service.extract_facts(
                                 tenant_id=tenant_id,
-                                extracted_facts=ext_res.facts,
-                                auto_confirm_direct=True,
+                                message_text=content_clean,
+                                provider=ai_provider,
                             )
-                    except Exception as err:
-                        logger.warning("Fact extraction in not_covered turn failed: %s", err)
+                            if ext_res and ext_res.facts:
+                                self.fact_service.save_extracted_facts(
+                                    tenant_id=tenant_id,
+                                    extracted_facts=ext_res.facts,
+                                    auto_confirm_direct=True,
+                                )
+                        except Exception as err:
+                            logger.warning("Fact extraction in not_covered turn failed: %s", err)
 
                     ack_text = ""
                     if covered_other:
@@ -997,6 +1145,8 @@ class InterviewService:
 
                     if attempts < 2:
                         curr_topic.status = "asked"
+                        curr_topic.decided_by = decided_by
+                        curr_topic.source_message_id = message_id
                         self.db.add(curr_topic)
                         self.db.flush()
                         reask = f"ولكن بالنسبة لـ **{curr_topic.label}**:\n{curr_topic.question}"
@@ -1004,6 +1154,8 @@ class InterviewService:
                     else:
                         # Park topic after 2 attempts
                         curr_topic.status = "unknown"
+                        curr_topic.decided_by = decided_by
+                        curr_topic.source_message_id = message_id
                         self.db.add(curr_topic)
                         self.db.flush()
                         next_q = self.get_next_question(tenant_id)
@@ -1022,6 +1174,7 @@ class InterviewService:
                     curr_topic.status = "answered"
                     curr_topic.coverage = 1.0
                     curr_topic.source_message_id = message_id
+                    curr_topic.decided_by = decided_by
                     self.db.add(curr_topic)
                     self._save_covered_topic_facts(tenant_id, curr_slug, content_clean, message_id)
 
@@ -1035,6 +1188,16 @@ class InterviewService:
                         ot.status = "answered"
                         ot.coverage = 1.0
                         ot.source_message_id = message_id
+                        ot.decided_by = decided_by
+                        self.db.add(ot)
+                        self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
+                elif e.status == "partial":
+                    ot = next((t for t in open_topics if t.slug == e.slug), None)
+                    if ot:
+                        ot.status = "partial"
+                        ot.coverage = 0.5
+                        ot.source_message_id = message_id
+                        ot.decided_by = decided_by
                         self.db.add(ot)
                         self._save_covered_topic_facts(tenant_id, ot.slug, content_clean, message_id)
                 elif e.status == "not_applicable":
@@ -1042,22 +1205,32 @@ class InterviewService:
                     if ot:
                         ot.status = "not_applicable"
                         ot.coverage = 0.0
+                        ot.source_message_id = message_id
+                        ot.decided_by = decided_by
                         self.db.add(ot)
                         self.handle_branch_closure(tenant_id, e.slug)
 
-            # Also extract products & general facts via FactService
-            extraction_res = self.fact_service.extract_facts(
-                tenant_id=tenant_id,
-                message_text=content_clean,
-                provider=ai_provider,
-            )
-            extracted_items = extraction_res.facts if extraction_res else []
-            save_result = self.fact_service.save_extracted_facts(
-                tenant_id=tenant_id,
-                extracted_facts=extracted_items,
-                auto_confirm_direct=True,
-                message_text=content_clean,
-            )
+            # Save unified facts or extract
+            if getattr(evaluation, "extracted_facts", None):
+                save_result = self.fact_service.save_extracted_facts(
+                    tenant_id=tenant_id,
+                    extracted_facts=evaluation.extracted_facts,
+                    auto_confirm_direct=True,
+                    message_text=content_clean,
+                )
+            else:
+                extraction_res = self.fact_service.extract_facts(
+                    tenant_id=tenant_id,
+                    message_text=content_clean,
+                    provider=ai_provider,
+                )
+                extracted_items = extraction_res.facts if extraction_res else []
+                save_result = self.fact_service.save_extracted_facts(
+                    tenant_id=tenant_id,
+                    extracted_facts=extracted_items,
+                    auto_confirm_direct=True,
+                    message_text=content_clean,
+                )
             saved_facts = list(save_result.get("confirmed", [])) + list(save_result.get("pending", []))
 
             # Build read-back acknowledgment

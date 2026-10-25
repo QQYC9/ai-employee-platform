@@ -26,11 +26,11 @@ logger = logging.getLogger(__name__)
 class ExtractedFactItem(BaseModel):
     topic: str = Field(
         ...,
-        description="Hierarchical lowercase slug, e.g. 'company.identity', 'product.nazim.features', 'delivery.coverage.yemen'",
+        description="Hierarchical lowercase slug, e.g. 'company.identity', 'product.catalog.features', 'delivery.coverage.yemen'",
     )
     subject: str = Field(
         ...,
-        description="Clear descriptive subject in Arabic or English, e.g. 'اسم الشركة', 'برنامج ناظم المحاسبي', 'نطاق التوصيل'",
+        description="Clear descriptive subject in Arabic or English, e.g. 'اسم الشركة', 'المنتج الأساسي', 'نطاق التوصيل'",
     )
     value: Any = Field(
         ...,
