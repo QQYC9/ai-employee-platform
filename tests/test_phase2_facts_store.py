@@ -452,3 +452,69 @@ def test_migration_correctness_on_copy_of_real_data(db: Session, tenant: Tenant)
     orig_k = db.scalar(select(Knowledge).where(Knowledge.tenant_id == tenant.id))
     assert orig_k is not None
     assert orig_k.title == "دليل التثبيت"
+
+    # 5. Requirement 3: All migrated facts have source="migrated" and status="pending_confirmation"
+    for f in facts:
+        assert f.source == "migrated"
+        assert f.status == "pending_confirmation"
+
+    # Customer retrieval must not return unconfirmed migrated facts
+    customer_facts = fact_svc.get_relevant_facts(tenant_id=tenant.id, include_private=False)
+    assert len(customer_facts) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Owner Corrects Auto-Confirmed Fact Preserves History (Item 6)
+# ---------------------------------------------------------------------------
+def test_owner_corrects_auto_confirmed_fact_preserves_history(db: Session, tenant: Tenant):
+    """
+    Item 6: When the owner states a fact directly, it is auto-confirmed with a read-back.
+    When the owner later corrects that fact, the old fact is superseded (superseded_by set,
+    status='superseded') and the new corrected fact becomes confirmed, fully preserving history.
+    """
+    fact_svc = FactService(db)
+
+    # 1. Owner directly declares branches: auto-confirmed with read-back
+    item = ExtractedFactItem(
+        topic="operations.branches",
+        subject="فروع المنشأة",
+        value={"branches": ["صنعاء", "الحديدة"]},
+        visibility="public",
+        is_direct_unambiguous=True,
+    )
+    save_res = fact_svc.save_extracted_facts(tenant.id, [item], auto_confirm_direct=True)
+    assert len(save_res["confirmed"]) == 1
+    original_fact = save_res["confirmed"][0]
+    assert original_fact.status == "confirmed"
+    assert original_fact.source == "owner_stated"
+    assert original_fact.superseded_by is None
+    original_fact_id = original_fact.id
+
+    # 2. Owner sends a correction: updates branches
+    corrected_val = {"branches": ["صنعاء", "عدن", "تعز"]}
+    corrected_fact = fact_svc.correct_fact(
+        tenant_id=tenant.id,
+        fact_id=original_fact_id,
+        corrected_value=corrected_val,
+    )
+
+    # 3. Verify the new fact is confirmed and active
+    assert corrected_fact.id != original_fact_id
+    assert corrected_fact.status == "confirmed"
+    assert corrected_fact.source == "owner_confirmed"
+    assert corrected_fact.value == corrected_val
+    assert corrected_fact.superseded_by is None
+
+    # 4. Verify history preservation: original fact still exists in DB as superseded
+    db.expire_all()
+    orig_in_db = db.scalar(select(Fact).where(Fact.id == original_fact_id))
+    assert orig_in_db is not None
+    assert orig_in_db.status == "superseded"
+    assert orig_in_db.superseded_by == corrected_fact.id
+    assert orig_in_db.value == {"branches": ["صنعاء", "الحديدة"]}
+
+    # 5. Customer retrieval returns ONLY the active corrected fact, not the superseded one
+    active_facts = fact_svc.get_relevant_facts(tenant.id, query="فروع", include_private=False)
+    assert len(active_facts) == 1
+    assert active_facts[0].id == corrected_fact.id
+    assert active_facts[0].value == corrected_val

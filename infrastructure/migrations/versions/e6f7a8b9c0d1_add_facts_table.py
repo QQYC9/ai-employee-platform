@@ -1,7 +1,7 @@
 """add facts table for phase 2 facts store
 
 Revision ID: e6f7a8b9c0d1
-Revises: d5e6f7a8b9c0
+Revises: c4d5e6f7a8b9
 Create Date: 2026-10-25 17:00:00.000000
 
 """
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'e6f7a8b9c0d1'
-down_revision: Union[str, Sequence[str], None] = 'd5e6f7a8b9c0'
+down_revision: Union[str, Sequence[str], None] = 'c4d5e6f7a8b9'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

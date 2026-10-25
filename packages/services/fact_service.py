@@ -617,10 +617,17 @@ class FactService:
     def migrate_business_brains_and_knowledge_to_facts(
         self,
         tenant_id: UUID | None = None,
-    ) -> dict[str, int]:
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
         """
         Migrates existing BusinessBrain and Knowledge rows to the Facts Store with zero data loss.
         Source records remain intact and readable as fallback.
+        
+        Per Phase 2 specification (Item 3 & 4):
+        - Migrated rows get source="migrated" and status="pending_confirmation" (NOT confirmed)
+          because legacy data originated from buggy regex extraction.
+        - Supports dry_run mode to preview row counts per source table, rows per resulting topic,
+          10 sample mappings (before/after), and skipped or malformed rows.
         """
         stmt_brains = select(BusinessBrain)
         stmt_knowledge = select(Knowledge)
@@ -633,15 +640,31 @@ class FactService:
         knowledge_rows = list(self.db.scalars(stmt_knowledge).all())
 
         migrated_facts_count = 0
+        topic_counts: dict[str, int] = {}
+        sample_mappings: list[dict[str, Any]] = []
+        skipped_or_malformed: list[dict[str, Any]] = []
 
         # 1. Migrate Business Brains
         for brain in brains:
             t_id = brain.tenant_id
 
-            # Helper to add fact if not already present
-            def _add_migrated_fact(topic: str, subject: str, value: Any, visibility: str = "public", expires_in_days: int | None = None):
+            def _add_migrated_fact(
+                topic: str,
+                subject: str,
+                value: Any,
+                visibility: str = "public",
+                expires_in_days: int | None = None,
+                source_field: str = "",
+                raw_before: Any = None,
+            ):
                 nonlocal migrated_facts_count
                 if not value:
+                    skipped_or_malformed.append({
+                        "source_table": "business_brains",
+                        "tenant_id": str(t_id),
+                        "source_field": source_field or topic,
+                        "reason": "Value is empty or evaluates to falsy",
+                    })
                     return
 
                 # Check if already migrated
@@ -654,6 +677,12 @@ class FactService:
                     )
                 )
                 if exists is not None:
+                    skipped_or_malformed.append({
+                        "source_table": "business_brains",
+                        "tenant_id": str(t_id),
+                        "source_field": source_field or topic,
+                        "reason": f"Fact already exists with id {exists.id}",
+                    })
                     return
 
                 expires_at = None
@@ -666,76 +695,159 @@ class FactService:
                     topic=topic,
                     subject=subject,
                     value=value,
-                    source="migration_business_brain",
+                    source="migrated",
                     confidence=1.0,
                     visibility=visibility,
-                    status="confirmed",
+                    status="pending_confirmation",
                     expires_at=expires_at,
                 )
-                self.db.add(fact)
+
+                topic_counts[topic] = topic_counts.get(topic, 0) + 1
                 migrated_facts_count += 1
+
+                if len(sample_mappings) < 10:
+                    sample_mappings.append({
+                        "source_table": "business_brains",
+                        "tenant_id": str(t_id),
+                        "source_field": source_field,
+                        "before": raw_before if raw_before is not None else value,
+                        "after": {
+                            "topic": fact.topic,
+                            "subject": fact.subject,
+                            "value": fact.value,
+                            "source": fact.source,
+                            "status": fact.status,
+                            "visibility": fact.visibility,
+                            "expires_at": fact.expires_at.isoformat() if fact.expires_at else None,
+                        },
+                    })
+
+                if not dry_run:
+                    self.db.add(fact)
 
             # Identity
             identity = brain.identity or {}
             if identity.get("name") or identity.get("company_name"):
                 c_name = identity.get("name") or identity.get("company_name")
-                _add_migrated_fact("company.identity", "اسم المنشأة", {"name": c_name})
+                _add_migrated_fact(
+                    "company.identity", "اسم المنشأة", {"name": c_name},
+                    source_field="identity.name", raw_before=identity,
+                )
+            else:
+                skipped_or_malformed.append({
+                    "source_table": "business_brains",
+                    "tenant_id": str(t_id),
+                    "source_field": "identity",
+                    "reason": "Missing 'name' or 'company_name' key in identity JSON",
+                })
+
             if identity.get("description") or identity.get("field"):
                 f_desc = identity.get("description") or identity.get("field")
-                _add_migrated_fact("company.description", "مجال النشاط", {"description": f_desc})
+                _add_migrated_fact(
+                    "company.description", "مجال النشاط", {"description": f_desc},
+                    source_field="identity.description", raw_before=identity,
+                )
 
             # Products
             products = brain.products or {}
-            if isinstance(products, dict):
+            if isinstance(products, dict) and products:
                 for p_name, p_data in products.items():
-                    slug = re.sub(r"[^\w]+", "_", p_name.lower()).strip("_")
-                    _add_migrated_fact(f"product.{slug[:40]}", p_name, p_data if isinstance(p_data, dict) else {"name": p_name, "details": p_data})
-            elif isinstance(products, list):
+                    slug = re.sub(r"[^\w]+", "_", str(p_name).lower()).strip("_")
+                    val = p_data if isinstance(p_data, dict) else {"name": p_name, "details": p_data}
+                    _add_migrated_fact(
+                        f"product.{slug[:40]}", str(p_name), val,
+                        source_field="products", raw_before={p_name: p_data},
+                    )
+            elif isinstance(products, list) and products:
                 for p_item in products:
                     if isinstance(p_item, str):
                         slug = re.sub(r"[^\w]+", "_", p_item.lower()).strip("_")
-                        _add_migrated_fact(f"product.{slug[:40]}", p_item, {"name": p_item})
+                        _add_migrated_fact(
+                            f"product.{slug[:40]}", p_item, {"name": p_item},
+                            source_field="products", raw_before=p_item,
+                        )
+            else:
+                skipped_or_malformed.append({
+                    "source_table": "business_brains",
+                    "tenant_id": str(t_id),
+                    "source_field": "products",
+                    "reason": "Products field is empty or unpopulated",
+                })
 
             # Services
             services = brain.services or {}
-            if isinstance(services, dict):
+            if isinstance(services, dict) and services:
                 for s_name, s_data in services.items():
-                    slug = re.sub(r"[^\w]+", "_", s_name.lower()).strip("_")
-                    _add_migrated_fact(f"service.{slug[:40]}", s_name, s_data if isinstance(s_data, dict) else {"name": s_name, "details": s_data})
+                    slug = re.sub(r"[^\w]+", "_", str(s_name).lower()).strip("_")
+                    val = s_data if isinstance(s_data, dict) else {"name": s_name, "details": s_data}
+                    _add_migrated_fact(
+                        f"service.{slug[:40]}", str(s_name), val,
+                        source_field="services", raw_before={s_name: s_data},
+                    )
 
             # Pricing
             pricing = brain.pricing or {}
             if pricing:
-                _add_migrated_fact("pricing.general", "الأسعار والتسعير", pricing, expires_in_days=90)
+                _add_migrated_fact(
+                    "pricing.general", "الأسعار والتسعير", pricing,
+                    expires_in_days=90, source_field="pricing", raw_before=pricing,
+                )
 
             # Operations (Branches, Locations, Hours)
             operations = brain.operations or {}
             if operations.get("branches") or operations.get("locations") or operations.get("cities"):
                 branches_val = operations.get("branches") or operations.get("locations") or operations.get("cities")
-                _add_migrated_fact("operations.branches", "الفروع والمواقع", branches_val)
+                _add_migrated_fact(
+                    "operations.branches", "الفروع والمواقع", branches_val,
+                    source_field="operations.branches", raw_before=branches_val,
+                )
             if operations.get("working_hours"):
-                _add_migrated_fact("operations.working_hours", "أوقات العمل", {"working_hours": operations["working_hours"]}, expires_in_days=180)
+                _add_migrated_fact(
+                    "operations.working_hours", "أوقات العمل", {"working_hours": operations["working_hours"]},
+                    expires_in_days=180, source_field="operations.working_hours", raw_before=operations["working_hours"],
+                )
             if operations:
-                _add_migrated_fact("operations.general", "العمليات التشغيلية", operations)
+                _add_migrated_fact(
+                    "operations.general", "العمليات التشغيلية", operations,
+                    source_field="operations", raw_before=operations,
+                )
 
             # Policies
             policies = brain.policies or {}
             if policies:
-                _add_migrated_fact("company.policies", "سياسات المنشأة", policies)
+                _add_migrated_fact(
+                    "company.policies", "سياسات المنشأة", policies,
+                    source_field="policies", raw_before=policies,
+                )
 
             # Brand
             brand = brain.brand or {}
             if brand:
-                _add_migrated_fact("brand.identity", "الهوية والنبرة", brand)
+                _add_migrated_fact(
+                    "brand.identity", "الهوية والنبرة", brand,
+                    source_field="brand", raw_before=brand,
+                )
 
             # Internal / Private Sections
             for sec, vis in [("goals", "private"), ("strategy", "private"), ("competitors", "private"), ("lessons", "private")]:
                 val = getattr(brain, sec, None) or {}
                 if val:
-                    _add_migrated_fact(f"company.{sec}", sec.capitalize(), val, visibility=vis)
+                    _add_migrated_fact(
+                        f"company.{sec}", sec.capitalize(), val,
+                        visibility=vis, source_field=sec, raw_before=val,
+                    )
 
         # 2. Migrate Knowledge Rows
         for k_row in knowledge_rows:
+            if not k_row.title or not k_row.content:
+                skipped_or_malformed.append({
+                    "source_table": "knowledge",
+                    "tenant_id": str(k_row.tenant_id),
+                    "knowledge_id": str(k_row.id),
+                    "reason": "Knowledge row lacks title or content",
+                })
+                continue
+
             topic_slug = f"knowledge.{k_row.knowledge_type or 'general'}"
             meta = k_row.metadata_json or {}
             is_private = meta.get("visibility") == "private" or meta.get("is_private") is True
@@ -749,24 +861,66 @@ class FactService:
                     Fact.superseded_by.is_(None),
                 )
             )
-            if exists is None:
-                fact = Fact(
-                    id=uuid4(),
-                    tenant_id=k_row.tenant_id,
-                    topic=topic_slug,
-                    subject=k_row.title,
-                    value={"content": k_row.content, "metadata": meta},
-                    source="migration_knowledge",
-                    confidence=1.0,
-                    visibility=visibility,
-                    status="confirmed" if k_row.status == "active" else "stale",
-                )
-                self.db.add(fact)
-                migrated_facts_count += 1
+            if exists is not None:
+                skipped_or_malformed.append({
+                    "source_table": "knowledge",
+                    "tenant_id": str(k_row.tenant_id),
+                    "knowledge_id": str(k_row.id),
+                    "reason": f"Fact already exists with id {exists.id}",
+                })
+                continue
 
-        self.db.commit()
+            fact = Fact(
+                id=uuid4(),
+                tenant_id=k_row.tenant_id,
+                topic=topic_slug,
+                subject=k_row.title,
+                value={"content": k_row.content, "metadata": meta},
+                source="migrated",
+                confidence=1.0,
+                visibility=visibility,
+                status="pending_confirmation",
+            )
+            topic_counts[topic_slug] = topic_counts.get(topic_slug, 0) + 1
+            migrated_facts_count += 1
+
+            if len(sample_mappings) < 10:
+                sample_mappings.append({
+                    "source_table": "knowledge",
+                    "tenant_id": str(k_row.tenant_id),
+                    "source_field": "title & content",
+                    "before": {
+                        "title": k_row.title,
+                        "content": k_row.content[:100] + ("..." if len(k_row.content) > 100 else ""),
+                        "knowledge_type": k_row.knowledge_type,
+                        "status": k_row.status,
+                    },
+                    "after": {
+                        "topic": fact.topic,
+                        "subject": fact.subject,
+                        "value": fact.value,
+                        "source": fact.source,
+                        "status": fact.status,
+                        "visibility": fact.visibility,
+                        "expires_at": None,
+                    },
+                })
+
+            if not dry_run:
+                self.db.add(fact)
+
+        if not dry_run:
+            self.db.commit()
+
         return {
+            "dry_run": dry_run,
             "migrated_facts_count": migrated_facts_count,
-            "brains_scanned": len(brains),
-            "knowledge_scanned": len(knowledge_rows),
+            "source_table_counts": {
+                "business_brains": len(brains),
+                "knowledge": len(knowledge_rows),
+            },
+            "rows_per_resulting_topic": topic_counts,
+            "sample_mappings": sample_mappings,
+            "skipped_or_malformed_count": len(skipped_or_malformed),
+            "skipped_or_malformed_samples": skipped_or_malformed[:15],
         }

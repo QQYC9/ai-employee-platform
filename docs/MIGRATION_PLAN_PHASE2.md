@@ -57,7 +57,65 @@ CREATE INDEX ix_facts_tenant_subject ON facts(tenant_id, subject);
 
 ---
 
-## 5. Data Mapping Strategy (Zero Data Loss)
+## 5. Data Mapping Strategy (Zero Data Loss) & Review-Gating
+
+### Key Mapping Rules:
+1. **Source Attribution**: All rows imported from legacy `business_brains` and `knowledge` receive:
+   - `source = "migrated"`
+   - `status = "pending_confirmation"` (NOT `confirmed`)
+   *Rationale*: Legacy records originated from regex parsing that produced known inaccuracies. Customer-facing prompts strictly query `status = 'confirmed' AND visibility = 'public'`, ensuring that unconfirmed migrated facts NEVER reach customers until explicitly reviewed and confirmed by the business owner.
+2. **Deterministic Mapping**:
+   - `identity.name` -> `topic="company.identity"`, `subject="اسم المنشأة"`, `value={"name": ...}`
+   - `identity.description` -> `topic="company.description"`, `subject="مجال النشاط"`
+   - `products.<key>` -> `topic="product.<slug>"`, `subject="<name>"`, `value=<data>`
+   - `services.<key>` -> `topic="service.<slug>"`, `subject="<name>"`, `value=<data>`
+   - `pricing` -> `topic="pricing.general"`, `subject="الأسعار والتسعير"`, `expires_at=now()+90d`
+   - `operations.branches` -> `topic="operations.branches"`, `subject="الفروع والمواقع"`
+   - `operations.working_hours` -> `topic="operations.working_hours"`, `subject="أوقات العمل"`, `expires_at=now()+180d`
+   - `knowledge` -> `topic="knowledge.<type>"`, `subject=title`, `value={"content": content, "metadata": meta}`
+   - Internal sections (`goals`, `strategy`, `competitors`, `lessons`) -> `visibility="private"`
+
+---
+
+## 6. Pre-Migration Verification & Evidence
+
+### 6.1 Alembic Single-Head & Revision Chain
+- **Live DB Revision**: `c4d5e6f7a8b9`
+- **Migration File**: `infrastructure/migrations/versions/e6f7a8b9c0d1_add_facts_table.py`
+  - `down_revision = 'c4d5e6f7a8b9'` (matches live DB current revision)
+  - Single head confirmed via `alembic heads`: `e6f7a8b9c0d1 (head)`
+- **Lifecycle Test on DB Copy**:
+  - Executed on `ai_employee_lifecycle_scratch` (copy of live DB):
+    - `upgrade head` -> version `e6f7a8b9c0d1`, `facts` table created (exit code 0).
+    - `downgrade c4d5e6f7a8b9` -> version `c4d5e6f7a8b9`, `facts` table dropped (exit code 0).
+    - `upgrade head` -> version `e6f7a8b9c0d1`, `facts` table recreated (exit code 0).
+
+### 6.2 Full Backup & Scratch Restore Proof
+- **Live Backup File**: `backups/backup_ai_employee_pre_phase2.dump`
+- **File Size**: 776,559 bytes (758.36 KB)
+- **Restore Verification**: Restored into `ai_employee_backup_restore_scratch` with exit code 0:
+  - `tenants`: 743 rows
+  - `business_brains`: 256 rows
+  - `knowledge`: 415 rows
+  - `users`: 528 rows
+  - `channels`: 181 rows
+  - `conversations`: 343 rows
+  - `messages`: 651 rows
+  - `outbox_events`: 65 rows
+  - `approvals`: 136 rows
+  - `alembic_version`: `c4d5e6f7a8b9`
+
+### 6.3 Live DB Dry-Run Migration Results
+- **Source Counts**: 256 `business_brains`, 415 `knowledge` rows.
+- **Dry-Run Facts Generated**: 1,238 facts (all with `source="migrated"` and `status="pending_confirmation"`).
+- **Top Resulting Topics**:
+  - `knowledge.products`: 406
+  - `company.identity`: 195
+  - `brand.identity`: 125
+  - `product.sidr_honey`: 72
+  - `product.عسل_سدر_دوعني_فاخر_500_جم`: 36
+- **Skipped / Malformed**: 161 occurrences (unpopulated/empty product or identity dictionaries in unconfigured test tenants).
+- **Writes Committed to Live DB**: 0 (zero modification).
 
 | Source Column / Entity | Target Topic Slug | Target Subject | Target Visibility | Expiry Policy |
 | :--- | :--- | :--- | :--- | :--- |
