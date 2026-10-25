@@ -334,7 +334,7 @@ def test_0_6_post_generation_guardrail_blocks_unverified_prices_and_discounts(db
 
     # Verify reply was blocked by guardrail and replaced with safe handoff
     reply_msg1 = db.scalar(select(Message).where(Message.id == res1.reply_message_id))
-    assert reply_msg1.content == "سأحوّل استفسارك للموظف المختص وسيرد عليك قريبًا."
+    assert reply_msg1.content == "هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."
     assert reply_msg1.metadata_json.get("guardrail_blocked") is True
 
     # Verify audit event logged

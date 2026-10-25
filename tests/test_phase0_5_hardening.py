@@ -153,7 +153,7 @@ def test_guardrail_blocks_unverified_products_and_features_with_empty_brain(
         "نسخة تجريبية مجانية لمدة 14 يومًا",
     ]
 
-    handoff_text = "سأحوّل استفسارك للموظف المختص وسيرد عليك قريبًا."
+    handoff_text = "هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."
 
     for hallucinated_text in failing_examples:
         inbound_msg = Message(

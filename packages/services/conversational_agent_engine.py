@@ -46,6 +46,15 @@ from packages.tools.registry import ToolRegistry, create_default_registry
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_HANDOFF_REPLY = "هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."
+ARABIC_DIACRITICS_REGEX = re.compile(r"[\u064B-\u065F\u0670]")
+
+
+def clean_arabic_token(token: str) -> str:
+    """Removes tashkeel and edge punctuation from Arabic tokens."""
+    no_tashkeel = ARABIC_DIACRITICS_REGEX.sub("", token)
+    return re.sub(r"^[^\w\u0621-\u064A]+|[^\w\u0621-\u064A]+$", "", no_tashkeel).strip()
+
 
 @dataclass(frozen=True)
 class ConversationResponseResult:
@@ -636,7 +645,25 @@ class ConversationalAgentEngine:
             msg_meta["guardrail_blocked"] = True
             msg_meta["guardrail_reason"] = violation_reason
             msg_meta["original_blocked_reply"] = reply_text
+            msg_meta["handoff"] = True
+            msg_meta["handoff_question"] = message.content or ""
 
+            # Log handoff in queryable audit_events table for tenant owner
+            self.audit_service.record_event(
+                tenant_id=tenant_id,
+                event_type="customer_inquiry_handoff",
+                action="handoff_to_team",
+                description=f"Inquiry needs team verification: {(message.content or '')[:150]}",
+                event_metadata={
+                    "conversation_id": str(conversation_id),
+                    "message_id": str(message_id),
+                    "customer_id": str(customer_id) if customer_id else None,
+                    "question": message.content or "",
+                    "violation_reason": violation_reason,
+                    "original_blocked_reply": reply_text,
+                    "handoff_reply": DEFAULT_HANDOFF_REPLY,
+                },
+            )
             self.audit_service.record_event(
                 tenant_id=tenant_id,
                 event_type="agent_reply_blocked_by_guardrail",
@@ -645,8 +672,16 @@ class ConversationalAgentEngine:
                 event_metadata={
                     "conversation_id": str(conversation_id),
                     "message_id": str(message_id),
+                    "question": message.content or "",
                     "reason": violation_reason,
                 },
+            )
+            logger.info(
+                "Customer inquiry handoff logged: tenant=%s, conv=%s, question=%s, reason=%s",
+                tenant_id,
+                conversation_id,
+                message.content,
+                violation_reason,
             )
             if trace_id:
                 try:
@@ -662,7 +697,7 @@ class ConversationalAgentEngine:
                 except Exception:
                     pass
 
-            reply_text = "سأحوّل استفسارك للموظف المختص وسيرد عليك قريبًا."
+            reply_text = DEFAULT_HANDOFF_REPLY
 
         # 9. Persist Agent Reply in Conversation
         return self._persist_and_return_reply(
@@ -3145,17 +3180,69 @@ class ConversationalAgentEngine:
                     return False, f"Unverified discount {d}% detected in reply without basis in verified policies"
 
         # 3. Product / Service entity mention check
-        prod_matches = re.finditer(r"(?:برنامج|نظام|تطبيق|أداة|منصة|منتج|خدمة)\s+([^\s،,.:;!؟\n]+)", reply_text)
+        prod_matches = re.finditer(
+            r"(?:برنامج|نظام|تطبيق|أداة|منصة|منتج|خدمة)\s+([^\s،,.:;!؟\n\(\)\[\]\|\"\'`]+)",
+            reply_text,
+        )
         stopwords = {
-            "الخاص", "بنا", "لدينا", "المعتمد", "الرسمي", "المحاسبي", "المحاسبة",
-            "المتاح", "الحالي", "المطلوب", "الجديد", "المحدد", "الشركة", "المنشأة",
-            "المتجر", "العملاء", "العمل", "النشاط",
+            # pronouns & relative
+            "الذي", "التي", "الذين", "اللاتي", "اللواتي", "ما", "من", "هذا", "هذه", "ذلك", "تلك", "هؤلاء",
+            # prepositions & particles
+            "في", "على", "إلى", "من", "عن", "مع", "بين", "لدى", "عند", "حتى", "نحو", "خلال", "عبر",
+            "دون", "سوى", "غير", "إلا", "ثم", "أو", "أم", "بل", "لكن", "كل", "جميع", "أي", "مثل",
+            "بنا", "لنا", "لكم", "لدينا", "عندنا", "الخاص", "الخاصة", "بكم", "معنا",
+            # verbs (present/future/imperative)
+            "يساعد", "يساعدك", "يساعدكم", "يساعدنا", "يسهل", "يسهلك", "يسهلكم", "يسهلنا",
+            "يتيح", "يتيحلك", "يتيحلكم", "يتيحنا", "يوفر", "يوفرلك", "يوفرلكم", "يوفرنا",
+            "يقدم", "يقدمك", "يقدمكم", "يقدمنا", "يعمل", "يقوم", "يهدف", "يختص", "يشمل",
+            "يدعم", "يحتوي", "يناسب", "يضمن", "يمكن", "يمكنك", "يمكنكم", "يمكننا", "يعتبر",
+            "يعد", "يسمح", "يركز", "يخدم", "يعالج", "يطور", "يدير", "ينظم",
+            "تساعد", "تساعدك", "تساعدكم", "تسهل", "تسهلك", "تسهلكم", "تتيح", "تتيحلك", "تتيحلكم",
+            "توفر", "توفرلك", "توفرلكم", "تقدم", "تقدمك", "تقدمكم", "تعمل", "تقوم", "تهدف",
+            "تختص", "تشمل", "تدعم", "تحتوي", "تناسب", "تضمن", "تمكن", "تمكنك", "تمكنكم",
+            "تعتبر", "تعد", "تسمح", "تركز", "تخدم", "تعالج", "تطور", "تدير", "تنظم",
+            "نقدم", "نوفر", "نساعد", "نعمل", "نتيح", "ندعم", "نضمن", "نخدم", "نطور", "ندير",
+            # common descriptive adjectives
+            "متكامل", "متكاملة", "متكاملين", "شامل", "شاملة", "شاملين", "ذكي", "ذكية", "أذكياء",
+            "متقدم", "متقدمة", "متقدمين", "سحابي", "سحابية", "إلكتروني", "إلكترونية", "تقني", "تقنية",
+            "رقمي", "رقمية", "احترافي", "احترافية", "مخصص", "مخصصة", "مميز", "مميزة", "مباشر", "مباشرة",
+            "جاهز", "جاهزة", "فعال", "فعالة", "سريع", "سريعة", "بسيط", "بسيطة", "قوي", "قوية",
+            "حديث", "حديثة", "أساسي", "أساسية", "إضافي", "إضافية", "خاص", "خاصة", "عام", "عامة",
+            "متاح", "متاحة", "جديد", "جديدة", "أفضل", "أول", "رئيسي", "رئيسية", "مختلف", "مختلفة",
+            "مبتكر", "مبتكرة", "موثوق", "موثوقة", "ممتاز", "ممتازة", "سهل", "سهلة", "فريد", "فريدة",
+            "رائد", "رائدة", "مثالي", "مثالية", "مهم", "مهمة", "مرن", "مرنة", "آمن", "آمنة",
+            # common business nouns, categories & qualifiers
+            "إدارة", "تنظيم", "متابعة", "تطوير", "تصميم", "تشغيل", "تحليل", "أتمتة", "حماية",
+            "مراقبة", "تحكم", "محاسبة", "المحاسبة", "المحاسبي", "المحاسبية", "مبيعات", "المبيعات",
+            "مشتريات", "المشتريات", "مخازن", "المخازن", "مستودعات", "المستودعات", "عملاء", "العملاء",
+            "موظفين", "الموظفين", "فواتير", "الفواتير", "تقارير", "التقارير", "بيانات", "البيانات",
+            "شبكات", "الشبكات", "مهام", "المهام", "أعمال", "الأعمال", "مشاريع", "المشاريع",
+            "حلول", "الحلول", "أنظمة", "الأنظمة", "برامج", "البرامج", "تطبيقات", "التطبيقات",
+            "خدمات", "الخدمات", "منتجات", "المنتجات", "الشركة", "المنشأة", "المتجر", "النشاط",
+            "المعتمد", "الرسمي", "المطلوب", "المحدد", "الحالي",
+            "شكل", "بشكل", "طريقة", "بطريقة", "صورة", "بصورة", "حال", "حالة", "مجال", "نطاق",
+            "جانب", "إطار", "مستوى", "نسبة", "درجة", "قدر", "حد", "وقت", "فترة", "مدة", "أجل",
+            "هدف", "قصد", "سبيل", "بما", "مما", "فيما", "بحيث", "وفق", "حسب", "دون",
         }
         for m in prod_matches:
-            candidate = m.group(1).strip()
-            if candidate not in stopwords and len(candidate) > 2:
-                if candidate.lower() not in corpus_text:
-                    return False, f"Unverified product or service '{candidate}' mentioned without basis in BusinessBrain or Knowledge"
+            raw_cand = m.group(1).strip()
+            candidate = clean_arabic_token(raw_cand)
+            if not candidate or len(candidate) <= 2:
+                continue
+            if candidate.startswith("لـ") or (candidate.startswith("ل") and len(candidate) > 3 and candidate[1] in "إاي"):
+                continue
+            if candidate in stopwords:
+                continue
+            cand_core = re.sub(r"^(?:وال|فال|بال|كال|لل|ال|و|ف|ب|ل)", "", candidate)
+            if cand_core in stopwords:
+                continue
+
+            in_corpus = (
+                candidate.lower() in corpus_text
+                or (len(cand_core) >= 3 and cand_core.lower() in corpus_text)
+            )
+            if not in_corpus:
+                return False, f"Unverified product or service '{raw_cand}' mentioned without basis in BusinessBrain or Knowledge"
 
         # 3.1 Product purpose / feature description claim (e.g. "هو نظام لإدارة المهام والمخزون")
         purpose_match = re.search(
@@ -3164,12 +3251,22 @@ class ConversationalAgentEngine:
         )
         if purpose_match:
             purpose_text = purpose_match.group(1).strip()
+            feature_stopwords = {
+                "إدارة", "تقديم", "توفير", "عمل", "خدمة", "نظام", "برنامج", "حل", "أداة",
+                "تسهيل", "مساعدة", "متابعة", "تنظيم", "تحسين", "أتمتة", "العمل", "الأعمال",
+                "المهام", "بشكل", "طريق", "خلال", "جميع", "كافة", "مختلف", "أفضل",
+            }
             words = [
-                w for w in re.findall(r"[\u0621-\u064A]{3,}", purpose_text)
-                if w not in {"إدارة", "تقديم", "توفير", "عمل", "خدمة", "نظام", "برنامج"}
+                clean_arabic_token(w) for w in re.findall(r"[\u0621-\u064A]{3,}", purpose_text)
             ]
+            words = [w for w in words if w and w not in feature_stopwords and w not in stopwords]
             for w in words:
-                if w.lower() not in corpus_text:
+                w_core = re.sub(r"^(?:وال|فال|بال|كال|لل|ال|و|ف|ب|ل)", "", w)
+                in_corpus = (
+                    w.lower() in corpus_text
+                    or (len(w_core) >= 3 and w_core.lower() in corpus_text)
+                )
+                if not in_corpus:
                     return False, f"Unverified feature claim '{purpose_text}' contains unsupported term '{w}'"
 
         # Helper to check if a pattern match is explicitly negated
@@ -3234,10 +3331,36 @@ class ConversationalAgentEngine:
         )
         b_m = branch_pat.search(reply_text)
         if b_m and not is_negated(b_m, reply_text):
-            candidate_city = b_m.group(1).strip()
-            if candidate_city not in {"المحافظات", "المدن", "كل", "جميع", "المنطقة", "البلاد", "الخارج", "هنا"}:
-                if candidate_city.lower() not in corpus_text:
-                    return False, f"Unverified location claim: branch in '{candidate_city}' is not supported by verified facts"
+            raw_city = b_m.group(1).strip()
+            candidate_city = clean_arabic_token(raw_city)
+            generic_locations = {
+                "المحافظات", "المدن", "كل", "جميع", "المنطقة", "البلاد", "الخارج",
+                "هنا", "الرئيسي", "محدد", "رسمي", "معتمد", "أخرى", "الجمهورية", "المملكة",
+            }
+            if candidate_city not in generic_locations and len(candidate_city) >= 3:
+                # Build specific branch / headquarters corpus (do not conflate coverage cities with branch locations)
+                branch_chunks: list[str] = []
+                ops = biz.get("operations") or {}
+                if isinstance(ops, dict):
+                    for k in ("branches", "branch", "locations", "location", "headquarters", "hq", "الفروع", "المقر"):
+                        if k in ops:
+                            branch_chunks.append(json.dumps(ops[k], ensure_ascii=False).lower())
+                for df in db_facts:
+                    top = df.topic.lower()
+                    subj = df.subject.lower()
+                    if any(term in top or term in subj for term in ("branch", "فرع", "فروع", "مقر", "location", "headquarters")):
+                        branch_chunks.append(subj)
+                        branch_chunks.append(top)
+                        branch_chunks.append(json.dumps(df.value, ensure_ascii=False).lower())
+
+                branch_corpus = " ".join(branch_chunks)
+                cand_core = re.sub(r"^(?:وال|فال|بال|كال|لل|ال|و|ف|ب|ل)", "", candidate_city)
+                in_branch = (
+                    candidate_city.lower() in branch_corpus
+                    or (len(cand_core) >= 3 and cand_core.lower() in branch_corpus)
+                )
+                if not in_branch:
+                    return False, f"Unverified location claim: branch in '{raw_city}' is not supported by verified facts"
 
         return True, None
 

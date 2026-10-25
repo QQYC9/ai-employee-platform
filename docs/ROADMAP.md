@@ -115,6 +115,15 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - Verified customer path isolation: customer query prompts receive only confirmed public facts; conflict, private, or pending facts are strictly excluded.
   - Full test suite passing (28/28 passed, 1 skipped).
 
+- **2.10 Customer Path Facts Answering & Guardrail False-Positive Fix**:
+  - **Status**: done
+  - Resolved false-positive blocking in Guardrail Rule 3 where Arabic verbs, descriptive adjectives, prepositions, and markdown characters (e.g. `يُسهّل`, `متكامل`, `|`, `بشكل`) following "برنامج/منتج/خدمة" were falsely classified as unverified product entity names.
+  - Hardened Rule 3 with comprehensive Arabic stopwords, grammatical filters, and tashkeel normalization, preserving strict blocking for actual hallucinated product names (e.g. "برنامج الكافي").
+  - Refined Rule 8 (branch check) so location claims for physical branches ("فرع في صنعاء") are verified strictly against dedicated branch/headquarters facts rather than general service coverage.
+  - Updated handoff reply to: `"هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."` so it makes no false promise while Phase 1 is not yet implemented.
+  - Logged every customer handoff event with `tenant_id`, `conversation_id`, and `question` into the queryable `audit_events` table for tenant owner visibility.
+  - Verified with 9 comprehensive tests in `tests/test_customer_path_confirmed_facts.py` (9/9 passed) across products questions ("ما هي منتجاتكم؟", "ايش تبيعوا؟"), coverage question ("وين تخدموا؟"), branch questions, and unverified price/trial/VAT handoffs. 37/37 regression passing.
+
 ---
 
 ## Phase 3: Adaptive Owner Onboarding Interview
