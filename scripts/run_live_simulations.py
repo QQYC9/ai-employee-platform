@@ -4,20 +4,25 @@ Live Groq Interview Simulation for:
 2. Cloud Software Company (شركة المنذر للحلول البرمجية الذكية)
 
 Exercises the REAL router -> engine path with live Groq AIProvider.
-Produces full conversational transcripts and detailed topic coverage tables.
+Produces full conversational transcripts, token measurements, and detailed topic coverage tables.
 """
 from __future__ import annotations
 
 import os
 import sys
+import time
+import json
+import re
+from uuid import UUID, uuid4
 
 sys.path.insert(0, os.path.abspath("."))
-import json
-from uuid import UUID, uuid4
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from packages.ai_providers.base import AIRateLimitError
 from packages.ai_providers.factory import AIProviderFactory
 from packages.connectors.base import InboundMessage
 from packages.core.database import SessionLocal
@@ -36,6 +41,97 @@ from packages.services.conversational_agent_engine import ConversationalAgentEng
 from packages.services.interview_service import InterviewService
 
 
+class UsageTrackingAIProvider:
+    """Wraps an AIProvider to measure tokens per turn, total per interview, and handle rate-limits."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.turn_calls = 0
+        self.turn_prompt_tokens = 0
+        self.turn_completion_tokens = 0
+        self.turn_total_tokens = 0
+        self.total_interview_tokens = 0
+        self.total_interview_prompt_tokens = 0
+        self.total_interview_completion_tokens = 0
+        self.history = []
+
+    def start_turn(self):
+        self.turn_calls = 0
+        self.turn_prompt_tokens = 0
+        self.turn_completion_tokens = 0
+        self.turn_total_tokens = 0
+
+    def end_turn(self):
+        turn_data = {
+            "calls": self.turn_calls,
+            "prompt_tokens": self.turn_prompt_tokens,
+            "completion_tokens": self.turn_completion_tokens,
+            "total_tokens": self.turn_total_tokens,
+        }
+        self.history.append(turn_data)
+        return turn_data
+
+    def generate_text(self, *args, **kwargs):
+        max_retries = 4
+        backoff = 4.0
+        for attempt in range(max_retries):
+            try:
+                res = self._inner.generate_text(*args, **kwargs)
+                usage = getattr(self._inner, "last_usage", None) or {}
+                p_tok = int(usage.get("prompt_tokens") or 0)
+                c_tok = int(usage.get("completion_tokens") or 0)
+                t_tok = int(usage.get("total_tokens") or (p_tok + c_tok))
+                self.turn_calls += 1
+                self.turn_prompt_tokens += p_tok
+                self.turn_completion_tokens += c_tok
+                self.turn_total_tokens += t_tok
+                self.total_interview_tokens += t_tok
+                self.total_interview_prompt_tokens += p_tok
+                self.total_interview_completion_tokens += c_tok
+                return res
+            except AIRateLimitError as rle:
+                delay = backoff
+                m = re.search(r"try again in ([0-9\.]+)s", str(rle))
+                if m:
+                    delay = max(float(m.group(1)) + 1.5, delay)
+                if attempt < max_retries - 1:
+                    print(f"    [Rate limit pause in generate_text: sleeping {delay:.1f}s...]")
+                    time.sleep(delay)
+                    backoff *= 2.0
+                else:
+                    raise
+
+    def generate_json(self, *args, **kwargs):
+        max_retries = 4
+        backoff = 4.0
+        for attempt in range(max_retries):
+            try:
+                res = self._inner.generate_json(*args, **kwargs)
+                usage = getattr(self._inner, "last_usage", None) or {}
+                p_tok = int(usage.get("prompt_tokens") or 0)
+                c_tok = int(usage.get("completion_tokens") or 0)
+                t_tok = int(usage.get("total_tokens") or (p_tok + c_tok))
+                self.turn_calls += 1
+                self.turn_prompt_tokens += p_tok
+                self.turn_completion_tokens += c_tok
+                self.turn_total_tokens += t_tok
+                self.total_interview_tokens += t_tok
+                self.total_interview_prompt_tokens += p_tok
+                self.total_interview_completion_tokens += c_tok
+                return res
+            except AIRateLimitError as rle:
+                delay = backoff
+                m = re.search(r"try again in ([0-9\.]+)s", str(rle))
+                if m:
+                    delay = max(float(m.group(1)) + 1.5, delay)
+                if attempt < max_retries - 1:
+                    print(f"    [Rate limit pause in generate_json: sleeping {delay:.1f}s...]")
+                    time.sleep(delay)
+                    backoff *= 2.0
+                else:
+                    raise
+
+
 def create_simulation_tenant(db: Session, name: str, owner_id: str) -> tuple[UUID, UUID]:
     tenant_id = uuid4()
     channel_id = uuid4()
@@ -45,6 +141,7 @@ def create_simulation_tenant(db: Session, name: str, owner_id: str) -> tuple[UUI
         name=name,
         slug=f"sim-{uuid4().hex[:8]}",
         status="active",
+        employee_name="سارة",
         interview_required=True,
         interview_threshold=80.0,
     )
@@ -117,14 +214,15 @@ def send_turn(
     return user_text, res.reply_content
 
 
-def run_honey_shop_simulation(groq_provider):
+def run_honey_shop_simulation(raw_provider):
     db = SessionLocal()
+    tracker = UsageTrackingAIProvider(raw_provider)
     try:
         owner_id = "967771111111"
         tenant_id, channel_id = create_simulation_tenant(db, "متجر ومناحل البركة للعسل الطبيعي", owner_id)
-        engine = ConversationalAgentEngine(db=db, ai_provider=groq_provider)
+        engine = ConversationalAgentEngine(db=db, ai_provider=tracker)
 
-        transcript: list[dict[str, str]] = []
+        transcript: list[dict[str, any]] = []
 
         turns = [
             # 1. Start interview
@@ -149,13 +247,31 @@ def run_honey_shop_simulation(groq_provider):
             "نوصل لجميع مناطق صنعاء عبر مندوبين ونشحن لباقي المحافظات اليمنية",
         ]
 
+        print(f"\n--- Starting Honey Shop Simulation (Tenant {tenant_id}) ---")
         for turn_idx, text in enumerate(turns, 1):
+            tracker.start_turn()
             u_text, ai_reply = send_turn(db, engine, tenant_id, channel_id, owner_id, text)
-            transcript.append({"turn": turn_idx, "owner": u_text, "ai": ai_reply})
+            turn_usage = tracker.end_turn()
+            transcript.append({
+                "turn": turn_idx,
+                "owner": u_text,
+                "ai": ai_reply,
+                "usage": turn_usage,
+            })
+            print(f"Turn {turn_idx} finished. Owner: '{u_text[:35]}...' | Total Tokens: {turn_usage['total_tokens']} (Prompt: {turn_usage['prompt_tokens']}, Compl: {turn_usage['completion_tokens']})")
+            time.sleep(3.0)  # Throttling to prevent provider TPM rate limits
+
+        # Fetch state and attempts
+        db.expire_all()
+        interview_state = db.scalar(select(InterviewState).where(InterviewState.tenant_id == tenant_id))
+        attempts_map = (interview_state.classification_answers or {}).get("topic_attempts", {}) if interview_state else {}
 
         # Fetch topics and statuses
-        db.expire_all()
-        topics = db.scalars(select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id).order_by(InterviewTopic.criticality.desc())).all()
+        topics = db.scalars(
+            select(InterviewTopic)
+            .where(InterviewTopic.tenant_id == tenant_id)
+            .order_by(InterviewTopic.criticality.desc())
+        ).all()
 
         topic_table = []
         for t in topics:
@@ -165,38 +281,57 @@ def run_honey_shop_simulation(groq_provider):
                 if src_msg and src_msg.content:
                     what_said = src_msg.content.strip()
 
+            attempts = attempts_map.get(t.slug)
+            if attempts is None:
+                attempts = 1 if t.status in ("answered", "asked", "partial") else 0
+
+            decided = getattr(t, "decided_by", None) or "model"
+
             topic_table.append({
                 "slug": t.slug,
                 "label": t.label,
                 "status": t.status,
+                "attempts": attempts,
                 "coverage": f"{int((t.coverage or 0.0) * 100)}%",
                 "criticality": t.criticality,
-                "decided_by": getattr(t, "decided_by", None) or "model",
+                "decided_by": decided,
                 "what_owner_said": what_said,
             })
+
+        decided_counts = {
+            "model": sum(1 for t in topic_table if t["decided_by"] == "model"),
+            "fallback": sum(1 for t in topic_table if t["decided_by"] == "fallback"),
+        }
 
         # Facts
         facts = db.scalars(select(Fact).where(Fact.tenant_id == tenant_id, Fact.status == "confirmed")).all()
         fact_list = [{"topic": f.topic, "subject": f.subject, "value": f.value} for f in facts]
 
         return {
-            "business": "Honey Shop (مناحل البركة)",
+            "business": "Honey Shop (متجر ومناحل البركة للعسل الطبيعي)",
             "transcript": transcript,
             "topics": topic_table,
+            "decided_by_counts": decided_counts,
             "facts": fact_list,
+            "total_tokens": {
+                "prompt_tokens": tracker.total_interview_prompt_tokens,
+                "completion_tokens": tracker.total_interview_completion_tokens,
+                "total_tokens": tracker.total_interview_tokens,
+            },
         }
     finally:
         db.close()
 
 
-def run_software_company_simulation(groq_provider):
+def run_software_company_simulation(raw_provider):
     db = SessionLocal()
+    tracker = UsageTrackingAIProvider(raw_provider)
     try:
         owner_id = "967772222222"
         tenant_id, channel_id = create_simulation_tenant(db, "شركة المنذر للحلول البرمجية الذكية", owner_id)
-        engine = ConversationalAgentEngine(db=db, ai_provider=groq_provider)
+        engine = ConversationalAgentEngine(db=db, ai_provider=tracker)
 
-        transcript: list[dict[str, str]] = []
+        transcript: list[dict[str, any]] = []
 
         turns = [
             # 1. Start interview
@@ -221,13 +356,31 @@ def run_software_company_simulation(groq_provider):
             "نفضل نبرة رسمية ومهنية وواضحة جداً",
         ]
 
+        print(f"\n--- Starting Software Company Simulation (Tenant {tenant_id}) ---")
         for turn_idx, text in enumerate(turns, 1):
+            tracker.start_turn()
             u_text, ai_reply = send_turn(db, engine, tenant_id, channel_id, owner_id, text)
-            transcript.append({"turn": turn_idx, "owner": u_text, "ai": ai_reply})
+            turn_usage = tracker.end_turn()
+            transcript.append({
+                "turn": turn_idx,
+                "owner": u_text,
+                "ai": ai_reply,
+                "usage": turn_usage,
+            })
+            print(f"Turn {turn_idx} finished. Owner: '{u_text[:35]}...' | Total Tokens: {turn_usage['total_tokens']} (Prompt: {turn_usage['prompt_tokens']}, Compl: {turn_usage['completion_tokens']})")
+            time.sleep(3.0)  # Throttling to prevent provider TPM rate limits
+
+        # Fetch state and attempts
+        db.expire_all()
+        interview_state = db.scalar(select(InterviewState).where(InterviewState.tenant_id == tenant_id))
+        attempts_map = (interview_state.classification_answers or {}).get("topic_attempts", {}) if interview_state else {}
 
         # Fetch topics and statuses
-        db.expire_all()
-        topics = db.scalars(select(InterviewTopic).where(InterviewTopic.tenant_id == tenant_id).order_by(InterviewTopic.criticality.desc())).all()
+        topics = db.scalars(
+            select(InterviewTopic)
+            .where(InterviewTopic.tenant_id == tenant_id)
+            .order_by(InterviewTopic.criticality.desc())
+        ).all()
 
         topic_table = []
         for t in topics:
@@ -237,15 +390,27 @@ def run_software_company_simulation(groq_provider):
                 if src_msg and src_msg.content:
                     what_said = src_msg.content.strip()
 
+            attempts = attempts_map.get(t.slug)
+            if attempts is None:
+                attempts = 1 if t.status in ("answered", "asked", "partial") else 0
+
+            decided = getattr(t, "decided_by", None) or "model"
+
             topic_table.append({
                 "slug": t.slug,
                 "label": t.label,
                 "status": t.status,
+                "attempts": attempts,
                 "coverage": f"{int((t.coverage or 0.0) * 100)}%",
                 "criticality": t.criticality,
-                "decided_by": getattr(t, "decided_by", None) or "model",
+                "decided_by": decided,
                 "what_owner_said": what_said,
             })
+
+        decided_counts = {
+            "model": sum(1 for t in topic_table if t["decided_by"] == "model"),
+            "fallback": sum(1 for t in topic_table if t["decided_by"] == "fallback"),
+        }
 
         # Facts
         facts = db.scalars(select(Fact).where(Fact.tenant_id == tenant_id, Fact.status == "confirmed")).all()
@@ -255,10 +420,67 @@ def run_software_company_simulation(groq_provider):
             "business": "Software Company (شركة المنذر للحلول البرمجية الذكية)",
             "transcript": transcript,
             "topics": topic_table,
+            "decided_by_counts": decided_counts,
             "facts": fact_list,
+            "total_tokens": {
+                "prompt_tokens": tracker.total_interview_prompt_tokens,
+                "completion_tokens": tracker.total_interview_completion_tokens,
+                "total_tokens": tracker.total_interview_tokens,
+            },
         }
     finally:
         db.close()
+
+
+def print_simulation_report(data: dict):
+    biz = data["business"]
+    print("\n" + "=" * 90)
+    print(f"EVIDENCE REPORT FOR: {biz}")
+    print("=" * 90)
+
+    print("\n[A] FULL CONVERSATIONAL TRANSCRIPT & TOKEN USAGE PER TURN:")
+    for turn in data["transcript"]:
+        idx = turn["turn"]
+        u = turn["owner"]
+        a = turn["ai"]
+        tok = turn["usage"]
+        print(f"\nTurn {idx}:")
+        print(f"  Owner: {u}")
+        print(f"  AI Reply:")
+        for line in a.splitlines():
+            print(f"    {line}")
+        print(f"  [Usage]: {tok['total_tokens']} tokens (prompt: {tok['prompt_tokens']}, completion: {tok['completion_tokens']}, calls: {tok['calls']})")
+
+    print(f"\n[B] TOTAL INTERVIEW TOKENS:")
+    tt = data["total_tokens"]
+    print(f"  • Prompt Tokens:     {tt['prompt_tokens']}")
+    print(f"  • Completion Tokens: {tt['completion_tokens']}")
+    print(f"  • Total Tokens:      {tt['total_tokens']}")
+
+    print(f"\n[C] DECIDED_BY SUMMARY (MODEL VS FALLBACK):")
+    dc = data["decided_by_counts"]
+    print(f"  • Decided by Model:    {dc['model']}")
+    print(f"  • Decided by Fallback: {dc['fallback']}")
+
+    print("\n[D] PERSISTED DB TOPIC COVERAGE TABLE:")
+    header = f"{'Topic Slug':<25} | {'Status':<12} | {'Attempts':<8} | {'DecidedBy':<10} | {'What Owner Said (Message Text)':<40}"
+    print("-" * len(header))
+    print(header)
+    print("-" * len(header))
+    for row in data["topics"]:
+        slug = row["slug"][:25]
+        status = row["status"][:12]
+        att = str(row["attempts"])
+        dec = row["decided_by"]
+        said = row["what_owner_said"]
+        if len(said) > 40:
+            said = said[:37] + "..."
+        print(f"{slug:<25} | {status:<12} | {att:<8} | {dec:<10} | {said:<40}")
+    print("-" * len(header))
+
+    print("\n[E] EXTRACTED CONFIRMED FACTS (PERSISTED DB):")
+    for fact in data["facts"]:
+        print(f"  • {fact['topic']} [{fact['subject']}]: {fact['value']}")
 
 
 if __name__ == "__main__":
@@ -268,10 +490,19 @@ if __name__ == "__main__":
     print("\n================ RUNNING HONEY SHOP LIVE SIMULATION ================\n")
     honey_res = run_honey_shop_simulation(groq)
 
+    print("\nPausing 10s between simulations to refresh TPM quota...\n")
+    time.sleep(10.0)
+
     print("\n================ RUNNING SOFTWARE COMPANY LIVE SIMULATION ================\n")
     sw_res = run_software_company_simulation(groq)
 
+    os.makedirs("scratch", exist_ok=True)
     with open("scratch/simulation_results.json", "w", encoding="utf-8") as f:
         json.dump({"honey": honey_res, "software": sw_res}, f, ensure_ascii=False, indent=2)
 
-    print("\nCompleted live simulations successfully! Saved results to scratch/simulation_results.json")
+    print("\n" + "#" * 90)
+    print_simulation_report(honey_res)
+    print("\n" + "#" * 90)
+    print_simulation_report(sw_res)
+
+    print("\nCompleted live simulations successfully! Persisted results to scratch/simulation_results.json")

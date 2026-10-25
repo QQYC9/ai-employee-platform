@@ -304,3 +304,31 @@ This log records major design and implementation choices, including rationale an
      - Unified coverage evaluation and fact extraction into a single model call (`ReplyCoverageEvaluation` + `FactExtractionResponse`), reducing model roundtrips.
      - Added exponential backoff retry loop (1s -> 2s -> 4s) on AI rate limit errors with polite delay notice on exhaustion.
      - Automated live simulation reporting extracting actual database rows dynamically (`InterviewTopic.status`, `InterviewTopic.coverage`, and `Message.content` via `source_message_id`).
+
+
+---
+
+## Decision 3.4: Phase 3.2 Review — Sender-Scoped Link Code Rate Limiting, Production Dashboard Guards & Simulation Ground Truth
+- **Context**: Review of Phase 3.2 revealed three critical design vulnerabilities and missing verification evidence:
+  1. *Link-Code Denial of Service*: Locking a link code globally after 5 failed attempts allowed any malicious sender or attacker to invalidate the legitimate owner's link code by sending 5 wrong guesses.
+  2. *Dashboard URL Environment Leakage*: The welcome onboarding message defaulted to `http://localhost:5173`. In production or staging environments, sending localhost URLs breaks user onboarding and leaks internal setup.
+  3. *Unbounded Reset Token Validity*: Password reset tokens needed a tight, explicit expiration window (30 minutes) and unambiguous communication to the owner.
+  4. *Addendum Verification Evidence*: Persisted database proof was needed for live model interview runs (Honey Shop & Software Company) on live providers, with exact token metrics per turn, decided_by attribution, explanation for previous honey table divergence, brand-specific string audits, and full regression statistics.
+- **Decision**:
+  1. **Sender-Scoped Link Code Rate Limiting (`SenderLinkRateLimiter`)**:
+     - Redesigned rate limiting in `packages/services/link_code_service.py`: brute-force throttling is now tracked per `(sender_id, channel_id)` rather than globally locking the code.
+     - Exponential backoff is applied to offending senders (base 60s, doubling with repeated blocks), temporarily blocking attacker attempts with neutral Arabic messaging: `"تم تجاوز الحد المسموح من المحاولات. يرجى المحاولة بعد قليل."`.
+     - The legitimate owner's link code remains completely valid, secure, and usable.
+     - Audit events (`channel_link_code_rate_limited`) are emitted with masked sender details.
+  2. **Production Dashboard URL Guard & Expiration Constraints**:
+     - Introduced `TENANT_DASHBOARD_URL` configuration setting with `effective_tenant_dashboard_url` property in `packages/core/config.py`.
+     - Strictly prohibits `localhost` or missing URLs in `production` and `staging` environments; logs configuration errors and raises during startup validation.
+     - Set password reset token validity to exactly 30 minutes (`password_reset_token_expire_minutes: int = 30`), explicitly communicated in the Arabic welcome message.
+     - All logged and displayed tokens are masked with `[MASKED_TOKEN]`.
+  3. **Real-Path Onboarding Flow & Transcript Verification**:
+     - Scripted end-to-end verification through the real router -> engine path (`scripts/generate_onboarding_transcript.py`):
+       Tenant created with employee "سارة" -> link code generated -> `/link CODE` sent -> owner verified -> welcome message with dashboard URL, email, masked password link -> interview starts with "سارة" -> code reuse rejected -> wrong code rejected -> already linked owner notified.
+  4. **Dynamic Database Ground Truth & Token Consumption Metrics**:
+     - Upgraded `scripts/run_live_simulations.py` with `UsageTrackingAIProvider` measuring prompt, completion, and total tokens per turn and per interview.
+     - Dynamic rate-limit backoff handling for Groq (`openai/gpt-oss-120b`) extracting `try again in X s` delays.
+     - Persisted DB topic tables query actual stored `InterviewTopic`, `InterviewState`, and `Message` rows linked by `source_message_id`, attributing `decided_by` ("model" vs "fallback").

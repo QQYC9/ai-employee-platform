@@ -53,8 +53,9 @@ class Settings(BaseSettings):
     rate_limit_planning_per_minute: int = 30
 
     # Frontend Dashboards
-    tenant_dashboard_url: str = "http://localhost:5173"
-    admin_dashboard_url: str = "http://localhost:5174"
+    tenant_dashboard_url: str | None = None
+    admin_dashboard_url: str | None = None
+    password_reset_token_expire_minutes: int = 30
 
     @property
     def effective_test_database_url(self) -> str:
@@ -76,6 +77,28 @@ class Settings(BaseSettings):
         if self.environment.lower() in ("production", "prod", "staging"):
             return False
         return self.allow_dev_auth_header
+
+    @property
+    def effective_tenant_dashboard_url(self) -> str:
+        """
+        Returns the resolved tenant dashboard URL.
+        In production/staging, requires TENANT_DASHBOARD_URL to be a public URL and strictly disallows localhost.
+        In development/testing, falls back to http://localhost:5173 if unspecified.
+        """
+        env_clean = (self.environment or "").strip().lower()
+        clean_url = (self.tenant_dashboard_url or "").strip()
+        if env_clean in ("production", "prod", "staging"):
+            if not clean_url or "localhost" in clean_url or "127.0.0.1" in clean_url:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Production configuration error: TENANT_DASHBOARD_URL is required and cannot be localhost in %s",
+                    self.environment,
+                )
+                raise RuntimeError(
+                    f"Production configuration error: TENANT_DASHBOARD_URL is required and cannot be localhost in '{self.environment}'"
+                )
+            return clean_url
+        return clean_url or "http://localhost:5173"
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Settings:
@@ -107,6 +130,27 @@ class Settings(BaseSettings):
                     raise ValueError(
                         f"Production startup rejected: SECRETS_ENCRYPTION_KEY must be at least 32 characters or 64-char hex in '{self.environment}' environment."
                     )
+
+            clean_dash_url = (self.tenant_dashboard_url or "").strip()
+            if not clean_dash_url:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Production configuration error: TENANT_DASHBOARD_URL is missing in environment '%s'",
+                    self.environment,
+                )
+                raise ValueError(
+                    f"Production startup rejected: TENANT_DASHBOARD_URL is a required setting in '{self.environment}' environment."
+                )
+            if "localhost" in clean_dash_url or "127.0.0.1" in clean_dash_url:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Production configuration error: TENANT_DASHBOARD_URL cannot use localhost/127.0.0.1 in environment '%s'",
+                    self.environment,
+                )
+                raise ValueError(
+                    f"Production startup rejected: TENANT_DASHBOARD_URL cannot use localhost/127.0.0.1 in '{self.environment}' environment."
+                )
+
         return self
 
     model_config = SettingsConfigDict(

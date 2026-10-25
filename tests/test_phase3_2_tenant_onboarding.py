@@ -29,7 +29,7 @@ from packages.models.tenant import Tenant
 from packages.services.channel_service import ChannelService
 from packages.services.conversational_agent_engine import ConversationalAgentEngine
 from packages.services.interview_service import InterviewService
-from packages.services.link_code_service import LinkCodeService
+from packages.services.link_code_service import LinkCodeService, sender_link_rate_limiter
 from packages.services.tenant_provisioning_service import (
     TenantProvisioningRequest,
     TenantProvisioningService,
@@ -67,14 +67,18 @@ class DeterministicMockAIProvider:
 def clean_environment():
     """Ensure clean test environment."""
     rate_limiter.reset()
+    sender_link_rate_limiter.reset()
     original_env = settings.environment
     original_allow = settings.allow_dev_auth_header
+    original_dash = settings.tenant_dashboard_url
     settings.environment = "development"
     settings.allow_dev_auth_header = True
     yield
     rate_limiter.reset()
+    sender_link_rate_limiter.reset()
     settings.environment = original_env
     settings.allow_dev_auth_header = original_allow
+    settings.tenant_dashboard_url = original_dash
 
 
 @pytest.fixture
@@ -450,6 +454,7 @@ def test_dashboard_access_welcome_and_tokenized_password_reset(db: Session):
     assert "بيانات الدخول إلى لوحة التحكم:" in reply
     assert f"• البريد الإلكتروني: {owner_email}" in reply
     assert "• رابط تعيين كلمة المرور:" in reply
+    assert "صلاحية الرابط: 30 دقيقة" in reply
     assert "/set-password?token=" in reply
 
     # Ensure NO plaintext password or default password appears anywhere
@@ -584,3 +589,101 @@ def test_tenant_isolation_link_codes_and_channels(db: Session):
     headers_a = {"Authorization": f"Bearer {token_a}"}
     cross_api_res = client.get(f"/api/v1/channels/{channel_b_id}/link-code", headers=headers_a)
     assert cross_api_res.status_code == 404
+
+
+# =========================================================================
+# 6. Production Dashboard URL Security & Token Expiry Tests (Item 4)
+# =========================================================================
+
+def test_production_dashboard_url_guard():
+    """
+    Item 4:
+    In production and staging, TENANT_DASHBOARD_URL must be a public URL and cannot be localhost.
+    Fails clearly with RuntimeError and logs error if missing or pointing to localhost.
+    """
+    settings.environment = "production"
+
+    # 1. Missing URL in production -> raises RuntimeError
+    settings.tenant_dashboard_url = None
+    with pytest.raises(RuntimeError) as exc1:
+        _ = settings.effective_tenant_dashboard_url
+    assert "TENANT_DASHBOARD_URL is required" in str(exc1.value)
+
+    # 2. Localhost URL in production -> raises RuntimeError
+    settings.tenant_dashboard_url = "http://localhost:5173"
+    with pytest.raises(RuntimeError) as exc2:
+        _ = settings.effective_tenant_dashboard_url
+    assert "cannot be localhost" in str(exc2.value)
+
+    # 3. Valid public URL in production -> accepted
+    settings.tenant_dashboard_url = "https://app.digitalemployee.sa"
+    assert settings.effective_tenant_dashboard_url == "https://app.digitalemployee.sa"
+
+
+def test_password_reset_token_short_expiry_and_reuse_rejection(db: Session):
+    """
+    Item 4:
+    Verify short-lived token expiry (30-60 min) and single-use reuse rejection:
+    1. An expired token is rejected with HTTP 400.
+    2. A valid token resets the password successfully.
+    3. Reusing the same token is rejected with HTTP 400.
+    """
+    from datetime import timedelta
+    client = TestClient(app)
+
+    tenant = Tenant(
+        id=uuid4(),
+        name="Test Tenant",
+        slug=f"test-{uuid4().hex[:6]}",
+        status="active",
+    )
+    db.add(tenant)
+    db.flush()
+
+    user = User(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        name="Test User",
+        email=f"test-exp-{uuid4().hex[:6]}@example.com",
+        role="tenant_owner",
+        status="active",
+        password_hash=hash_password("InitialSecret123!"),
+    )
+    db.add(user)
+    db.commit()
+
+    # 1. Expired token (issued with negative delta)
+    expired_token = create_password_reset_token(
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        password_hash=user.password_hash,
+        expires_delta=timedelta(seconds=-10),
+    )
+    res_exp = client.post(
+        "/api/v1/auth/reset-password-with-token",
+        json={"token": expired_token, "new_password": "NewValidPassword123!"},
+    )
+    assert res_exp.status_code == 400
+    assert "expired" in res_exp.json()["detail"].lower()
+
+    # 2. Valid token (30 min expiry)
+    valid_token = create_password_reset_token(
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        password_hash=user.password_hash,
+        expires_delta=timedelta(minutes=30),
+    )
+    res_valid = client.post(
+        "/api/v1/auth/reset-password-with-token",
+        json={"token": valid_token, "new_password": "BrandNewPassword2026!"},
+    )
+    assert res_valid.status_code == 200
+    assert res_valid.json()["status"] == "ok"
+
+    # 3. Token reuse rejection
+    res_reuse = client.post(
+        "/api/v1/auth/reset-password-with-token",
+        json={"token": valid_token, "new_password": "AnotherNewPassword999!"},
+    )
+    assert res_reuse.status_code == 400
+    assert "already been used" in res_reuse.json()["detail"]

@@ -67,3 +67,18 @@ class MemorySanitizer:
                         cls.scan_for_secrets(item)
                     elif isinstance(item, dict):
                         cls.scan_dict_for_secrets(item)
+
+    @classmethod
+    def mask_secrets(cls, text: str) -> str:
+        """
+        Masks detected credentials and sensitive patterns with [REDACTED_SECRET].
+        Safe to call on arbitrary logs, stdout, or candidate code output.
+        """
+        if not text:
+            return ""
+
+        sanitized = text
+        for name, pattern in cls.PATTERNS.items():
+            sanitized = pattern.sub(f"[REDACTED_{name.upper().replace(' ', '_')}]", sanitized)
+        return sanitized
+

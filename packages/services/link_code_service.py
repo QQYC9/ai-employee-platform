@@ -29,6 +29,73 @@ from packages.services.audit_service import AuditService
 logger = logging.getLogger(__name__)
 
 
+import threading
+
+class SenderLinkRateLimiter:
+    """
+    Thread-safe in-memory rate limiter with exponential backoff per (tenant_id, channel_id, sender_id).
+    Blocks senders who fail repeatedly without locking or invalidating the actual link code.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        # key: (tenant_id, channel_id, sender_id)
+        # value: {"failed_attempts": int, "blocked_until": float, "last_attempt": float}
+        self._records: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    def is_blocked(self, tenant_id: UUID, channel_id: UUID, sender_id: str) -> tuple[bool, int]:
+        """Returns (is_blocked: bool, retry_after_seconds: int)."""
+        key = (str(tenant_id), str(channel_id), str(sender_id))
+        now = datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            rec = self._records.get(key)
+            if not rec:
+                return False, 0
+            blocked_until = rec.get("blocked_until", 0.0)
+            if now < blocked_until:
+                return True, max(1, int(blocked_until - now))
+            return False, 0
+
+    def record_failure(
+        self,
+        tenant_id: UUID,
+        channel_id: UUID,
+        sender_id: str,
+        base_block_seconds: int = 60,
+        max_failures_before_block: int = 5,
+    ) -> tuple[int, int]:
+        """
+        Records a failed attempt for sender.
+        Returns (total_failed_attempts: int, block_seconds: int).
+        If total_failed_attempts >= max_failures_before_block, applies exponential backoff:
+        block_seconds = base_block_seconds * (2 ** (total_failed_attempts - max_failures_before_block)).
+        """
+        key = (str(tenant_id), str(channel_id), str(sender_id))
+        now = datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            rec = self._records.setdefault(key, {"failed_attempts": 0, "blocked_until": 0.0, "last_attempt": now})
+            rec["failed_attempts"] += 1
+            rec["last_attempt"] = now
+            failures = rec["failed_attempts"]
+            if failures >= max_failures_before_block:
+                multiplier = min(failures - max_failures_before_block, 6)
+                block_duration = base_block_seconds * (2 ** multiplier)
+                rec["blocked_until"] = now + block_duration
+                return failures, block_duration
+            return failures, 0
+
+    def record_success(self, tenant_id: UUID, channel_id: UUID, sender_id: str):
+        """Clears failed attempts on successful verification."""
+        key = (str(tenant_id), str(channel_id), str(sender_id))
+        with self._lock:
+            self._records.pop(key, None)
+
+    def reset(self):
+        """Reset all records (useful for test isolation)."""
+        with self._lock:
+            self._records.clear()
+
+sender_link_rate_limiter = SenderLinkRateLimiter()
+
 class LinkCodeService:
     """Manages the creation, verification, consumption, and audit trail of channel link codes."""
 
@@ -126,7 +193,8 @@ class LinkCodeService:
     ) -> tuple[bool, str, TenantLinkCode | None]:
         """
         Verifies and consumes a candidate link code:
-        - Rate limits brute force (max 5 attempts per active code).
+        - Rate limits brute force per sender and per channel with exponential backoff.
+        - Keeps the legitimate owner's link code valid even if an attacker guesses wrong.
         - Validates tenant and channel scoping.
         - Checks expiration and single-use status.
         - Atomically marks the code as used upon success.
@@ -137,30 +205,21 @@ class LinkCodeService:
         cand_hash = self.hash_code(clean_code)
         now = datetime.now(timezone.utc)
 
-        # 1. Fetch active codes for this channel to check rate limits
-        active_codes = self.db.scalars(
-            select(TenantLinkCode).where(
-                TenantLinkCode.tenant_id == tenant_id,
-                TenantLinkCode.channel_id == channel_id,
-                TenantLinkCode.is_used.is_(False),
-                TenantLinkCode.is_revoked.is_(False),
+        # 1. Rate Limiting Check: Blocked sender check
+        is_blocked, retry_after = sender_link_rate_limiter.is_blocked(tenant_id, channel_id, sender_id)
+        if is_blocked:
+            self.audit_service.record_event(
+                tenant_id=tenant_id,
+                event_type="channel_link_code_rate_limited",
+                action="link_code_rate_limited",
+                description=f"Link code attempt blocked: sender '{sender_id}' temporarily blocked on channel '{channel_id}' ({retry_after}s remaining)",
+                event_metadata={
+                    "channel_id": str(channel_id),
+                    "sender_id": sender_id,
+                    "retry_after": retry_after,
+                },
             )
-        ).all()
-
-        for ac in active_codes:
-            if ac.attempts_count >= ac.max_attempts:
-                self.audit_service.record_event(
-                    tenant_id=tenant_id,
-                    event_type="channel_link_code_rate_limited",
-                    action="link_code_rate_limited",
-                    description=f"Link code attempt blocked: max attempts ({ac.max_attempts}) reached for channel '{channel_id}'",
-                    event_metadata={
-                        "channel_id": str(channel_id),
-                        "sender_id": sender_id,
-                        "attempts_count": ac.attempts_count,
-                    },
-                )
-                return False, "rate_limited", ac
+            return False, "rate_limited", None
 
         # 2. Lookup record matching hash, tenant, and channel
         matched_record = self.db.scalar(
@@ -172,20 +231,48 @@ class LinkCodeService:
         )
 
         if matched_record is None:
-            # Increment attempts on active codes for this channel as security deterrent
+            # Increment attempt counter on active codes for audit/telemetry
+            active_codes = self.db.scalars(
+                select(TenantLinkCode).where(
+                    TenantLinkCode.tenant_id == tenant_id,
+                    TenantLinkCode.channel_id == channel_id,
+                    TenantLinkCode.is_used.is_(False),
+                    TenantLinkCode.is_revoked.is_(False),
+                )
+            ).all()
             for ac in active_codes:
                 ac.attempts_count += 1
                 self.db.add(ac)
             self.db.flush()
 
+            # Record failed attempt for this specific sender
+            failures, block_dur = sender_link_rate_limiter.record_failure(
+                tenant_id, channel_id, sender_id
+            )
+            if block_dur > 0:
+                self.audit_service.record_event(
+                    tenant_id=tenant_id,
+                    event_type="channel_link_code_rate_limited",
+                    action="link_code_rate_limited",
+                    description=f"Sender '{sender_id}' blocked on channel '{channel_id}' for {block_dur}s after {failures} failed attempts",
+                    event_metadata={
+                        "channel_id": str(channel_id),
+                        "sender_id": sender_id,
+                        "failed_attempts": failures,
+                        "block_duration": block_dur,
+                    },
+                )
+                return False, "rate_limited", None
+
             self.audit_service.record_event(
                 tenant_id=tenant_id,
                 event_type="channel_link_code_failed",
                 action="link_code_failed",
-                description=f"Invalid link code submitted by sender '{sender_id}' for channel '{channel_id}'",
+                description=f"Invalid link code submitted by sender '{sender_id}' for channel '{channel_id}' (attempt {failures})",
                 event_metadata={
                     "channel_id": str(channel_id),
                     "sender_id": sender_id,
+                    "failed_attempts": failures,
                     "reason": "invalid_code",
                 },
             )
@@ -222,10 +309,8 @@ class LinkCodeService:
             )
             return False, "expired", matched_record
 
-        if matched_record.attempts_count >= matched_record.max_attempts:
-            return False, "rate_limited", matched_record
-
-        # 4. Successful consumption! Mark single-use
+        # 4. Successful consumption! Mark single-use and clear sender failures
+        sender_link_rate_limiter.record_success(tenant_id, channel_id, sender_id)
         matched_record.is_used = True
         matched_record.used_at = now
         matched_record.used_by_sender_id = sender_id
@@ -243,7 +328,6 @@ class LinkCodeService:
                 "code_prefix": matched_record.code_prefix,
             },
         )
-
         return True, "success", matched_record
 
     def get_active_code_status(

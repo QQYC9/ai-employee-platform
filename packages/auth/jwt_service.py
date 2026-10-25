@@ -81,7 +81,8 @@ def create_password_reset_token(
     import hashlib
 
     now = datetime.now(timezone.utc)
-    expires_at = now + (expires_delta or timedelta(hours=24))
+    expire_mins = getattr(settings, "password_reset_token_expire_minutes", 30)
+    expires_at = now + (expires_delta or timedelta(minutes=expire_mins))
     pwh_sig = hashlib.sha256((password_hash or "").encode()).hexdigest()[:16]
 
     payload: dict[str, Any] = {

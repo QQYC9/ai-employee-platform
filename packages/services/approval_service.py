@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+import re
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from packages.models.domain import Approval, Task, User
@@ -80,6 +82,10 @@ class ApprovalService:
         description: str,
         task_id: UUID | None = None,
         requested_by_agent_id: UUID | None = None,
+        *,
+        token: str | None = None,
+        expires_at: datetime | None = None,
+        expires_in_hours: int | None = None,
     ) -> Approval:
         requested_for = requested_for.strip()
         action = action.strip()
@@ -100,20 +106,116 @@ class ApprovalService:
                 "Approval description cannot be empty"
             )
 
+        # Build correlation tags if token or expiration requested
+        meta_prefix = ""
+        if token:
+            clean_token = token.strip().upper()
+            meta_prefix += f"[TOKEN: {clean_token}] "
+
+        calc_expiry = expires_at
+        if calc_expiry is None and expires_in_hours is not None and expires_in_hours > 0:
+            calc_expiry = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
+
+        if calc_expiry:
+            if calc_expiry.tzinfo is None:
+                calc_expiry = calc_expiry.replace(tzinfo=timezone.utc)
+            meta_prefix += f"[EXPIRES: {calc_expiry.isoformat()}] "
+
+        # Validate linked task if provided
+        if task_id is not None:
+            task = self.db.scalar(
+                select(Task).where(Task.id == task_id, Task.tenant_id == tenant_id)
+            )
+            if task is None:
+                raise ValueError(f"Task '{task_id}' not found for tenant")
+            if getattr(task, "status", None) in ("completed", "failed", "cancelled"):
+                raise ValueError(
+                    f"Cannot create approval for inactive task in status '{task.status}'"
+                )
+
+        effective_description = f"{meta_prefix}{description}".strip()
+
         approval = Approval(
             tenant_id=tenant_id,
             task_id=task_id,
             requested_by_agent_id=requested_by_agent_id,
             requested_for=requested_for,
             action=action,
-            description=description,
+            description=effective_description,
             status="pending",
+            token=clean_token if token else None,
+            expires_at=calc_expiry,
         )
 
         self.db.add(approval)
         self.db.flush()
 
         return approval
+
+    @staticmethod
+    def get_approval_token(approval: Approval | None) -> str | None:
+        """Extract correlation token from dedicated column or description if present."""
+        if not approval:
+            return None
+        col_token = getattr(approval, "token", None)
+        if col_token:
+            return str(col_token).strip()
+        if not approval.description:
+            return None
+        m = re.search(r"\[TOKEN:\s*([A-Za-z0-9_-]+)\]", approval.description)
+        return m.group(1).strip() if m else None
+
+    @staticmethod
+    def get_approval_expiry(approval: Approval | None) -> datetime | None:
+        """Extract expiration timestamp from dedicated column or description if present."""
+        if not approval:
+            return None
+        col_expiry = getattr(approval, "expires_at", None)
+        if col_expiry is not None:
+            return col_expiry
+        if not approval.description:
+            return None
+        m = re.search(r"\[EXPIRES:\s*([^\]]+)\]", approval.description)
+        if not m:
+            return None
+        try:
+            return datetime.fromisoformat(m.group(1).strip())
+        except Exception:
+            return None
+
+    @staticmethod
+    def is_approval_expired(approval: Approval | None) -> bool:
+        """Check if approval has passed its expiration timestamp."""
+        expiry = ApprovalService.get_approval_expiry(approval)
+        if expiry is None:
+            return False
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) > expiry
+
+    def find_pending_approval_by_token(self, tenant_id: UUID, token: str) -> Approval | None:
+        """Find pending approval by its correlation token within tenant scope."""
+        if not token:
+            return None
+        clean_token = token.strip().upper()
+        # Fast-path: query dedicated indexed token column
+        indexed_app = self.db.scalar(
+            select(Approval).where(
+                Approval.tenant_id == tenant_id,
+                func.upper(Approval.token) == clean_token,
+                Approval.status == "pending",
+            )
+        )
+        if indexed_app is not None:
+            return indexed_app
+
+        # Fallback: scan pending approvals with tokens in description
+        pending = self.list_approvals(tenant_id, status="pending")
+        for app in pending:
+            app_token = self.get_approval_token(app)
+            if app_token and app_token.upper() == clean_token:
+                return app
+        return None
 
     @staticmethod
     def is_role_authorized(role: str | None, requested_for: str) -> bool:
@@ -145,10 +247,17 @@ class ApprovalService:
         decision_by_user_id: UUID,
         reason: str | None = None,
         user_role: str | None = None,
+        *,
+        token: str | None = None,
     ) -> Approval:
-        approval = self.get_approval(
-            tenant_id,
-            approval_id,
+        # Row-level lock to prevent concurrent duplicate approval executions
+        approval = self.db.scalar(
+            select(Approval)
+            .where(
+                Approval.id == approval_id,
+                Approval.tenant_id == tenant_id,
+            )
+            .with_for_update()
         )
 
         if approval is None:
@@ -173,6 +282,18 @@ class ApprovalService:
                 "Only pending approvals can be approved"
             )
 
+        # Check expiration
+        if self.is_approval_expired(approval):
+            raise ValueError("Approval request has expired")
+
+        # Check token correlation if approval was token-gated
+        expected_token = self.get_approval_token(approval)
+        if expected_token:
+            if not token or token.strip().upper() != expected_token.upper():
+                raise ValueError(
+                    f"Approval token mismatch: token '{expected_token}' is required to authorize this request"
+                )
+
         # Enforce role authorization
         if user_role is None:
             try:
@@ -189,8 +310,22 @@ class ApprovalService:
                 f"User role '{user_role}' is not authorized to approve requests for '{approval.requested_for}'"
             )
 
+        # Ensure associated task is active if present
+        if approval.task_id is not None:
+            task = self.db.scalar(
+                select(Task).where(
+                    Task.id == approval.task_id,
+                    Task.tenant_id == tenant_id,
+                )
+            )
+            if task is not None and task.status in ("completed", "failed", "cancelled"):
+                raise ValueError(
+                    f"Cannot approve request for task in terminal status '{task.status}'"
+                )
+
         approval.status = "approved"
         approval.decision_by_user_id = decision_by_user_id
+        approval.decided_at = datetime.now(timezone.utc)
         clean_reason = reason.strip() if reason is not None else None
         approval.decision_reason = clean_reason
         approval.reason = clean_reason
@@ -207,9 +342,13 @@ class ApprovalService:
         reason: str | None = None,
         user_role: str | None = None,
     ) -> Approval:
-        approval = self.get_approval(
-            tenant_id,
-            approval_id,
+        approval = self.db.scalar(
+            select(Approval)
+            .where(
+                Approval.id == approval_id,
+                Approval.tenant_id == tenant_id,
+            )
+            .with_for_update()
         )
 
         if approval is None:
@@ -251,6 +390,7 @@ class ApprovalService:
 
         approval.status = "rejected"
         approval.decision_by_user_id = decision_by_user_id
+        approval.decided_at = datetime.now(timezone.utc)
         clean_reason = reason.strip() if reason is not None else None
         approval.decision_reason = clean_reason
         approval.reason = clean_reason

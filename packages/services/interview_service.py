@@ -797,9 +797,13 @@ class InterviewService:
                             return parsed
                     break
                 except AIRateLimitError as rle:
+                    delay = backoff_sec
+                    m = re.search(r"try again in ([0-9\.]+)s", str(rle))
+                    if m:
+                        delay = max(float(m.group(1)) + 1.5, delay)
                     if attempt < max_retries - 1:
-                        logger.warning("Rate limit hit in interview evaluation (attempt %s/%s), backing off %ss: %s", attempt + 1, max_retries, backoff_sec, rle)
-                        time.sleep(backoff_sec)
+                        logger.warning("Rate limit hit in interview evaluation (attempt %s/%s), backing off %ss: %s", attempt + 1, max_retries, delay, rle)
+                        time.sleep(delay)
                         backoff_sec *= 2.0
                     else:
                         logger.error("Rate limit exhausted after %s attempts in interview evaluation for tenant %s: %s", max_retries, tenant_id, rle)

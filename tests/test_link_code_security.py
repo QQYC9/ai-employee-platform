@@ -17,7 +17,7 @@ from packages.models.tenant import Tenant
 from packages.services.channel_service import ChannelService
 from packages.services.conversational_agent_engine import ConversationalAgentEngine
 from packages.services.interview_service import InterviewService
-from packages.services.link_code_service import LinkCodeService
+from packages.services.link_code_service import LinkCodeService, sender_link_rate_limiter
 
 
 class MockAIProvider:
@@ -45,6 +45,12 @@ class MockAIProvider:
         self.call_count += 1
         return {}
 
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiters():
+    sender_link_rate_limiter.reset()
+    yield
+    sender_link_rate_limiter.reset()
 
 @pytest.fixture
 def db():
@@ -336,8 +342,13 @@ def test_tenant_isolation_code_cross_tenant_fails(db: Session):
     assert "967779995555" not in (channel_a.config.get("owner_identifiers") or [])
 
 
-def test_rate_limiting_locks_code_after_five_failed_attempts(db: Session):
-    """Submitting 5 wrong guesses locks the link code against further attempts."""
+def test_rate_limiting_per_sender_blocks_attacker_and_keeps_code_valid_for_owner(db: Session):
+    """
+    Phase 3.2 Design Fix (Item 3):
+    An attacker sending 5 wrong guesses is temporarily blocked via exponential backoff.
+    Crucially, the legitimate owner's code remains completely VALID and can be consumed
+    immediately from the owner's chat, preventing DoS lockout.
+    """
     setup = _setup_tenant_and_channel(db, name="منشأة الحماية")
     tenant_id = setup["tenant_id"]
     channel_id = setup["channel_id"]
@@ -347,46 +358,74 @@ def test_rate_limiting_locks_code_after_five_failed_attempts(db: Session):
     db.commit()
 
     channel_svc = ChannelService(db)
+    attacker_sender = "attacker_967770001111"
 
-    # Make 5 failed attempts
+    # Attacker makes 5 failed attempts from their sender_id
     for i in range(5):
         inb = InboundMessage(
             tenant_id=tenant_id,
             channel_id=channel_id,
             channel_type="telegram",
             external_message_id=f"msg_guess_{i}_{uuid4().hex[:6]}",
-            sender_id=f"96777000999{i}",
-            content=f"/link GUESS-CODE-{i}",
+            sender_id=attacker_sender,
+            content=f"/link WRONG-CODE-{i}",
             content_type="text",
             raw_payload={},
         )
-        channel_svc.process_inbound_message(inb)
+        msg_guess = channel_svc.process_inbound_message(inb)
         db.commit()
 
-    db.refresh(link_rec)
-    assert link_rec.attempts_count >= 5
-
-    # 6th attempt even with CORRECT code must fail due to rate limit
-    inb_correct = InboundMessage(
+    # Attacker is now temporarily blocked on 6th attempt
+    inb_attacker_blocked = InboundMessage(
         tenant_id=tenant_id,
         channel_id=channel_id,
         channel_type="telegram",
-        external_message_id=f"msg_correct_{uuid4().hex[:6]}",
-        sender_id="967778887777",
-        content=f"/link {raw_code}",
+        external_message_id=f"msg_guess_6_{uuid4().hex[:6]}",
+        sender_id=attacker_sender,
+        content=f"/link WRONG-CODE-6",
         content_type="text",
         raw_payload={},
     )
-    msg = channel_svc.process_inbound_message(inb_correct)
+    msg_blocked = channel_svc.process_inbound_message(inb_attacker_blocked)
     db.commit()
 
-    channel = db.scalar(select(Channel).where(Channel.id == channel_id))
-    assert "967778887777" not in (channel.config.get("owner_identifiers") or [])
-
     engine = ConversationalAgentEngine(db=db, ai_provider=MockAIProvider())
-    res = engine.process_incoming_message(tenant_id, msg.id)
-    assert res.success is True
-    assert "تم تجاوز الحد المسموح" in res.reply_content
+    res_blocked = engine.process_incoming_message(tenant_id, msg_blocked.id)
+    assert res_blocked.success is True
+    assert "تم تجاوز الحد المسموح" in res_blocked.reply_content
+
+    # Verify link code itself was NOT locked or marked used/revoked
+    db.refresh(link_rec)
+    assert link_rec.is_used is False
+    assert link_rec.is_revoked is False
+
+    # Legitimate owner sends the valid link code from their own sender_id
+    owner_sender = "owner_967778887777"
+    inb_owner = InboundMessage(
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        channel_type="telegram",
+        external_message_id=f"msg_owner_{uuid4().hex[:6]}",
+        sender_id=owner_sender,
+        content=f"/link {raw_code}",
+        content_type="text",
+        raw_payload={"text": f"/link {raw_code}"},
+    )
+    msg_owner = channel_svc.process_inbound_message(inb_owner)
+    db.commit()
+
+    # Owner is successfully linked!
+    channel = db.scalar(select(Channel).where(Channel.id == channel_id))
+    assert owner_sender in (channel.config.get("owner_identifiers") or [])
+    assert attacker_sender not in (channel.config.get("owner_identifiers") or [])
+
+    db.refresh(link_rec)
+    assert link_rec.is_used is True
+    assert link_rec.used_by_sender_id == owner_sender
+
+    res_owner = engine.process_incoming_message(tenant_id, msg_owner.id)
+    assert res_owner.success is True
+    assert "تم ربط حسابك كمالك رسمي للمنشأة بنجاح" in res_owner.reply_content
 
 
 def test_customer_random_message_never_treated_as_owner(db: Session):

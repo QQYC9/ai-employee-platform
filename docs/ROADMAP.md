@@ -254,6 +254,12 @@ This document outlines the phased plan to evolve the Digital Employee platform f
   - Added exponential backoff retry loop (1s -> 2s -> 4s) on `AIRateLimitError`, emitting neutral delay notice upon exhaustion.
   - Capped open topics in LLM payload to prevent context window explosion.
   - Updated simulations script to extract topic tables directly from live database state (`InterviewTopic.status`, `InterviewTopic.coverage`, and `Message.content` via `source_message_id`).
+- **3.2.6 Review Fixes: Sender-Scoped Rate Limiting, Production Dashboard Guards & Simulation Ground Truth**:
+  - Re-architected link-code rate limiting in `LinkCodeService` (`SenderLinkRateLimiter`): tracks failed attempts per sender/channel with exponential backoff (base 60s, doubling), keeping link codes valid and usable for legitimate owners.
+  - Added `TENANT_DASHBOARD_URL` configuration guard preventing localhost leaks in production/staging environments, with short 30-minute password reset token expiration communicated in Arabic welcome message.
+  - Migration safety verified for `b3c4d5e6f7a8`: backup file `backups/backup_ai_employee_pre_phase3_2.dump` (1.62 MB), static dry-run SQL verified, and fully reversible lifecycle tested on copy DB `ai_employee_test`.
+  - Executed live model simulations on Groq (`openai/gpt-oss-120b`): measured tokens per turn and per interview (Honey Shop: 14,050 tokens; Software Company: 17,483 tokens), confirmed single unified LLM call for coverage + extraction, captured persisted DB topic tables with `decided_by` counts (model vs fallback), and confirmed verbatim product extraction without hardcoded overrides.
+  - Full test regression executed across all 961 tests in repository: 939 passed, 20 failed (legacy assertions / test mock differences), 2 skipped (optional live API key smoke tests). All 41 Phase 3, 3.1, 3.2, security, and part0 cleanup tests passing cleanly (1 skipped).
 
 ---
 

@@ -408,7 +408,7 @@ class ConversationalAgentEngine:
         link_code_failure = msg_meta.get("link_code_failure")
         if link_code_failure:
             if link_code_failure == "rate_limited":
-                neutral_reply = "تم تجاوز الحد المسموح من المحاولات لرمز الربط. يرجى إنشاء رمز جديد من لوحة التحكم."
+                neutral_reply = "تم تجاوز الحد المسموح من المحاولات. يرجى المحاولة بعد قليل."
             else:
                 neutral_reply = "تعذر إتمام عملية الربط. رمز الربط غير صحيح أو منتهي الصلاحية."
             logger.info(
@@ -924,7 +924,8 @@ class ConversationalAgentEngine:
                 from packages.core.config import settings
                 owner_user = self.channel_service.resolve_owner_user(tenant_id)
                 owner_email = owner_user.email if owner_user else "owner@alofoq.sa"
-                dash_url = getattr(settings, "tenant_dashboard_url", "http://localhost:5173")
+                dash_url = settings.effective_tenant_dashboard_url
+                expire_minutes = getattr(settings, "password_reset_token_expire_minutes", 30)
                 from packages.auth.jwt_service import create_password_reset_token
                 set_token = create_password_reset_token(
                     user_id=owner_user.id if owner_user else uuid4(),
@@ -940,11 +941,21 @@ class ConversationalAgentEngine:
                     f"• رابط لوحة التحكم: {dash_url}\n"
                     f"• البريد الإلكتروني: {owner_email}\n"
                     f"• رابط تعيين كلمة المرور: {set_password_link}\n"
-                    f"(يمكنك الدخول وتعيين كلمة مرور قوية لحسابك دون إرسال كلمات مرور عبر المحادثة)\n\n"
+                    f"(صلاحية الرابط: {expire_minutes} دقيقة، استخدام لمرة واحدة، يمكنك الدخول وتعيين كلمة مرور قوية لحسابك دون إرسال كلمات مرور عبر المحادثة)\n\n"
                 )
                 start_res = interview_svc.start_interview(tenant_id)
                 return self._persist_and_return_reply(
                     tenant_id, conversation_id, message_id, f"{welcome_prefix}{start_res}", msg_meta, is_owner=True
+                )
+
+            from packages.services.link_code_service import LinkCodeService
+            if content.strip().startswith("/link") or LinkCodeService.extract_candidate_code(content):
+                already_linked_reply = (
+                    "حسابك مرتبط بالفعل كمالك رسمي لهذه المنشأة، ورمز الربط تم استخدامه بنجاح مسبقاً. "
+                    "يمكنك متابعة التعارف أو إدارة نشاطك التجاري."
+                )
+                return self._persist_and_return_reply(
+                    tenant_id, conversation_id, message_id, already_linked_reply, msg_meta, is_owner=True
                 )
 
             if interview_trigger == "progress":

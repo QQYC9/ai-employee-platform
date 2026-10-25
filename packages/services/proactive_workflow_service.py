@@ -97,6 +97,7 @@ class ProactiveWorkflowService:
         "generate_daily_report",
         "check_overdue_tasks",
         "custom_prompt",
+        "continuous_learning_cycle",
     }
 
     def __init__(self, db: Session):
@@ -520,6 +521,16 @@ class ProactiveWorkflowService:
                 result_data["action"] = action_type
                 result_data["status"] = "acknowledged"
                 result_data["payload"] = payload
+
+            elif action_type == "continuous_learning_cycle":
+                from packages.self_development.learning_engine import ContinuousLearningEngine
+                learning_engine = ContinuousLearningEngine(db=self.db)
+                lookback_days = int(payload.get("lookback_days", 1))
+                cycle_result = learning_engine.run_12h_learning_cycle(
+                    tenant_id=tenant_id,
+                    lookback_days=lookback_days,
+                )
+                result_data = cycle_result
 
             # Mark run as completed
             now = datetime.now(timezone.utc)
