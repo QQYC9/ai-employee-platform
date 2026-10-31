@@ -5,6 +5,7 @@
 > **Review Target:** `AI-Employee-Platform` (Stage 2D Final Metadata & Evidence Calibration)  
 > **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/` across subsequent documentation commits)  
 > **Prior Documentation Commits:** `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C)  
+> **Current Delivered HEAD at Stage 2D:** `b284b14aa0bf9361fa152b15292eae96f6b268ef` (verified published documentation commit)  
 > **Branch:** `checkpoint/phase-12-knowledge-base`  
 > **Status:** Preliminary Architecture Log — Not an Implementation Authorization  
 > **Phase Impact:** Strictly Informational for Future Planning; Phase 5 Remains Unstarted  

@@ -6,6 +6,7 @@
 > **Review Target:** `AI-Employee-Platform` (Stage 2D Final Metadata & Evidence Calibration)  
 > **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/` across subsequent documentation commits)  
 > **Prior Documentation Commits:** `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C)  
+> **Current Delivered HEAD at Stage 2D:** `b284b14aa0bf9361fa152b15292eae96f6b268ef` (verified published documentation commit)  
 > **Audit Date:** 2026-10-31  
 > **Status:** STRICT READ-ONLY VERIFICATION — APPLICATION CODE UNTOUCHED  
 
@@ -39,6 +40,7 @@ The documentation in `docs/audit/comparative-review/` is verified to be accurate
 - **Current Branch:** `checkpoint/phase-12-knowledge-base`
 - **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (application code in `packages/`, `apps/`, `infrastructure/`, `tests/` is verified identical between these commits and current HEAD across subsequent documentation commits).
 - **Prior Documentation Commits:** `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C)
+- **Current Delivered HEAD at Stage 2D:** `b284b14aa0bf9361fa152b15292eae96f6b268ef` (verified published documentation commit)
 - **Working Tree State:** Tracked working tree clean; 5 untracked files present:
   - `scripts/check_live_db.py`
   - `scripts/cleanup_test_tenants.py`
