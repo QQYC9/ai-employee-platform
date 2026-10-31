@@ -1,23 +1,24 @@
 # CURRENT_PLATFORM_ARCHITECTURE_MAP.md
 ## AI-Employee-Platform — Baseline Architecture & Execution Topology Map
 
-> **Review Target:** `AI-Employee-Platform` (Stage 2 Comparative Architectural Review)  
-> **Source Commit:** `e3a1c4450215df1c4a0fdd8e77369352257efdc4`  
+> **Review Target:** `AI-Employee-Platform` (Stage 2C Final Consistency Pass)  
+> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/`)  
+> **Documentation Review Commit:** `982236bb944543a248af6f7d509ad51b5b1fa7d1`  
 > **Git Branch:** `checkpoint/phase-12-knowledge-base`  
-> **Classification:** Ground Truth Architectural Map & Physical Component Topology  
-> **Status:** Independently Verified against Physical Codebase  
+> **Classification:** Physical Codebase Map & Component Topology  
+> **Status:** Strictly Verified Against Application Source Snapshot  
 
 ---
 
 ## 1. Architectural Overview & Design Philosophy
 
-`AI-Employee-Platform` is a multi-tenant conversational digital employee platform designed to represent businesses across customer communications channels (WhatsApp, Telegram, Webhooks, Email) while keeping business owners in control of high-impact actions through approval-gated workflows.
+`AI-Employee-Platform` is a multi-tenant conversational digital employee platform designed to represent businesses across customer communications channels (WhatsApp, Telegram, Webhooks, Email) with tenant data isolation and owner challenge verification.
 
 ### Core Architectural Invariants
 1. **Multi-Tenancy Enforcement:** Row-level isolation via `tenant_id` on all business entities, reinforced by runtime database connection safety guards ([`packages/core/safety_guard.py`](file:///d:/AI-Employee-Platform/packages/core/safety_guard.py)) and AES-256-GCM secret encryption.
 2. **Deterministic Fact Precedence:** Grounded knowledge retrieval via [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py#L32) and [`KnowledgeService`](file:///d:/AI-Employee-Platform/packages/services/knowledge_service.py#L25) taking strict precedence over generative language model outputs.
 3. **Transactional Outbox Pattern:** Outbound communications and asynchronous executions are written as [`OutboxEvent`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L1470) records inside the primary business database transaction.
-4. **Approval-Gated Tool Execution (Anti-Hijack):** High-impact administrative actions are intercepted by [`OwnerIntentRouter`](file:///d:/AI-Employee-Platform/packages/services/owner_intent_router.py#L733) and [`ActionPolicy`](file:///d:/AI-Employee-Platform/packages/tools/contract.py#L25), requiring out-of-band cryptographic challenge verification by the business owner before execution.
+4. **Owner Approval Challenge & Enqueue Flow:** Owner approval challenge and enqueue flow exists; the downstream approved-action execution path is currently nonfunctional and must not be treated as production-ready.
 
 ---
 
@@ -121,7 +122,10 @@ sequenceDiagram
 
 ---
 
-### 3.2 Sensitive Action & Approval-Gated Anti-Hijack Flow (Actual Implementation)
+### 3.2 Owner Approval Challenge Verification and Enqueueing Flow (Downstream Execution Nonfunctional)
+
+> [!IMPORTANT]
+> **Code Reality:** Owner approval challenge and enqueue flow exists; the downstream approved-action execution path is currently nonfunctional and must not be treated as production-ready. Successful challenge verification enqueues an outbox event, but does **not** mean the requested business action is executed.
 
 In the physical codebase, approval challenges are initiated when the **Owner** requests a sensitive administrative action via [`OwnerIntentRouter.execute_plan`](file:///d:/AI-Employee-Platform/packages/services/owner_intent_router.py#L733):
 
@@ -156,6 +160,7 @@ sequenceDiagram
         DB-->>AS: Commit Transaction
         AS-->>OIR: Success
         OIR-->>Owner: "تم التحقق بنجاح وجدولة التنفيذ"
+        Note over DB,OW: Event is queued; downstream execution path is currently nonfunctional!
     else Owner Rejects or Cancels
         Owner->>OIR: "إلغاء [approval_id]"
         OIR->>AS: Cancel approval
@@ -166,9 +171,9 @@ sequenceDiagram
 
 ---
 
-### 3.3 Asynchronous Execution Reality & Current Failure Modes
+### 3.3 Asynchronous Execution Reality & Current Nonfunctional Downstream Path
 
-The diagram below reflects the **actual code behavior** in [`packages/services/outbox_worker.py`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py):
+The diagram below reflects the **actual code behavior** in [`packages/services/outbox_worker.py`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py), showing the nonfunctional downstream execution path:
 
 ```mermaid
 sequenceDiagram
@@ -187,15 +192,16 @@ sequenceDiagram
 
     alt Normal Worker Process Execution (Runtime Reality)
         OW->>OW: Dispatch event_type == 'approval_action_execution' (Line 183)
-        Note over OW: FATAL RUNTIME BUG:<br/>_handle_approval_action_execution is defined OUTSIDE class OutboxWorker<br/>under 'if __name__ == "__main__":' (Line 929)!<br/>Raises AttributeError: 'OutboxWorker' object has no attribute '_handle_approval_action_execution'
+        Note over OW: FATAL RUNTIME DEFECT:<br/>_handle_approval_action_execution is defined OUTSIDE class OutboxWorker<br/>under 'if __name__ == "__main__":' (Line 929)!<br/>Raises AttributeError: 'OutboxWorker' object has no attribute '_handle_approval_action_execution'
     else If Handler is Invoked Directly (Code Inspection Reality)
         Note over OW,DB: Inside _handle_approval_action_execution (Lines 1015-1030):
         OW->>DB: approval.execution_status = 'executing'
         OW->>DB: session.commit() [Session 1 Closed, Lock Released]
         
-        Note over OW: CRITICAL GAP:<br/>ToolExecutor is NEVER CALLED!<br/>Code literally stubs execution (Line 1017):<br/>'# Stub: in full implementation, execute tool...'
+        Note over OW: NONFUNCTIONAL EXECUTION:<br/>ToolExecutor is NEVER CALLED!<br/>Code literally stubs execution (Line 1017):<br/>'# Stub: in full implementation, execute tool...'
         
         OW->>AS: record_execution_result(is_success=True) [Session 2]
+        Note over AS,DB: Records success in database WITHOUT executing the approved business tool!
         AS->>DB: UPDATE outbox_events SET status='completed'<br/>UPDATE approvals SET execution_status='completed'
         DB-->>AS: Commit
     end
@@ -241,11 +247,11 @@ Drawing from direct codebase inspection and verified tests, the current physical
 | Risk Point / Gap | Code Location | Forensic Classification | Concrete Code Reality |
 | :--- | :--- | :---: | :--- |
 | **Worker Handler Out-of-Scope** | [`packages/services/outbox_worker.py:929`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L929) | **Verified Defect** | Defined outside `class OutboxWorker` at module level under `if __name__ == "__main__":`. Raises `AttributeError` if called from worker instance. |
-| **Tool Execution Stubbed** | [`packages/services/outbox_worker.py:1017-1030`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1017-L1030) | **Verified Defect** | `ToolExecutor` is not invoked. Code commits `executing` and records `is_success=True` via independent session. |
+| **Tool Execution Stubbed** | [`packages/services/outbox_worker.py:1017-1030`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1017-L1030) | **Verified Defect** | `ToolExecutor` is not invoked. Code commits `executing` and records `is_success=True` via independent session without performing the approved action. |
 | **Inoperative Worker Fencing** | [`packages/services/outbox_service.py:210, 342`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L210) | **Verified Defect** | Column `claim_generation` exists in schema, but queries in `claim_events` and `recover_stale_events` never increment it. Generation remains `0`. |
 | **Recovery State Divergence** | [`packages/services/outbox_service.py:294-362`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L294-L362) | **Verified Defect** | `recover_stale_events` resets `outbox_events.status` to `pending` but does not update `approvals`, leaving `execution_status` stuck in `'executing'`. |
 | **Audit Flush Inside Aborted Transaction** | [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592) | **Verified Defect** | If a tool raises an SQL exception, transaction enters aborted state. Line 592 calls `session.flush()`, raising `psycopg.errors.InFailedSqlTransaction` and masking original error. |
 | **Uncommitted External Timestamp** | [`packages/services/outbox_worker.py:966`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966) | **Conditional Risk** | `first_external_attempt_at` is flushed without commit. In the current path, no external HTTP socket is called; this becomes an active double-dispatch vulnerability if external tools are wired in. |
-| **Lack of Tool-Level Idempotency** | [`packages/models/domain.py:270, 2000`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L270) | **Verified Defect** | Tables `tasks` and `knowledge` lack unique constraints on business idempotency keys. Re-running `TaskCreateTool` creates duplicate records. |
-| **PostgreSQL Timeout Misconception** | PostgreSQL 17 `transaction_timeout` | **Verified Semantic Reality** | Tested directly: PostgreSQL terminates backend process with `57P05` and releases row locks, but Python OS thread continues executing in memory; cannot abort external network call. |
+| **Lack of Tool-Level Idempotency Constraints** | [`packages/models/domain.py:270, 2000`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L270) | **Verified Defect** | Tables `tasks` and `knowledge` lack unique constraints on business idempotency keys. Re-running `TaskCreateTool` creates duplicate records. |
+| **PostgreSQL Timeout Misconception** | PostgreSQL 17 `transaction_timeout` | **Reported Prior Finding** | Reported in prior audit: PostgreSQL terminates backend process with `57P05` and releases row locks, but Python OS thread continues executing in memory; cannot abort external network call. |
 | **Model Embellishment on Zero Facts** | [`packages/services/conversational_agent_engine.py`](file:///d:/AI-Employee-Platform/packages/services/conversational_agent_engine.py) | **Potential Risk** | If fact retrieval returns empty results, prompt instructions must guarantee explicit refusal to prevent hallucination. |

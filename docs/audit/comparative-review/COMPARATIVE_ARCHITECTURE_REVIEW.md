@@ -2,12 +2,13 @@
 ## AI-Employee-Platform — Comparative Architecture Review (Stage 2)
 
 > **Repository:** `d:/AI-Employee-Platform` (`https://github.com/QQYC9/ai-employee-platform.git`)  
-> **Source Commit:** `e3a1c4450215df1c4a0fdd8e77369352257efdc4`  
+> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/`)  
+> **Documentation Review Commit:** `982236bb944543a248af6f7d509ad51b5b1fa7d1`  
 > **Branch:** `checkpoint/phase-12-knowledge-base`  
 > **Review Date:** 2026-10-31  
 > **Scope:** Architectural Study & Comparative Evaluation of 6 External Agent Architectures vs. Current Platform  
 > **Target Systems:** Memento-Skills, LangGraph, Microsoft Agent Framework, Dify, n8n, RagLeap Core  
-> **Status:** Independently Verified & Corrected  
+> **Status:** Stage 2C Final Consistency Pass  
 
 ---
 
@@ -18,7 +19,7 @@ This comparative architecture review evaluates six external agent frameworks, or
 ### Operational Requirements
 1. **Multi-Tenancy:** Data, knowledge, tool, and channel isolation per tenant.
 2. **Deterministic Domain Grounding:** Precedence of verified business facts ([`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py)) and catalog rules over generative LLM outputs.
-3. **Approval-Gated Autonomy (Anti-Hijack):** Human-in-the-loop verification for high-impact actions via out-of-band cryptographic challenges.
+3. **Owner Approval Challenge & Enqueue Flow (Anti-Hijack):** Owner approval challenge and enqueue flow exists; the downstream approved-action execution path is currently nonfunctional and must not be treated as production-ready.
 4. **Resilient Asynchronous Delivery:** Idempotent, transactionally safe execution via the Transactional Outbox pattern.
 5. **Low Operational Overhead:** Cost-effective deployment on standard virtual private servers (PostgreSQL + Redis + lightweight Python workers).
 
@@ -39,7 +40,7 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 - **Evidence-Based Code Comparison:** Every claim regarding `AI-Employee-Platform` is grounded in concrete file paths, class names, and verified line numbers.
 - **Official Documentation Priority:** Evaluation of external systems is based on official repositories, published research papers, and technical specifications as of October 2026.
 - **Classification Categories:**
-  - `Adopt`: Directly implement or integrate the architectural pattern natively.
+  - `Adopt`: Preliminary architectural preference to implement natively without external package dependencies (requires formal plan approval before implementation).
   - `Adapt`: Borrow the concept and customize it to fit our decoupled SQLAlchemy/FastAPI architecture.
   - `Avoid`: Explicitly reject the pattern or dependency, documenting the technical risk or cost.
   - `Investigate`: Requires empirical benchmarking or prototype testing prior to commitment.
@@ -52,8 +53,9 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 | :--- | :--- | :--- |
 | **Git Repository** | `https://github.com/QQYC9/ai-employee-platform.git` | Publicly synchronized on GitHub |
 | **Active Branch** | `checkpoint/phase-12-knowledge-base` | Fast-forward synchronized with `origin` |
-| **HEAD Commit** | `e3a1c4450215df1c4a0fdd8e77369352257efdc4` | Verified on local and remote |
-| **Working Tree State** | Clean (tracked files) | Only 5 local diagnostic scripts untracked in `scripts/` to protect tenant names |
+| **Application Source Snapshot** | `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` | Verified identical application source files |
+| **Documentation Review Commit** | `982236bb944543a248af6f7d509ad51b5b1fa7d1` | Prior independent verification commit |
+| **Tracked Working Tree State** | Clean | Tracked working tree clean; 5 untracked diagnostic scripts in `scripts/` |
 | **Database Engines** | PostgreSQL 17.11 (Debian), Redis 7.0 | Port 5433; `ai_employee_test` migrated to `2a3b4c5d6e7f` |
 | **Production Guard** | [`packages/core/safety_guard.py`](file:///d:/AI-Employee-Platform/packages/core/safety_guard.py) | Active; aborts non-production processes targeting `ai_employee` |
 
@@ -174,7 +176,7 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 7. **Multi-Tenancy:** Supported in n8n commercial tiers (Pro / Enterprise) via multi-tenant workspaces and RBAC. Community edition is designed for single-instance use.
 8. **Secrets Management:** Encrypted credential vault in database; credentials bound to nodes by ID without exposing plaintext.
 9. **Observability & Auditing:** Full execution history with step-by-step input/output inspection and status tracking.
-10. **Integration & Extensibility:** Ecosystem documenting hundreds of pre-built integrations (official sources cite 400+ API integrations).
+10. **Integration & Extensibility:** Ecosystem documenting hundreds of pre-built integrations (official materials state 400+ API integrations).
 11. **Operational Requirements:** Node.js runtime, PostgreSQL, Redis (in queue mode). Moderately lightweight (~512MB - 1GB RAM).
 12. **Limitations & Risks:** Multi-tenancy gated behind commercial licensing; AI agent capabilities are secondary to deterministic workflow automation; lacks domain-specific fact verification and anti-hallucination guardrails.
 13. **Relevance to `AI-Employee-Platform`:**
@@ -224,9 +226,9 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 
 | Capability | Current Platform Implementation | Relevant External System | What it Does Better / Differently | Possible Adaptation | Risks / Cost | Evidence Citation | Verdict |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :---: |
-| **Human-in-the-Loop Approval** | Base29 OTP + HMAC-SHA256 challenge via [`ApprovalService`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py) | **LangGraph** & **RagLeap Core** | LangGraph uses native `interrupt()` and state checkpointing; RagLeap defaults all agents to "approval mode" for external actions. | Formalize approval interception as a checkpointed interrupt state rather than separate `status` vs `execution_status` columns. | Requires refactoring agent loop into explicit state machine. | [`domain.py:326, 335`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L326); LangGraph Docs | **ADAPT** |
-| **Worker Fencing & Recovery** | Outbox pattern via [`OutboxService`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py); `claim_generation` column exists | **n8n** & **Distributed Systems (Kleppmann)** | n8n tracks job execution IDs with explicit lease heartbeats; Kleppmann fencing uses monotonic generation counters. | Implement monotonic `claim_generation` increments on claim and recovery with rowcount verification on commit. | Low code overhead; purely database-level SQL updates. | [`outbox_service.py:210, 342`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L210) | **ADOPT** |
-| **External Side-Effect Idempotency** | Uncommitted timestamp [`first_external_attempt_at`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966); hardcoded outcome | **n8n** | Generates deterministic execution IDs per external request; checks provider status before re-dispatch. | Commit external attempt timestamp in an independent transaction before opening network socket; fail-closed to `reconciliation_required`. | Prevents duplicate customer messages or external mutations. (Conditional risk in current code). | [`outbox_worker.py:966, 994`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966) | **ADOPT** |
+| **Human-in-the-Loop Approval** | Owner Base29 OTP + HMAC-SHA256 challenge creation and verification via [`ApprovalService`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py) with outbox queueing; downstream approved-action execution is currently nonfunctional and stubbed. | **LangGraph** & **RagLeap Core** | LangGraph uses native `interrupt()` and state checkpointing; RagLeap defaults all agents to "approval mode" for external actions. | Formalize approval interception as a checkpointed interrupt state rather than separate `status` vs `execution_status` columns. | Requires refactoring agent loop into explicit state machine. | [`domain.py:326, 335`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L326); LangGraph Docs | **ADAPT** |
+| **Worker Fencing & Recovery** | Outbox pattern via [`OutboxService`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py); `claim_generation` column exists | **n8n** & **Distributed Systems (Kleppmann)** | n8n tracks job execution IDs with explicit lease heartbeats; Kleppmann fencing uses monotonic generation counters. | Implement monotonic `claim_generation` increments on claim and recovery with rowcount verification on commit. | Low code overhead; purely database-level SQL updates. | [`outbox_service.py:210, 342`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L210) | **ADOPT** (Preliminary Preference; Implementation Blocked) |
+| **External Side-Effect Idempotency** | Uncommitted timestamp [`first_external_attempt_at`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966); hardcoded outcome | **n8n** | Generates deterministic execution IDs per external request; checks provider status before re-dispatch. | Commit external attempt timestamp in an independent transaction before opening network socket; fail-closed to `reconciliation_required`. | Prevents duplicate customer messages or external mutations. (Conditional risk in current code). | [`outbox_worker.py:966, 994`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966) | **ADOPT** (Preliminary Preference; Implementation Blocked) |
 | **Fact & Skill Memory** | JSONB table [`facts`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L1800) with confirmation status via [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) | **Memento-Skills** & **RagLeap Core** | Memento stores compound executable skills in structured markdown; RagLeap uses Graph RAG for entity relationships. | Synthesize complex multi-step tenant procedures into structured Markdown skills stored in `knowledge` or `facts`. | Must enforce read-only safety; do not allow dynamic unverified code execution. | [`fact_service.py:32`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py#L32); Memento Paper | **ADAPT** |
 | **Tool Execution Safety** | Python functions in [`packages/tools/`](file:///d:/AI-Employee-Platform/packages/tools/) called via [`ToolExecutor`](file:///d:/AI-Employee-Platform/packages/tools/executor.py) | **Dify** & **Microsoft Agent FW** | Dify executes tools inside sandboxed containers; Microsoft uses pre/post invocation filter pipelines. | Implement pre-invocation action filters and sub-transaction savepoints (`session.begin_nested()`). | Protects database transaction from `InFailedSqlTransaction` aborts. | [`executor.py:580-595`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L580-L595) | **ADAPT** |
 | **Multi-Tenancy** | Strict `tenant_id` on all tables, [`safety_guard.py`](file:///d:/AI-Employee-Platform/packages/core/safety_guard.py), AES-256 integration secrets | **AI-Employee-Platform Model** | Memento lacks documented multi-tenancy; n8n gates it behind commercial tiers; LangGraph leaves it to user queries. | Retain current platform multi-tenancy model. | None. Our architecture already enforces tenant isolation strictly. | [`tenant.py:15`](file:///d:/AI-Employee-Platform/packages/auth/tenant.py#L15); [`safety_guard.py`](file:///d:/AI-Employee-Platform/packages/core/safety_guard.py) | **RETAIN** |
@@ -238,17 +240,17 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 
 ### 7.1 Verified Architectural Strengths
 1. **Decoupled Multi-Tenant Isolation:** The isolation model in [`packages/auth/tenant.py`](file:///d:/AI-Employee-Platform/packages/auth/tenant.py) and [`packages/models/domain.py`](file:///d:/AI-Employee-Platform/packages/models/domain.py) enforces row-level data scoping and cryptographic secret segregation per tenant.
-2. **Cryptographic Anti-Hijack Foundation:** The Base29 alphabet, HMAC-SHA256 token verification, and canonical payload hashing in [`packages/services/approval_service.py`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py) provide verified cryptographic resistance against brute force and parameter tampering.
+2. **Cryptographic Anti-Hijack Foundation:** The Base29 alphabet, HMAC-SHA256 token verification, and canonical payload hashing in [`packages/services/approval_service.py`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py) provide verified cryptographic resistance against brute force and parameter tampering during challenge creation and verification. *(Note: Downstream action execution remains nonfunctional and is not part of this strength)*.
 3. **Deterministic Fact Precedence:** The [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) with JSONB dot-notation topic paths and explicit confirmation states (`confirmed`, `pending_confirmation`, `conflict`) successfully prevents model hallucinations on core business facts.
 4. **Lean Operational Footprint:** Runs on standard PostgreSQL 17 + Redis 7 without requiring 8 GB multi-container orchestrators.
 
 ### 7.2 Verified Structural Defects & Deficiencies in Current Code
 1. **Worker Handler Out-of-Scope Bug:** In [`packages/services/outbox_worker.py:929`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L929), `_handle_approval_action_execution` is defined outside `class OutboxWorker` at module level, raising `AttributeError` at runtime.
-2. **Stubbed Tool Execution:** In [`packages/services/outbox_worker.py:1017-1030`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1017-L1030), `ToolExecutor` is not invoked; success is hardcoded via an independent session.
+2. **Stubbed Tool Execution:** In [`packages/services/outbox_worker.py:1017-1030`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1017-L1030), `ToolExecutor` is not invoked; success is hardcoded via an independent session without performing the approved action.
 3. **Inoperative Worker Fencing:** In [`packages/services/outbox_service.py:210, 342`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L210), `claim_generation` is never incremented.
 4. **Recovery State Divergence:** In [`packages/services/outbox_service.py:294-362`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L294-L362), `recover_stale_events` resets outbox events but leaves approvals stuck in `'executing'`.
 5. **Audit Exception Trap:** In [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592), audit logging inside an aborted transaction raises `InFailedSqlTransaction`, masking the original exception.
-6. **Lack of Entity Idempotency:** Missing unique constraints on `tasks` and `knowledge` tables risk duplicate records upon re-execution.
+6. **Lack of Entity Idempotency Constraints:** Missing unique constraints on `tasks` and `knowledge` tables risk duplicate records upon re-execution.
 7. **Conditional External Side-Effect Risk:** In [`packages/services/outbox_worker.py:966`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966), `first_external_attempt_at` is flushed without commit. In the current path, no external HTTP socket is called; this becomes an active double-dispatch vulnerability if external network tools are wired into this handler.
 
 ---
@@ -291,7 +293,7 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 
 1. **Question 1 (Savepoint vs. Two-Phase Execution):** Should tool execution occur within the worker's outer transaction using `session.begin_nested()`, or should the outbox claim commit first, followed by an isolated execution transaction?
 2. **Question 2 (Graph RAG Utility):** Does relational PostgreSQL JSONB in [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) sufficiently represent complex tenant hierarchies, or will Graph RAG become necessary for large retail enterprise tenants?
-3. **Question 3 (External Provider Probing):** Which channel providers (WhatsApp Cloud API, Telegram Bot API) support deterministic idempotency keys or message status lookup queries to enable automated retry reconciliation?
+3. **Question 3 (External Provider Probing):** Which channel providers (WhatsApp Cloud API, Telegram Bot API) support deterministic idempotency keys or message status lookup queries to enable automated retry reconciliation? (Remains `INVESTIGATE`).
 
 ---
 
