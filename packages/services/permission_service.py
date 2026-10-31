@@ -202,3 +202,31 @@ class PermissionService:
             permission.effect == "allow"
             for permission in permissions
         )
+
+    def has_tenant_explicit_deny(
+        self,
+        tenant_id: UUID,
+        actions: str | set[str] | list[str],
+        resource: str | None = None,
+        tenant_permissions: list[Permission] | None = None,
+    ) -> bool:
+        """
+        Evaluates whether a tenant-level explicit deny rule applies to the specified action(s)
+        and resource. Applies wildcard semantics where resource=None or empty in a deny rule
+        matches any requested resource.
+        Strictly applies only to tenant-level rules (agent_id is None).
+        """
+        perms = tenant_permissions if tenant_permissions is not None else self.list_permissions(tenant_id)
+        if isinstance(actions, str):
+            action_set = {actions.strip()}
+        else:
+            action_set = {a.strip() for a in actions if a}
+
+        clean_res = (resource or "").strip()
+        return any(
+            p.effect == "deny"
+            and p.agent_id is None
+            and p.action in action_set
+            and (not clean_res or p.resource is None or (p.resource or "").strip() in ("", clean_res))
+            for p in perms
+        )

@@ -6,6 +6,9 @@ import json
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
+
+from packages.models.domain import User
 from packages.services.approval_service import ApprovalService
 from packages.services.permission_service import PermissionService
 from packages.services.action_policy_service import ActionPolicyService
@@ -29,6 +32,22 @@ class DecisionEngine:
     - DENY
     """
 
+    OWNER_MANAGEMENT_ACTIONS = {
+        "task_create",
+        "execute:task_create",
+        "task_query",
+        "execute:task_query",
+    }
+
+    OWNER_ADMIN_ROLES = {
+        "tenant_owner",
+        "owner",
+        "tenant_admin",
+        "admin",
+        "platform_admin",
+        "superadmin",
+    }
+
     def __init__(self, db):
         self.db = db
         self.permission_service = PermissionService(db)
@@ -45,7 +64,10 @@ class DecisionEngine:
         task_id: UUID | None = None,
         tool_id: UUID | None = None,
         parameters: dict[str, Any] | None = None,
+        actor_id: UUID | None = None,
+        is_owner: bool = False,
     ) -> DecisionResult:
+        # Standard permission evaluation
         allowed = self.permission_service.is_allowed(
             tenant_id=tenant_id,
             action=action,
@@ -53,10 +75,51 @@ class DecisionEngine:
             agent_id=agent_id,
         )
 
-        if not allowed:
+        is_owner_authorized = False
+        explicit_deny = False
+
+        # Phase 1: Limited and safe delegation for authenticated human owner.
+        # Strict security rules:
+        # 1. is_owner must be True, actor_id must be provided, and agent_id must be None
+        #    (distinguishes human owner direct execution from delegated digital agent execution).
+        # 2. Action is strictly constrained to the allowed owner management whitelist (task_create, task_query).
+        # 3. actor_id must correspond to a verified, active user with an administrative/owner role in the SAME tenant.
+        # 4. Explicit deny records in Permission table are strictly respected and override owner delegation.
+        clean_action = action.strip()
+        if is_owner and actor_id is not None and agent_id is None:
+            if clean_action in self.OWNER_MANAGEMENT_ACTIONS:
+                try:
+                    owner_user = self.db.scalar(
+                        select(User).where(
+                            User.id == actor_id,
+                            User.tenant_id == tenant_id,
+                            User.status == "active",
+                        )
+                    )
+                    user_role = (owner_user.role or "").strip().lower() if owner_user else ""
+                    if owner_user is not None and user_role in self.OWNER_ADMIN_ROLES:
+                        # Differentiate explicit deny from absence of permission using existing PermissionService interface
+                        tenant_perms = self.permission_service.list_permissions(tenant_id)
+                        matching_actions = {
+                            clean_action,
+                            f"execute:{clean_action}",
+                            clean_action.removeprefix("execute:"),
+                        }
+                        explicit_deny = self.permission_service.has_tenant_explicit_deny(
+                            tenant_id=tenant_id,
+                            actions=matching_actions,
+                            resource=resource,
+                            tenant_permissions=tenant_perms,
+                        )
+                        if not explicit_deny:
+                            is_owner_authorized = True
+                except Exception:
+                    is_owner_authorized = False
+
+        if not allowed and not is_owner_authorized:
             return DecisionResult(
                 decision="DENY",
-                reason="Action is not permitted.",
+                reason="Action is explicitly denied for this tenant." if explicit_deny else "Action is not permitted.",
             )
 
         policy = self.action_policy_service.resolve_policy(

@@ -29,6 +29,8 @@ from packages.models.domain import (
     Fact,
     InterviewTopic,
     InterviewState,
+    DispatchAttempt,
+    DispatchAttemptChunk,
 )
 
 __all__ = [
@@ -62,4 +64,6 @@ __all__ = [
     "Fact",
     "InterviewTopic",
     "InterviewState",
+    "DispatchAttempt",
+    "DispatchAttemptChunk",
 ]

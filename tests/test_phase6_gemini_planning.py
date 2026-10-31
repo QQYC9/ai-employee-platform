@@ -56,6 +56,8 @@ class MockAIProvider:
         *,
         system_instruction: str | None = None,
         temperature: float = 0.1,
+        schema: dict | None = None,
+        **kwargs: Any,
     ) -> dict:
         self.call_count += 1
         self.last_prompt = prompt

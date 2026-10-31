@@ -63,6 +63,8 @@ class MockAIProvider:
         *,
         system_instruction: str | None = None,
         temperature: float = 0.1,
+        schema: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         return {}
 

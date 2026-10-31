@@ -107,7 +107,7 @@ class MockAIProvider:
         self._idx += 1
         return resp
 
-    def generate_json(self, prompt: str, *, system_instruction: str | None = None, schema: dict | None = None) -> dict:
+    def generate_json(self, prompt: str, *, system_instruction: str | None = None, schema: dict | None = None, **kwargs: Any) -> dict:
         return {"response": "mock_json"}
 
 

@@ -13,8 +13,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from packages.ai_providers.base import AIProvider
-from packages.models.domain import Approval, Conversation, Knowledge, Message, Permission, Tool, User
-from packages.services.approval_service import ApprovalService
+from packages.models.domain import Approval, Conversation, Knowledge, Message, Tool, User
+from packages.services.approval_service import (
+    ApprovalService,
+    ApprovalTokenMismatchError,
+    ApprovalExhaustedError,
+    ApprovalExpiredError,
+    ApprovalCancelledError,
+    ApprovalPayloadMismatchError,
+)
 from packages.services.business_brain_service import BusinessBrainService
 from packages.services.knowledge_service import KnowledgeService
 from packages.tools.contract import ToolExecutionContext
@@ -197,6 +204,56 @@ class OwnerIntentRouter:
                 ],
             )
 
+        # Step 0.5: Check for Explicit Challenge Response (CR-05-01 Anti-Hijack)
+        challenge_approve_m = re.match(
+            r"^(?:نعم|أوافق|موافق|تأكيد|confirm|approve)\s+([2-79AC-HJ-KM-NP-Z]{6})[\.!\s]*$",
+            text,
+            re.IGNORECASE,
+        )
+        challenge_reject_m = re.match(
+            r"^(?:لا|أرفض|مرفوض|رفض|reject|deny)\s+([2-79AC-HJ-KM-NP-Z]{6})[\.!\s]*$",
+            text,
+            re.IGNORECASE,
+        )
+        cancel_m = re.match(
+            r"^(?:إلغاء|الغاء|cancel)\s+([0-9a-fA-F-]{36}|[A-Za-z0-9_-]+)[\.!\s]*$",
+            text,
+            re.IGNORECASE,
+        )
+        if challenge_approve_m:
+            code = challenge_approve_m.group(1).upper()
+            return OwnerIntentContract(
+                raw_query=text,
+                intent="challenge_response",
+                category=IntentCategory.APPROVAL,
+                confidence=1.0,
+                tenant_id=tenant_id,
+                actor_id=actor_id,
+                entities={"token": code, "action": "approve"},
+            )
+        if challenge_reject_m:
+            code = challenge_reject_m.group(1).upper()
+            return OwnerIntentContract(
+                raw_query=text,
+                intent="challenge_response",
+                category=IntentCategory.APPROVAL,
+                confidence=1.0,
+                tenant_id=tenant_id,
+                actor_id=actor_id,
+                entities={"token": code, "action": "reject"},
+            )
+        if cancel_m:
+            app_id = cancel_m.group(1)
+            return OwnerIntentContract(
+                raw_query=text,
+                intent="approval_cancel",
+                category=IntentCategory.APPROVAL,
+                confidence=1.0,
+                tenant_id=tenant_id,
+                actor_id=actor_id,
+                entities={"approval_id": app_id},
+            )
+
         # Step 1: Check for Approval Confirmation ("أوافق على الطلب...")
         is_approval_disqualified = bool(
             re.search(
@@ -213,11 +270,42 @@ class OwnerIntentRouter:
         has_affirmative = any(re.search(pat, text_lower) for pat in affirmative_patterns)
         is_concise_affirmation = bool(
             re.search(
-                r"^\s*(?:نعم\s+)?(?:أوافق|موافق|تأكيد|تمت\s*الموافقة|اعتمد|اعتمدت|نفذ\s*الأمر)(?:\s+(?:على\s+الطلب|التنفيذ))?[\.!\s]*$",
+                r"^\s*(?:نعم(?:\s+(?:أوافق|موافق|تأكيد|تمت\s*الموافقة|اعتمد|اعتمدت|نفذ\s*الأمر))?|أوافق|موافق|تأكيد|تمت\s*الموافقة|اعتمد|اعتمدت|نفذ\s*الأمر)(?:\s+(?:على\s+الطلب|التنفيذ))?[\.!\s]*$",
                 text_lower,
             )
-            or re.search(r"^\s*(?:yes\s+)?(?:approve|confirm|proceed|authorized)[\.!\s]*$", text_lower)
+            or re.search(
+                r"^\s*(?:yes(?:\s+(?:approve|confirm|proceed|authorized))?|approve|confirm|proceed|authorized)[\.!\s]*$",
+                text_lower,
+            )
         )
+
+        # CR-05-01: Bare affirmation block when challenge approval is pending
+        if is_concise_affirmation:
+            pending_app = self.db.scalar(
+                select(Approval).where(
+                    Approval.tenant_id == tenant_id,
+                    Approval.status == "pending",
+                ).order_by(Approval.created_at.desc())
+            )
+            if pending_app:
+                # NEVER disclose or repeat the challenge code!
+                guidance_msg = (
+                    "⚠️ **العملية المطلوبة حساسة وتتطلب رمز التأكيد الخاص بها.**\n"
+                    f"- الطلب: [{pending_app.action}]\n"
+                    f"- المعرف: [{pending_app.id}]\n\n"
+                    "يرجى إدخال رمز التأكيد المرسل لك في رسالة الطلب الأصلية (مثال: 'نعم XXXXXX').\n"
+                    f"في حال فقدان الرمز، أرسل: 'إلغاء {pending_app.id}' لطلب موافقة جديد برمز جديد."
+                )
+                return OwnerIntentContract(
+                    raw_query=text,
+                    intent="bare_affirmation_blocked",
+                    category=IntentCategory.APPROVAL,
+                    confidence=1.0,
+                    tenant_id=tenant_id,
+                    actor_id=actor_id,
+                    clarification_required=True,
+                    clarification_question=guidance_msg,
+                )
 
         is_approval = (
             not is_approval_disqualified
@@ -380,10 +468,10 @@ class OwnerIntentRouter:
         # 2. Product List / Catalog Query
         is_product_list = bool(
             re.search(
-                r"(?:قائمة|عرض|ماهي|ما\s*هي|ايش|إيش|كم|اعطني|أعطني|استعرض)\s*(?:كل\s*)?(?:المنتجات|منتجاتنا|منتجاتكم|الأسعار|المنيو|كتالوج)|عدد\s*المنتجات",
+                r"(?:قائمة|عرض|ماهي|ما\s*هي|ايش|إيش|وش|شو|كم|اعطني|أعطني|استعرض)\s*(?:كل\s*)?(?:المنتجات|منتجاتنا|منتجاتكم|الأسعار|أسعاركم|المنيو|كتالوج|اللي\s*عندكم|المتوفرة)|(?:منتجات|أسعار)\s*(?:المتجر|المنشأة)|ما\s*هي\s*قائمة\s*منتجات|(?:وش|ايش|إيش|شو|ماذا)\s*(?:تبيعوا|تبيعون|تقدموا|تقدمون|عندكم)|عدد\s*المنتجات",
                 part_lower,
             )
-        ) and not bool(re.search(r"أضف|سجل|تحديث|بسعر|سعره", part_lower))
+        ) and not bool(re.search(r"أضف|سجل|تحديث|بسعر|سعره|نبيع|نوفر|نقدم|نخدم|اسم\s*شركتنا", part_lower))
         if is_product_list:
             return IntentStep(
                 step_id=step_id,
@@ -444,17 +532,81 @@ class OwnerIntentRouter:
             )
 
         # 6. Task Creation
-        task_match = re.search(r"(?:أنشئ|سجل|أضف)\s*مهمة\s*(?:جديدة\s*)?(?:باسم|بعنوان)?\s*[:\s]?\s*(.+)", part, re.IGNORECASE)
-        if task_match and not re.search(r"منتج|سعر|سياسة", part_lower):
-            title = task_match.group(1).strip()
-            return IntentStep(
-                step_id=step_id,
-                tool_slug="task_create",
-                category=IntentCategory.WRITE,
-                description=f"إنشاء مهمة جديدة: {title}",
-                parameters={"title": title, "description": f"مهمة من المالك: {part}"},
-                depends_on=depends_on,
+        is_task_query = bool(re.search(r"حالة\s*المهام|ما\s*هي\s*المهام|استفسر\s*عن\s*المهام|قائمة\s*المهام|list\s*tasks|عرض\s*المهام", part_lower))
+        is_adjective_task = bool(re.search(r"(?:هذه|تلك|المسألة|النقطة)\s*مهمة\s*(?:جداً|جدا)?", part_lower))
+
+        if not is_task_query and not is_adjective_task:
+            create_prefix = re.search(
+                r"(?:(?:أريد|اريد|يرجى|قم\s*بـ?|اعمل|حابب|ودّي|ودي)\s+)?"
+                r"(?:إنشاء|انشاء|أنشئ|انشئ|سجل|أضف|اضف|عمل)"
+                r"(?:\s+لي)?"
+                r"\s+مهمة"
+                r"(?:\s+(?:اختبار(?:ية)?|جديدة|إدارية|تشغيلية))?"
+                r"[\s:]*",
+                part,
+                re.IGNORECASE,
             )
+            if create_prefix and not (re.search(r"منتج|سعر|سياسة", part_lower) and not re.search(r"مهمة", part_lower)):
+                remainder = part[create_prefix.end():].strip()
+                if remainder:
+                    quoted_matches = re.findall(r"[«\"'“]([^»\"'”]+)[»\"'”]", remainder)
+                    title = ""
+                    description = ""
+                    priority = "normal"
+
+                    # 1. Title extraction
+                    title_match = re.search(
+                        r"(?:بعنوان|باسم|عنوانها|اسمها)\s*[:\s]?\s*([«\"'“][^»\"'”]+[»\"'”]|[^،,\n]+(?:\.[0-9a-zA-Z_-]+)*)",
+                        remainder,
+                    )
+                    if title_match:
+                        raw_title = title_match.group(1).strip()
+                        title = re.sub(r"^[«\"'“]|[\"'»”]$", "", raw_title).strip()
+                        title = re.sub(r"\s+(?:و?وصفها|و?بحالة|و?حالتها|و?نفذ|و?اجعل|و?بأولوية|و?أولوية).*$", "", title).strip()
+                        title = re.sub(r"\.(?:\s+.*|$)", "", title).strip()
+                    elif quoted_matches:
+                        title = quoted_matches[0].strip()
+                    else:
+                        parts = re.split(r"[،,\n]|(?:\s+(?:و?وصفها|و?بحالة|و?حالتها|و?نفذ|و?اجعل)\s+)", remainder)
+                        title = parts[0].strip() if parts else remainder[:50].strip()
+
+                    # 2. Description extraction
+                    desc_match = re.search(
+                        r"(?:و?وصفها|و?تفاصيلها|و?الهدف\s*منها|و?المطلوب)\s*[:\s]?\s*([«\"'“][^»\"'”]+[»\"'”]|[^،,\n]+)",
+                        remainder,
+                    )
+                    if desc_match:
+                        raw_desc = desc_match.group(1).strip()
+                        description = re.sub(r"^[«\"'“]|[\"'»”]$", "", raw_desc).strip()
+                        description = re.sub(r"\s+(?:و?بحالة|و?حالتها|و?نفذ|و?اجعل|و?بأولوية|و?أولوية).*$", "", description).strip()
+                        description = re.sub(r"\.(?:\s+.*|$)", "", description).strip()
+                    elif len(quoted_matches) >= 2:
+                        description = quoted_matches[1].strip()
+
+                    # 3. Priority extraction
+                    if re.search(r"عاجل|طارئ|urgent", part_lower):
+                        priority = "urgent"
+                    elif re.search(r"عالية|مرتفعة|high", part_lower):
+                        priority = "high"
+                    elif re.search(r"منخفضة|low", part_lower):
+                        priority = "low"
+
+                    if not title:
+                        title = remainder[:50].strip()
+
+                    return IntentStep(
+                        step_id=step_id,
+                        tool_slug="task_create",
+                        category=IntentCategory.WRITE,
+                        description=f"إنشاء مهمة جديدة: {title}",
+                        parameters={
+                            "title": title,
+                            "objective": description or f"مهمة من المالك: {part}",
+                            "description": description or f"مهمة من المالك: {part}",
+                            "priority": priority,
+                        },
+                        depends_on=depends_on,
+                    )
 
         # 7. Conversation Summaries
         if re.search(r"(?:لخص|ملخص|تقرير).*(?:كل|جميع)\s*(?:الزبائن|العملاء|المحادثات)", part_lower):
@@ -579,26 +731,134 @@ class OwnerIntentRouter:
             )
 
         if contract.requires_approval:
-            # Sensitive operation: create formal Approval record
-            app = self.approval_service.create_approval(
+            # Sensitive operation: create formal Challenge Approval record under CR-05-01
+            payload = {"raw_query": contract.raw_query, "action": contract.approval_action}
+            if contract.steps:
+                payload["steps"] = [s.model_dump() for s in contract.steps]
+            app, raw_code = self.approval_service.create_approval_challenge(
                 tenant_id=contract.tenant_id,
                 requested_for="tenant_owner",
                 action=contract.approval_action or "sensitive_operation",
                 description=contract.raw_query,
+                parameters=payload,
             )
             reply = (
                 f"⚠️ **طلب موافقة رسمي لإجراء إداري حساس:**\n"
                 f"- العملية: {contract.approval_action}\n"
                 f"- التفاصيل: \"{contract.raw_query}\"\n"
-                f"- رقم طلب الموافقة: [{app.id}]\n\n"
-                f"لحماية بيانات منشأتكم، لم يتم تنفيذ أي حذف أو تعديل حتى الآن.\n"
-                f"للتأكيد النهائي، يرجى الرد بـ: 'أوافق على الطلب {app.id}'."
+                f"- المعرف: [{app.id}]\n"
+                f"- رمز التأكيد الخاص بك: [{raw_code}]\n"
+                f"- الصلاحية: 15 دقيقة (3 محاولات كحد أقصى)\n\n"
+                f"لحماية بيانات منشأتكم، لم يتم تنفيذ أي إجراء حتى الآن.\n"
+                f"للموافقة (أوافق على الطلب) والتأكيد النهائي، يرجى الرد بـ: 'نعم {raw_code}'\n"
+                f"للإلغاء، أرسل: 'إلغاء {app.id}'."
             )
             return RouterExecutionResult(
                 success=True,
                 contract=contract,
                 reply_text=reply,
             )
+
+        if contract.intent == "challenge_response":
+            token = contract.entities.get("token", "")
+            action_type = contract.entities.get("action", "approve")
+            pendings = self.approval_service.list_approvals(contract.tenant_id, status="pending")
+
+            matched = None
+            for p in pendings:
+                if p.token and ApprovalService.verify_token(token, p.token, contract.tenant_id):
+                    matched = p
+                    break
+
+            if matched:
+                if action_type == "approve":
+                    try:
+                        app = self.approval_service.verify_and_approve_challenge(
+                            tenant_id=contract.tenant_id,
+                            approval_id=matched.id,
+                            submitted_token=token,
+                            decision_by_user_id=contract.actor_id or uuid4(),
+                            runtime_parameters=matched.parameters_json,
+                        )
+                        return RouterExecutionResult(
+                            success=True,
+                            contract=contract,
+                            reply_text=f"✅ **تم التحقق من رمز التأكيد بنجاح للموافقة [{app.action}]:**\nتمت الموافقة الرسمية وجارٍ تنفيذ العملية فوراً عبر نظام Outbox.",
+                        )
+                    except Exception as exc:
+                        return RouterExecutionResult(
+                            success=False,
+                            contract=contract,
+                            reply_text=f"⛔ **تعذر اعتماد الموافقة:** {str(exc)}",
+                        )
+                else:
+                    self.approval_service.reject(
+                        tenant_id=contract.tenant_id,
+                        approval_id=matched.id,
+                        decision_by_user_id=contract.actor_id or uuid4(),
+                        reason="Rejected via challenge command",
+                    )
+                    return RouterExecutionResult(
+                        success=True,
+                        contract=contract,
+                        reply_text="⛔ **تم رفض طلب الموافقة وإلغاء تنفيذ العملية بنجاح.**",
+                    )
+            else:
+                # Token did not match active pending approval
+                if pendings:
+                    target = pendings[0]
+                    try:
+                        self.approval_service.verify_and_approve_challenge(
+                            tenant_id=contract.tenant_id,
+                            approval_id=target.id,
+                            submitted_token=token,
+                            decision_by_user_id=contract.actor_id or uuid4(),
+                        )
+                    except ApprovalTokenMismatchError as err:
+                        return RouterExecutionResult(
+                            success=False,
+                            contract=contract,
+                            reply_text=f"❌ **رمز التأكيد غير صحيح:** {str(err)}",
+                        )
+                    except ApprovalExhaustedError as err:
+                        return RouterExecutionResult(
+                            success=False,
+                            contract=contract,
+                            reply_text=f"⛔ **تم استنفاد المحاولات:** {str(err)}",
+                        )
+                    except Exception as err:
+                        return RouterExecutionResult(
+                            success=False,
+                            contract=contract,
+                            reply_text=f"❌ **خطأ في التحقق من الرمز:** {str(err)}",
+                        )
+                return RouterExecutionResult(
+                    success=False,
+                    contract=contract,
+                    reply_text="⚠️ **رمز التأكيد غير مطابق لأي طلب موافقة معلق نشط.**",
+                )
+
+        if contract.intent == "approval_cancel":
+            app_id_ref = contract.entities.get("approval_id")
+            pendings = self.approval_service.list_approvals(contract.tenant_id, status="pending")
+            target = None
+            for p in pendings:
+                if str(p.id) == app_id_ref or str(p.id).startswith(str(app_id_ref)):
+                    target = p
+                    break
+            if target:
+                self.approval_service.cancel(contract.tenant_id, target.id, user_id=contract.actor_id)
+                return RouterExecutionResult(
+                    success=True,
+                    contract=contract,
+                    reply_text=f"ℹ️ **تم إلغاء طلب الموافقة [{target.action}] بنجاح.**\nيمكنك إعادة طلب الإجراء من جديد لتوليد رمز تأكيد جديد.",
+                )
+            else:
+                return RouterExecutionResult(
+                    success=False,
+                    contract=contract,
+                    reply_text="⚠️ لم يتم العثور على طلب موافقة معلق مطابق للإلغاء.",
+                )
 
         if not contract.steps:
             return RouterExecutionResult(
@@ -656,31 +916,21 @@ class OwnerIntentRouter:
             if step.category == IntentCategory.WRITE:
                 step_idem_key = f"owner:step:{contract.tenant_id}:{message_id}:{step.step_id}"
 
-            # Ensure baseline permission for owner-instructed step unless an explicit deny exists
-            action_name = f"execute:{step.tool_slug}"
-            resource_name = f"tools:{step.tool_slug}"
-            existing_perms = self.db.scalars(
-                select(Permission).where(
-                    Permission.tenant_id == contract.tenant_id,
-                    Permission.action == action_name,
-                    Permission.resource == resource_name,
-                )
-            ).all()
-            has_deny = any(p.effect == "deny" for p in existing_perms)
-            if not has_deny and not any(p.effect == "allow" for p in existing_perms):
-                try:
-                    from packages.services.permission_service import PermissionService
-                    perm_svc = PermissionService(self.db)
-                    perm_svc.create_permission(
-                        tenant_id=contract.tenant_id,
-                        action=action_name,
-                        resource=resource_name,
-                        effect="allow",
-                    )
-                except Exception:
-                    pass
-
             # Execute via engine.execute_tool_action
+            # Authority for permissions, policies, and approvals is strictly delegated
+            # to DecisionEngine, PermissionService, and ActionPolicyService.
+            # No automatic permanent "allow" permissions are created by the router.
+            effective_actor = contract.actor_id
+            if effective_actor is None:
+                owner_user = self.db.scalar(
+                    select(User).where(
+                        User.tenant_id == contract.tenant_id,
+                        User.role == "tenant_owner",
+                    )
+                )
+                if owner_user:
+                    effective_actor = owner_user.id
+
             try:
                 t_res: ToolExecutionResult = engine.execute_tool_action(
                     tenant_id=contract.tenant_id,
@@ -689,6 +939,8 @@ class OwnerIntentRouter:
                     conversation_id=conversation_id,
                     agent_id=None,
                     idempotency_key=step_idem_key,
+                    actor_id=effective_actor,
+                    is_owner=True,
                 )
 
                 if t_res.status == "executed":
@@ -792,7 +1044,16 @@ class OwnerIntentRouter:
 
         if slug == "task_create":
             tid = (output or {}).get("task_id", "") if isinstance(output, dict) else ""
-            return f"✅ **تم إنشاء المهمة بنجاح** برقم [{tid}]."
+            t_title = (output or {}).get("title", "") if isinstance(output, dict) else ""
+            t_status = (output or {}).get("status", "pending") if isinstance(output, dict) else "pending"
+            msg = "✅ **تم إنشاء المهمة بنجاح**"
+            if t_title:
+                msg += f" بعنوان: «{t_title}»"
+            if tid:
+                msg += f" برقم [{tid}]"
+            if t_status:
+                msg += f" (الحالة: {t_status})"
+            return msg + "."
 
         if slug == "conversation_summarize_all":
             summary = (output or {}).get("summary", "لم يتم العثور على محادثات.") if isinstance(output, dict) else str(output)

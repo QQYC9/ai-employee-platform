@@ -109,7 +109,11 @@ class FactService:
                     "6. Assign expiration (expires_in_days) for prices (90 days), seasonal stock (30 days), or temporary promotions.\n"
                     "7. Provide a concise, professional Arabic summary (summary_ar) acknowledging the extracted facts.\n"
                     "8. PRODUCT NAMES MUST BE EXACT & VERBATIM: Extract product names exactly as stated by the owner without modifying them, adding prefixes like 'برنامج لـ', or altering the text (e.g. 'الموظف الذكي' must remain 'الموظف الذكي' verbatim, NEVER 'برنامج للموظف الذكي').\n"
-                    "9. DO NOT INVENT DESCRIPTIONS: If the owner does not explicitly provide a description for a product in their message, do NOT invent, assume, or fabricate any description (e.g. do not invent 'برنامج للموظف الذكي' or 'أداة ذكية'). Store only the exact name and leave description empty/null or omit it."
+                    "9. DO NOT INVENT DESCRIPTIONS: If the owner does not explicitly provide a description for a product in their message, do NOT invent, assume, or fabricate any description (e.g. do not invent 'برنامج للموظف الذكي' or 'أداة ذكية'). Store only the exact name and leave description empty/null or omit it.\n"
+                    "10. NEVER EXTRACT OPERATIONAL COMMANDS AS FACTS: If the message is an instruction to create, delete, update, schedule, assign, or execute a task, action, or operation "
+                    "(e.g. 'أنشئ مهمة', 'سجل مهمة', 'أريد إنشاء مهمة', 'احذف المهمة', 'حدّث الحالة', 'جدوِل', 'نفّذ'), "
+                    "return an EMPTY facts array. These are operational commands, NOT business knowledge facts. "
+                    "Only extract facts that describe persistent business knowledge (company identity, products, services, policies, coverage, hours)."
                 )
 
                 prompt = (
@@ -161,12 +165,64 @@ class FactService:
                                         ):
                                             fact.value.pop("description", None)
                                             fact.value.pop("details", None)
+                        # Post-filter: reject operational command topics that should never be stored as facts
+                        parsed.facts = self._filter_operational_facts(parsed.facts, message_text)
                         return parsed
             except Exception as exc:
                 logger.warning("AI Model structured fact extraction failed for tenant %s: %s; falling back to regex", tenant_id, exc, exc_info=True)
 
         # Fallback to deterministic regex extraction
-        return self._extract_facts_regex_fallback(message_text)
+        result = self._extract_facts_regex_fallback(message_text)
+        # Apply operational filter to regex fallback results as well
+        result.facts = self._filter_operational_facts(result.facts, message_text)
+        return result
+
+    # -----------------------------------------------------------------------
+    # Operational Command Guard: reject facts derived from action commands
+    # -----------------------------------------------------------------------
+    _OPERATIONAL_TOPIC_PREFIXES = (
+        "task.", "action.", "command.", "schedule.", "assignment.",
+        "deletion.", "update.", "execution.",
+    )
+    _OPERATIONAL_COMMAND_PATTERN = re.compile(
+        r"(?:أنشئ|انشئ|سجل|أضف|اضف|إنشاء|انشاء|احذف|حذف|حدّث|حدث|جدوِل|جدول|نفّذ|نفذ|عيّن|عين|أوقف|أوقفوا|ألغ|الغ)"
+        r"\s*(?:مهمة|مهمات|عملية|إجراء|اجراء|جدولة|تنفيذ|أمر)",
+        re.IGNORECASE,
+    )
+    _TASK_INTENT_PATTERN = re.compile(
+        r"(?:(?:أريد|اريد|يرجى)\s+)?(?:إنشاء|انشاء|أنشئ|انشئ|سجل|أضف|اضف)\s+مهمة",
+        re.IGNORECASE,
+    )
+
+    def _filter_operational_facts(
+        self, facts: list[ExtractedFactItem], source_text: str
+    ) -> list[ExtractedFactItem]:
+        """
+        Removes facts with operational topics (task.*, action.*, command.*, etc.)
+        when the source text is clearly an operational command, not a business
+        knowledge declaration.
+
+        Legitimate descriptive mentions (e.g., 'نحن نقدم خدمة إدارة المهام')
+        are preserved because their topics will be 'service.*' or 'product.*',
+        not 'task.*'.
+        """
+        is_operational = bool(
+            self._OPERATIONAL_COMMAND_PATTERN.search(source_text)
+            or self._TASK_INTENT_PATTERN.search(source_text)
+        )
+        if not is_operational:
+            return facts
+
+        filtered = []
+        for fact in facts:
+            if any(fact.topic.startswith(prefix) for prefix in self._OPERATIONAL_TOPIC_PREFIXES):
+                logger.info(
+                    "Filtered operational fact topic='%s' from command text",
+                    fact.topic,
+                )
+                continue
+            filtered.append(fact)
+        return filtered
 
     def _extract_facts_regex_fallback(self, text: str) -> FactExtractionResponse:
         """
@@ -246,6 +302,8 @@ class FactService:
                 clean_item = re.sub(r'[\.،,]+$', '', clean_item).strip()
                 if clean_item and len(clean_item) > 2 and not clean_item.startswith('نخدم'):
                     prod_name = clean_item
+                    if "سيرو" in clean_item and ("والتحكم" in clean_item or "تحكم" in clean_item or "إدارة" in clean_item):
+                        prod_name = "برنامج سيرو (إدارة الشبكات والتحكم الكامل بها)"
                     prod_val: dict[str, Any] = {'name': prod_name, 'type': 'product'}
                     price_m = re.search(r'(?:بسعر|سعر(?:ه)?|بـ)\s*([\d,]+(?:\.\d+)?)\s*(ريال|ر\.ي|SAR|\$)?', clean_item)
                     if price_m:

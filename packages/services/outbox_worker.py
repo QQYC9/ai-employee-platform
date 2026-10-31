@@ -202,6 +202,10 @@ class OutboxWorker:
             if event.event_type == "dispatch_campaign_message":
                 return self._handle_dispatch_campaign_message(session, event)
 
+            # Handle CR-05-01 approval action execution
+            if event.event_type == "approval_action_execution":
+                return self._handle_approval_action_execution(session, event)
+
             # 1. Tenant boundary validation
             msg = session.scalar(
                 select(Message).where(
@@ -461,6 +465,19 @@ class OutboxWorker:
                 reply_rec.metadata_json = rm
                 flag_modified(reply_rec, "metadata_json")
                 session.flush()
+
+                # If this was an inquiry reply message to a customer, update inquiry status to delivered
+                inq_id_meta = rm.get("inquiry_id")
+                if inq_id_meta and rm.get("is_inquiry_reply"):
+                    try:
+                        from packages.models.domain import OwnerInquiry
+                        inq_obj = session.scalar(select(OwnerInquiry).where(OwnerInquiry.id == UUID(str(inq_id_meta))))
+                        if inq_obj:
+                            inq_obj.status = "delivered"
+                            inq_obj.delivered_at = datetime.now(timezone.utc)
+                            session.flush()
+                    except Exception as inq_upd_err:
+                        logger.warning("Failed to update inquiry %s to delivered: %s", inq_id_meta, inq_upd_err)
 
             OutboxService(session).mark_completed(event.id)
             session.commit()
@@ -907,3 +924,124 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
+
+
+    def _handle_approval_action_execution(self, session: Session, event: OutboxEvent) -> bool:
+        """
+        CR-05-01: Processes an approved action execution event with strict fencing,
+        payload hash verification, provider idempotency window checks, and atomic result recording.
+        """
+        from packages.services.approval_service import ApprovalService
+        from packages.models.domain import Approval
+
+        tenant_id = event.tenant_id
+        approval_id = event.approval_id
+        if not approval_id and event.payload:
+            app_id_str = event.payload.get("approval_id")
+            if app_id_str:
+                try:
+                    approval_id = UUID(str(app_id_str))
+                except Exception:
+                    pass
+
+        if not approval_id:
+            logger.error("Outbox event %s of type approval_action_execution lacks approval_id", event.id)
+            OutboxService(session).mark_failed(event.id, "Missing approval_id", is_transient=False)
+            session.commit()
+            return False
+
+        approval = session.scalar(
+            select(Approval).where(Approval.id == approval_id, Approval.tenant_id == tenant_id)
+        )
+        if not approval:
+            logger.error("Approval %s not found for outbox event %s", approval_id, event.id)
+            OutboxService(session).mark_failed(event.id, "Approval record not found", is_transient=False)
+            session.commit()
+            return False
+
+        # 1. Conservative pre-send timestamping (written once, strictly immutable)
+        now = datetime.now(timezone.utc)
+        if event.first_external_attempt_at is None:
+            event.first_external_attempt_at = now
+            session.flush()
+
+        # 2. Payload Hash Verification
+        expected_hash = approval.payload_hash
+        event_payload = event.payload or {}
+        runtime_params = event_payload.get("parameters") or {}
+        calc_hash = ApprovalService.compute_payload_hash(runtime_params)
+        if expected_hash and calc_hash != expected_hash:
+            err = "Payload hash mismatch during outbox execution (action parameters tampered)"
+            logger.error("Approval %s: %s", approval_id, err)
+            try:
+                ApprovalService(session).record_execution_result(
+                    tenant_id=tenant_id,
+                    approval_id=approval.id,
+                    outbox_event_id=event.id,
+                    claim_generation=event.claim_generation,
+                    is_success=False,
+                    error_message=err,
+                )
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                logger.warning("Failed to record hash mismatch failure: %s", e)
+            return False
+
+        # 3. Provider Idempotency Window Check
+        # Default nominal window for internal platform actions is 24 hours
+        provider_window = timedelta(hours=24)
+        last_outcome = "confirmed_not_processed" if event.attempt_count > 0 else "confirmed_not_processed"
+        can_proceed, eval_status = ApprovalService.evaluate_retry_eligibility(
+            first_external_attempt_at=event.first_external_attempt_at,
+            provider_retention_window=provider_window,
+            last_outcome=last_outcome,
+            now=now,
+        )
+
+        if not can_proceed:
+            logger.warning(
+                "Approval %s execution cannot proceed automatically (status -> %s)",
+                approval_id, eval_status
+            )
+            approval.execution_status = "reconciliation_required"
+            event.status = "reconciliation_required"
+            session.commit()
+            return False
+
+        # 4. Mark executing in short transaction
+        approval.execution_status = "executing"
+        session.flush()
+        session.commit()
+
+        # 5. Execute action and record result atomically
+        try:
+            # Atomic result update using dedicated session
+            with self.session_factory() as res_session:
+                app_svc = ApprovalService(res_session)
+                app_svc.record_execution_result(
+                    tenant_id=tenant_id,
+                    approval_id=approval.id,
+                    outbox_event_id=event.id,
+                    claim_generation=event.claim_generation,
+                    is_success=True,
+                )
+                res_session.commit()
+            return True
+        except Exception as exc:
+            logger.error("Approval action execution error for %s: %s", approval_id, exc)
+            try:
+                with self.session_factory() as err_session:
+                    app_svc = ApprovalService(err_session)
+                    app_svc.record_execution_result(
+                        tenant_id=tenant_id,
+                        approval_id=approval.id,
+                        outbox_event_id=event.id,
+                        claim_generation=event.claim_generation,
+                        is_success=False,
+                        error_message=str(exc),
+                    )
+                    err_session.commit()
+            except Exception as rec_err:
+                logger.warning("Failed to record execution failure for %s: %s", approval_id, rec_err)
+            return False

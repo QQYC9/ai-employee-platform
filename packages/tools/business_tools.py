@@ -731,29 +731,51 @@ class ProductListTool(BaseRealTool):
             )
         ).all()
 
-        seen_names = set()
-        for f in confirmed_facts:
+        # Prioritize primary product overview facts before sub-module facts
+        def _fact_priority(f: Fact) -> int:
+            t = (f.topic or "").lower()
+            if t == "products" or t.endswith(".overview"):
+                return 0
+            if t.count(".") <= 1:
+                return 1
+            return 2
+
+        sorted_facts = sorted(confirmed_facts, key=_fact_priority)
+
+        seen_names: dict[str, int] = {}
+        for f in sorted_facts:
             val = f.value
             slug = f.topic.split(".", 1)[1] if "." in f.topic else f.topic
             name = f.subject
             price = 0
             unit = "ريال"
             cat = ""
+            desc = ""
             if isinstance(val, dict):
                 name = val.get("name") or val.get("title") or f.subject
                 price = val.get("price", 0)
                 unit = val.get("unit") or val.get("currency") or "ريال"
                 cat = val.get("category", "")
+                desc = (val.get("description") or val.get("details") or "").strip()
             elif isinstance(val, str):
                 name = val
+                if val.strip() != f.subject.strip():
+                    desc = val.strip()
 
             if query and query not in name.lower() and query not in slug.lower():
                 continue
 
             clean_name = name.strip()
-            if clean_name.lower() in seen_names:
+            key = clean_name.lower()
+            if key in seen_names:
+                idx = seen_names[key]
+                if desc and (not items[idx].get("description") or len(desc) > len(items[idx].get("description", ""))):
+                    items[idx]["description"] = desc
+                if price and price > 0 and items[idx].get("price", 0) == 0:
+                    items[idx]["price"] = price
+                    items[idx]["unit"] = unit
                 continue
-            seen_names.add(clean_name.lower())
+            seen_names[key] = len(items)
 
             items.append({
                 "slug": slug,
@@ -761,6 +783,7 @@ class ProductListTool(BaseRealTool):
                 "price": price,
                 "unit": unit,
                 "category": cat,
+                "description": desc,
             })
 
         # 2. Fallback to legacy BusinessBrain products if facts store has no products
@@ -774,6 +797,7 @@ class ProductListTool(BaseRealTool):
                     price = data.get("price", 0)
                     unit = data.get("unit") or data.get("currency") or "ريال"
                     cat = data.get("category", "")
+                    desc = (data.get("description") or data.get("details") or "").strip()
 
                     if query and query not in name.lower() and query not in slug.lower():
                         continue
@@ -784,6 +808,7 @@ class ProductListTool(BaseRealTool):
                         "price": price,
                         "unit": unit,
                         "category": cat,
+                        "description": desc,
                     })
 
         if not items:

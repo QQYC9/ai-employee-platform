@@ -53,7 +53,15 @@ class MockAIProvider:
         self._idx += 1
         return resp
 
-    def generate_json(self, prompt: str, *, system_instruction: str | None = None, temperature: float = 0.1) -> dict[str, Any]:
+    def generate_json(
+        self,
+        prompt: str,
+        *,
+        system_instruction: str | None = None,
+        temperature: float = 0.1,
+        schema: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         return {}
 
 

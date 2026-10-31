@@ -113,6 +113,8 @@ class ToolRegistry:
                 raise ValueError(f"Tool '{tool.contract.slug}' failed: {result.error}")
             return result.data
 
+        handler.contract = tool.contract
+        handler.tool = tool
         return handler
 
 

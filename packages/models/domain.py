@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Identity, DateTime, Float, ForeignKey, ForeignKeyConstraint, Index, Integer, Numeric, String, Text, UniqueConstraint, func, text
+from sqlalchemy import Boolean, CheckConstraint, Identity, DateTime, Float, ForeignKey, ForeignKeyConstraint, Index, Integer, Numeric, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -341,9 +341,37 @@ class Approval(Base):
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    failed_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3, server_default=text("3")
+    )
+    payload_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    parameters_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    execution_status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="not_started", server_default=text("'not_started'"), index=True
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+
+    @property
+    def reason(self) -> str | None:
+        return self.decision_reason
+
+    @reason.setter
+    def reason(self, value: str | None) -> None:
+        self.decision_reason = value
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_approvals_tenant_id"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_approvals_tenant_idempotency_key"),
+        Index("ix_approvals_execution_status", "tenant_id", "execution_status"),
     )
 
 
@@ -1435,15 +1463,24 @@ class OutboxEvent(Base):
         nullable=False,
         index=True,
     )
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=False,
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("approvals.id", ondelete="RESTRICT"),
+        nullable=True,
         index=True,
     )
-    message_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("messages.id", ondelete="CASCADE"),
-        nullable=False,
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    first_external_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
     payload: Mapped[dict] = mapped_column(
         JSONB,
@@ -1459,6 +1496,18 @@ class OutboxEvent(Base):
         index=True,
     )
     attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    claim_generation: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    dispatch_attempts_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0,
@@ -1516,7 +1565,24 @@ class OutboxEvent(Base):
             "idempotency_key",
             name="uq_tenant_outbox_idempotency_key",
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "approval_id"],
+            ["approvals.tenant_id", "approvals.id"],
+            ondelete="RESTRICT",
+            name="fk_outbox_events_approval_composite",
+        ),
+        CheckConstraint(
+            "event_type != 'approval_action_execution' OR approval_id IS NOT NULL",
+            name="ck_outbox_approval_execution_requires_approval_id",
+        ),
         Index("ix_outbox_events_claim", "status", "scheduled_at"),
+        Index(
+            "uq_outbox_tenant_approval_execution",
+            "tenant_id",
+            "approval_id",
+            unique=True,
+            postgresql_where=text("event_type = 'approval_action_execution'"),
+        ),
     )
 
 
@@ -2357,4 +2423,207 @@ class OwnerInquiry(Base):
         nullable=False,
         default=list,
         server_default=text("'[]'::jsonb"),
+    )
+
+
+class DispatchAttempt(Base):
+    __tablename__ = "dispatch_attempts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    recipient_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("campaign_recipients.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    outbox_event_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("outbox_events.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+    claim_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    worker_id: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="claimed",
+        server_default=text("'claimed'"),
+    )
+    outcome_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("clock_timestamp()"),
+    )
+    dispatch_intent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    external_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    transport_phase: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    late_result_recorded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    late_result_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    late_external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("clock_timestamp()"),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "campaign_id"],
+            ["campaigns.tenant_id", "campaigns.id"],
+            name="fk_attempts_campaign_composite",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "recipient_id"],
+            ["campaign_recipients.tenant_id", "campaign_recipients.id"],
+            name="fk_attempts_recipient_composite",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "outbox_event_id"],
+            ["outbox_events.tenant_id", "outbox_events.id"],
+            name="fk_attempts_outbox_composite",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "message_id"],
+            ["messages.tenant_id", "messages.id"],
+            name="fk_attempts_message_composite",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_dispatch_attempts_tenant_id"),
+        UniqueConstraint(
+            "outbox_event_id",
+            "claim_generation",
+            name="uq_dispatch_attempts_event_generation",
+        ),
+        CheckConstraint(
+            "status IN ('claimed', 'dispatching', 'accepted', 'rejected', 'indeterminate', 'reconciled')",
+            name="chk_attempt_status",
+        ),
+        CheckConstraint(
+            "outcome_category IS NULL OR outcome_category IN ("
+            "'provider_accepted', 'provider_rejected', 'connect_timeout_safe', 'connect_error_safe', "
+            "'read_timeout_indeterminate', 'write_timeout_indeterminate', 'crash_indeterminate', "
+            "'protocol_error_indeterminate', 'permanent_error', 'rate_limited_retry')",
+            name="chk_attempt_outcome",
+        ),
+        Index("ix_dispatch_attempts_tenant_status", "tenant_id", "status"),
+        Index("ix_dispatch_attempts_recipient_status", "tenant_id", "recipient_id", "status"),
+        Index("ix_dispatch_attempts_event_lookup", "tenant_id", "outbox_event_id"),
+    )
+
+
+class DispatchAttemptChunk(Base):
+    __tablename__ = "dispatch_attempt_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    attempt_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("dispatch_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    outcome_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    responded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    external_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    transport_phase: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("clock_timestamp()"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("clock_timestamp()"),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "attempt_id"],
+            ["dispatch_attempts.tenant_id", "dispatch_attempts.id"],
+            name="fk_chunks_attempt_tenant_composite",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("attempt_id", "chunk_index", name="uq_chunk_attempt_index"),
+        CheckConstraint("chunk_index >= 0", name="chk_chunk_index_positive"),
+        CheckConstraint(
+            "status IN ('pending', 'dispatching', 'accepted', 'rejected', 'indeterminate')",
+            name="chk_chunk_status",
+        ),
+        Index(
+            "ix_dispatch_attempt_chunks_lookup",
+            "tenant_id",
+            "attempt_id",
+            "chunk_index",
+        ),
+        Index(
+            "ix_dispatch_attempt_chunks_ext_id",
+            "tenant_id",
+            "external_message_id",
+            postgresql_where=text("external_message_id IS NOT NULL"),
+        ),
     )

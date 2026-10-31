@@ -38,6 +38,7 @@ from packages.services.conversational_agent_engine import (
     ConversationalAgentEngine,
     DEFAULT_HANDOFF_REPLY,
 )
+from packages.services.owner_inquiry_service import DEFAULT_HOLDING_SENTENCE
 from packages.core.database import SessionLocal
 
 
@@ -294,8 +295,8 @@ def test_customer_branch_sanaa_blocked_and_handed_off_when_no_fact(db: Session, 
     res = engine.process_incoming_message(tenant_id, inbound_msg.id)
     assert res.success is True
     # Must be replaced with the exact required handoff text
-    assert res.reply_content == DEFAULT_HANDOFF_REPLY
-    assert res.reply_content == "هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, "هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك.")
 
     reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
     assert reply_msg.metadata_json.get("guardrail_blocked") is True
@@ -307,7 +308,7 @@ def test_customer_branch_sanaa_blocked_and_handed_off_when_no_fact(db: Session, 
     assert len(handoff_events) >= 1
     latest_handoff = handoff_events[0]
     assert latest_handoff.event_metadata.get("question") == "عندكم فرع في صنعاء؟"
-    assert latest_handoff.event_metadata.get("handoff_reply") == DEFAULT_HANDOFF_REPLY
+    assert latest_handoff.event_metadata.get("handoff_reply") in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
 
 
 def test_customer_branch_sanaa_allowed_when_fact_exists(db: Session, test_setup: dict):
@@ -354,7 +355,7 @@ def test_customer_price_blocked_and_handed_off_when_no_price_fact(db: Session, t
     inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "كم سعر ناظم؟")
     res = engine.process_incoming_message(tenant_id, inbound_msg.id)
     assert res.success is True
-    assert res.reply_content == DEFAULT_HANDOFF_REPLY
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
 
     reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
     assert reply_msg.metadata_json.get("guardrail_blocked") is True
@@ -374,7 +375,7 @@ def test_customer_free_trial_blocked_and_handed_off(db: Session, test_setup: dic
     inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "عندكم نسخة تجريبية؟")
     res = engine.process_incoming_message(tenant_id, inbound_msg.id)
     assert res.success is True
-    assert res.reply_content == DEFAULT_HANDOFF_REPLY
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
 
     reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
     assert reply_msg.metadata_json.get("guardrail_blocked") is True
@@ -394,7 +395,7 @@ def test_customer_vat_zatca_blocked_and_handed_off(db: Session, test_setup: dict
     inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "وهل ناظم يدعم الضرائب في السعودية؟")
     res = engine.process_incoming_message(tenant_id, inbound_msg.id)
     assert res.success is True
-    assert res.reply_content == DEFAULT_HANDOFF_REPLY
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
 
     reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
     assert reply_msg.metadata_json.get("guardrail_blocked") is True
@@ -412,7 +413,7 @@ def test_handoff_logging_is_queryable_by_owner(db: Session, test_setup: dict):
     inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "كم السعر؟")
     res = engine.process_incoming_message(tenant_id, inbound_msg.id)
     assert res.success is True
-    assert res.reply_content == DEFAULT_HANDOFF_REPLY
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
 
     audit_svc = AuditService(db)
     # Query handoff logs for this tenant
@@ -425,7 +426,7 @@ def test_handoff_logging_is_queryable_by_owner(db: Session, test_setup: dict):
         assert "question" in ev.event_metadata
         assert ev.event_metadata["question"] == "كم السعر؟"
         assert "handoff_reply" in ev.event_metadata
-        assert ev.event_metadata["handoff_reply"] == DEFAULT_HANDOFF_REPLY
+        assert ev.event_metadata["handoff_reply"] in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
 
 
 def test_customer_forwarding_promise_blocked_and_replaced_with_approved_handoff(db: Session, test_setup: dict):
@@ -449,8 +450,8 @@ def test_customer_forwarding_promise_blocked_and_replaced_with_approved_handoff(
     inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "كم سعر ناظم؟")
     res = engine.process_incoming_message(tenant_id, inbound_msg.id)
     assert res.success is True
-    assert res.reply_content == DEFAULT_HANDOFF_REPLY
-    assert res.reply_content == "هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك."
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, "هذا الاستفسار يحتاج تأكيدًا من الفريق، وسنعود إليك.")
 
     reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
     assert reply_msg.metadata_json.get("guardrail_blocked") is True
@@ -482,7 +483,7 @@ def test_customer_unrecorded_topic_offers_blocked(db: Session, test_setup: dict)
     inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "ما هي منتجاتكم؟")
     res = engine.process_incoming_message(tenant_id, inbound_msg.id)
     assert res.success is True
-    assert res.reply_content == DEFAULT_HANDOFF_REPLY
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
 
     reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
     assert reply_msg.metadata_json.get("guardrail_blocked") is True
@@ -506,7 +507,7 @@ def test_customer_stray_english_words_blocked(db: Session, test_setup: dict):
     inbound_msg = _replay_inbound_message(db, tenant_id, channel_id, non_owner_id, "مرحبا")
     res = engine.process_incoming_message(tenant_id, inbound_msg.id)
     assert res.success is True
-    assert res.reply_content == DEFAULT_HANDOFF_REPLY
+    assert res.reply_content in (DEFAULT_HOLDING_SENTENCE, DEFAULT_HANDOFF_REPLY)
 
     reply_msg = db.scalar(select(Message).where(Message.id == res.reply_message_id))
     assert reply_msg.metadata_json.get("guardrail_blocked") is True

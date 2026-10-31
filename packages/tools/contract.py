@@ -66,6 +66,8 @@ class ToolExecutionContext:
     conversation_id: UUID | None = None
     trace_id: UUID | None = None
     idempotency_key: str | None = None
+    actor_id: UUID | None = None
+    is_owner: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
