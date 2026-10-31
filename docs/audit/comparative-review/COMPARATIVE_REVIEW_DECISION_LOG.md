@@ -2,8 +2,9 @@
 ## Stage 2 Comparative Architecture Review — Strategic Pattern & Decision Ledger
 
 > **Repository:** `d:/AI-Employee-Platform` (`https://github.com/QQYC9/ai-employee-platform.git`)  
-> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/`)  
-> **Documentation Review Commit:** `982236bb944543a248af6f7d509ad51b5b1fa7d1`  
+> **Review Target:** `AI-Employee-Platform` (Stage 2D Final Metadata & Evidence Calibration)  
+> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/` across subsequent documentation commits)  
+> **Prior Documentation Commits:** `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C)  
 > **Branch:** `checkpoint/phase-12-knowledge-base`  
 > **Status:** Preliminary Architecture Log — Not an Implementation Authorization  
 > **Phase Impact:** Strictly Informational for Future Planning; Phase 5 Remains Unstarted  
@@ -16,9 +17,9 @@ This document tracks specific architectural patterns, design principles, and mec
 
 Every entry is categorized into one of four explicit architectural decisions:
 - **`ADOPT`**: Preliminary architectural preference to implement natively within `AI-Employee-Platform` using our existing SQLAlchemy 2.0 / FastAPI stack without external package dependencies. **(Does NOT constitute implementation authorization, schema commitment, or Phase 5 start).**
-- **`ADAPT`**: Customize the core concept to align with our decoupled multi-tenancy and Transactional Outbox models.
-- **`AVOID`**: Explicitly reject the pattern or dependency due to operational cost, security hazards, or excessive complexity.
-- **`INVESTIGATE`**: Defer decision pending empirical benchmarking or prototype testing in a separate research branch.
+- **`ADAPT`**: Customize the core concept to align with our decoupled multi-tenancy and Transactional Outbox models. **(Does NOT constitute implementation authorization, schema commitment, or Phase 5 start).**
+- **`AVOID`**: Preliminary architectural preference against wholesale full-platform replacement under current VPS resource, multi-tenancy, and anti-hijack constraints, without judging broader utility or precluding selective future auxiliary integrations.
+- **`INVESTIGATE`**: Defer decision pending empirical benchmarking or prototype testing in a separate research branch (e.g., native provider idempotency, Graph RAG).
 
 ### Architectural Governance Separation
 To prevent conflation between research concepts and implementation commitments:
@@ -89,7 +90,7 @@ To prevent conflation between research concepts and implementation commitments:
 | :--- | :--- |
 | **Pattern Name** | Nested Savepoint (`begin_nested()`) Execution & Dedicated Audit Session |
 | **Inspiring System** | **SQLAlchemy Nested Transactions** & **Microsoft Semantic Kernel Invocation Filters** |
-| **Problem Solved in AI-Employee-Platform** | In [`packages/tools/executor.py:580-595`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L580-L595), when a tool execution encounters an SQL constraint error (e.g. `ForeignKeyViolation`, `UniqueViolation`), PostgreSQL aborts the transaction. Line 592 calls `self.audit_service.record_event()` with `session.flush()` inside the same aborted session, triggering `InFailedSqlTransaction` and masking the original tool failure. |
+| **Problem Solved in AI-Employee-Platform** | In [`packages/tools/executor.py:580-595`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L580-L595), when a tool execution encounters an SQL constraint error (e.g. `ForeignKeyViolation`, `UniqueViolation`), PostgreSQL aborts the transaction. Line 592 calls `self.audit_service.record_event()` with `session.flush()` inside the same aborted session, triggering `InFailedSqlTransaction` and masking the original tool failure. *(Evidence classification: Source-supported inference from PostgreSQL transaction semantics; not runtime-reproduced in this review).* |
 | **Concrete Evidence** | - *Current Code:* [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592) calls `self.audit_service.record_event(session=session)` without a savepoint.<br/>- *PostgreSQL 17 Semantic:* Any command issued after an aborted statement fails with `InFailedSqlTransaction` (SQLSTATE 25P02). |
 | **Proposed Decision** | **`ADOPT`** (Preliminary Architectural Preference Only) |
 | **Governance Tier** | **CR-05-01 Blocked Item** — Preliminary preference only; no implementation authorization; no commitment until formal plan is approved. |
@@ -140,14 +141,14 @@ To prevent conflation between research concepts and implementation commitments:
 | :--- | :--- |
 | **Pattern Name** | Full Platform Replacement via Monolithic Microservice Orchestrators |
 | **Inspiring System** | **Dify** & **n8n** |
-| **Problem Solved in AI-Employee-Platform** | Evaluated whether `AI-Employee-Platform` should be replaced by an off-the-shelf platform like Dify or n8n to avoid maintaining custom worker and orchestration code. |
+| **Problem Solved in AI-Employee-Platform** | Evaluated whether `AI-Employee-Platform` should be replaced wholesale by an off-the-shelf platform like Dify or n8n to avoid maintaining custom worker and orchestration code. |
 | **Concrete Evidence** | - *Dify Requirements:* 8 to 9 concurrent Docker services (Weaviate/VectorDB, Celery, Redis, PostgreSQL, Nginx, Web, Sandbox, API), minimum 4-8 GB RAM.<br/>- *n8n Requirements:* Node.js runtime; multi-tenant workspaces locked behind proprietary commercial licenses.<br/>- *Platform Core:* Neither platform natively provides our cryptographic Base29 owner approval challenge, our Arabic dialect fact extraction, or our strict row-level tenant database safety guards. |
 | **Proposed Decision** | **`AVOID`** |
-| **Governance Tier** | **Definitive Rejection** |
-| **Justification** | Replacing our native codebase with Dify or n8n would destroy our multi-tenant cryptographic security perimeter, increase hosting costs beyond standard VPS limits, introduce third-party commercial licensing constraints, and eliminate our fine-grained transactional control. |
-| **Risks & Overhead** | High risk of vendor lock-in and excessive operational complexity. |
-| **Verification Required Later** | N/A (Decision is Avoid). |
-| **Impact on CR-05-01 / Phase 5** | Confirms our decision to maintain and harden our decoupled Python/FastAPI architecture. |
+| **Governance Tier** | **Preliminary Architectural Preference Against Wholesale Full-Platform Replacement** |
+| **Justification** | Wholesale replacement of our native codebase with Dify or n8n is rejected under current VPS resource, multi-tenancy, and anti-hijack constraints. This preliminary architectural preference does not judge the broader utility of these systems or preclude selective future auxiliary integrations. |
+| **Risks & Overhead** | High risk of vendor lock-in, infrastructure bloat, and dilution of our tenant cryptographic security perimeter. |
+| **Verification Required Later** | N/A (Decision is Avoid for wholesale platform replacement). |
+| **Impact on CR-05-01 / Phase 5** | Confirms our decision to maintain and harden our decoupled Python/FastAPI architecture natively. Zero implementation authorization. |
 
 ---
 
@@ -161,4 +162,4 @@ To prevent conflation between research concepts and implementation commitments:
 | **04** | Nested Savepoints (`begin_nested()`) & Separate Audit Session | SQLAlchemy / Microsoft | **ADOPT** | Preliminary Preference (CR-05-01 Blocked Item) |
 | **05** | Role-Based Digital Employee Persona Contracts | RagLeap Core | **ADAPT** | Future Architectural Exploration (Phase 5) |
 | **06** | Reflective Knowledge Extraction into Structured SOPs | Memento-Skills | **INVESTIGATE** | Exploration Requiring Prototype / Benchmark |
-| **07** | Monolithic Full-Platform Replacement | Dify / n8n | **AVOID** | Definitive Rejection |
+| **07** | Monolithic Full-Platform Replacement | Dify / n8n | **AVOID** | Preliminary Architectural Preference Against Wholesale Replacement |

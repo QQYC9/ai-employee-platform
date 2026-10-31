@@ -1,11 +1,11 @@
 # INDEPENDENT_VERIFICATION_REPORT.md
-## Stage 2C — Independent Verification & Documentation Consistency Report
+## Stage 2D — Independent Verification & Final Calibration Report
 
 > **Repository:** `https://github.com/QQYC9/ai-employee-platform.git`  
 > **Target Branch:** `checkpoint/phase-12-knowledge-base`  
-> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/`)  
-> **Documentation Review Commit:** `982236bb944543a248af6f7d509ad51b5b1fa7d1`  
-> **Current HEAD at Verification:** `982236bb944543a248af6f7d509ad51b5b1fa7d1`  
+> **Review Target:** `AI-Employee-Platform` (Stage 2D Final Metadata & Evidence Calibration)  
+> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/` across subsequent documentation commits)  
+> **Prior Documentation Commits:** `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C)  
 > **Audit Date:** 2026-10-31  
 > **Status:** STRICT READ-ONLY VERIFICATION — APPLICATION CODE UNTOUCHED  
 
@@ -37,9 +37,8 @@ The documentation in `docs/audit/comparative-review/` is verified to be accurate
 
 - **Repository URL:** `https://github.com/QQYC9/ai-employee-platform.git`
 - **Current Branch:** `checkpoint/phase-12-knowledge-base`
-- **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (application code in `packages/`, `apps/`, `infrastructure/`, `tests/` is verified identical between these commits and current HEAD).
-- **Documentation Review Commit:** `982236bb944543a248af6f7d509ad51b5b1fa7d1`
-- **Current HEAD SHA:** `982236bb944543a248af6f7d509ad51b5b1fa7d1`
+- **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (application code in `packages/`, `apps/`, `infrastructure/`, `tests/` is verified identical between these commits and current HEAD across subsequent documentation commits).
+- **Prior Documentation Commits:** `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C)
 - **Working Tree State:** Tracked working tree clean; 5 untracked files present:
   - `scripts/check_live_db.py`
   - `scripts/cleanup_test_tenants.py`
@@ -73,9 +72,9 @@ Every claim has been forensically classified with an explicit **Evidence Type**:
 | **5** | Stale worker recovery synchronizes `OutboxEvent` with `Approval`. | [`packages/services/outbox_service.py:294-362`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L294-L362) | **Source inspection** | `recover_stale_events` resets `outbox_events.status = 'pending'`, but never updates `approvals`. `Approval.execution_status` remains stuck in `'executing'`. | **Incorrect** (Bug in Code) | Classified as verified recovery state divergence. |
 | **6** | Uncommitted `first_external_attempt_at` causes duplicate external dispatch in current code. | [`packages/services/outbox_worker.py:966`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966) | **Source inspection & Inference / conditional risk** | Line 966 flushes without commit. However, the current approval path stubs execution and makes zero external HTTP calls. | **Partially Verified** (Conditional Risk) | Reclassified from an existing proven incident to a **conditional / future risk** if external network tools are wired in. |
 | **7** | Hardcoded `last_outcome = "confirmed_not_processed"` triggers blind retries. | [`packages/services/outbox_worker.py:994`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L994) | **Source inspection** | Line 994 literally hardcodes `"confirmed_not_processed"`. In the current code, no external provider probe exists. | **Verified** (Hardcoded Stub) | Documented as a design deficiency requiring fail-closed reconciliation. |
-| **8** | SQL error during tool execution causes audit logging to mask original error. | [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592) | **Source inspection & PostgreSQL transaction semantics inference** | In PostgreSQL transaction semantics (SQLSTATE 25P02), once a statement errors, calling `session.flush()` in an exception handler without `begin_nested()` raises `InFailedSqlTransaction`. This failure mechanism is an inference from PostgreSQL rules and direct code inspection of line 592; it was not executed as an automated test during this documentation pass. | **Verified** (Inference from Code & DB Semantics) | Preserved as verified defect. Pattern 04 in `DECISION_LOG.md` recommends `begin_nested()` savepoints. |
-| **9** | Tool executions are protected by database idempotency constraints. | [`packages/models/domain.py:270, 2000`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L270) | **Migration/model inspection & Source inspection** | No explicit idempotency key or unique constraint was found in the `tasks` or `knowledge` table schemas or migration files. This absence creates an architectural vulnerability for duplicate creation upon retry; duplicate entity creation was not experimentally demonstrated during this documentation task. | **Partially Verified** (Absence of Constraint) | Clarified: Outbox event claiming has unique constraint, but underlying domain entities lack idempotency keys. |
-| **10** | PostgreSQL `transaction_timeout` fences worker side-effects. | Prior CR-05-01 Audit Report | **Reported by prior audit; not independently reproduced in current task** | The SQLSTATE 57P05 timeout behavior was reported in the prior CR-05-01 forensic audit report based on PostgreSQL 17 server tests. No independent runtime experiment was conducted or reproduced during this Stage 2C documentation task. The repository does not contain an automated test asserting 57P05. | **Incorrect** (as a worker fence) | Corrected in review text: DB timeouts release row locks but cannot fence external network actions. |
+| **8** | SQL error during tool execution causes audit logging to mask original error. | [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592) | **Source-supported inference from PostgreSQL transaction semantics** | In PostgreSQL transaction semantics (SQLSTATE 25P02), once a statement errors, calling `session.flush()` in an exception handler without `begin_nested()` raises `psycopg.errors.InFailedSqlTransaction`. This failure mechanism is a source-supported inference from PostgreSQL transaction semantics; it was not runtime-reproduced in this review pass. | **Verified** (Inference from Code & DB Semantics) | Preserved as verified defect. Pattern 04 in `DECISION_LOG.md` recommends `begin_nested()` savepoints. |
+| **9** | Tool executions are protected by database idempotency constraints. | [`packages/models/domain.py:270, 2000`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L270) | **Schema inspection finding & inference** | Verified absence of explicit unique constraints or idempotency keys in `tasks` or `knowledge` table schemas and migrations. This absence creates an architectural vulnerability where re-running `TaskCreateTool` may allow duplicate entity creation upon retry; duplicate creation was not experimentally demonstrated during this documentation task. | **Partially Verified** (Absence of Constraint) | Clarified: Outbox event claiming has unique constraint, but underlying domain entities lack idempotency keys. |
+| **10** | PostgreSQL `transaction_timeout` fences worker side-effects. | Prior CR-05-01 Audit Report | **Reported by prior audit** | The SQLSTATE 57P05 timeout behavior was reported in the prior CR-05-01 forensic audit report based on PostgreSQL 17 server tests. No independent runtime experiment was conducted or reproduced during this Stage 2D review task. The repository does not contain an automated test asserting 57P05. | **Incorrect** (as a worker fence) | Corrected in review text: DB timeouts release row locks but cannot fence external network actions. |
 
 ---
 
@@ -102,13 +101,13 @@ Every claim has been forensically classified with an explicit **Evidence Type**:
 | **04** | Nested Savepoints (`begin_nested()`) & Separate Audit Session | SQLAlchemy / Microsoft | **ADOPT** | Preliminary Preference (CR-05-01 Blocked Item) | Inject invalid foreign key in tool argument; verify original error is preserved and audit log is saved. |
 | **05** | Role-Based Digital Employee Persona Contracts | RagLeap Core | **ADAPT** | Future Architectural Exploration (Phase 5) | Onboarding interview simulation verifying persona configuration across 3 distinct verticals. |
 | **06** | Reflective Knowledge Extraction into Structured SOPs | Memento-Skills | **INVESTIGATE** | Exploration Requiring Prototype / Benchmark | Arabic extraction accuracy benchmark on conversational inquiry responses into structured markdown. |
-| **07** | Monolithic Full-Platform Replacement | Dify / n8n | **AVOID** | Definitive Rejection | None (Avoid). |
+| **07** | Monolithic Full-Platform Replacement | Dify / n8n | **AVOID** | Preliminary Architectural Preference Against Wholesale Replacement | Wholesale replacement rejected under current VPS resource, multi-tenancy, and anti-hijack constraints without judging broader utility or precluding selective future auxiliary integrations. |
 
 ---
 
 ## 6. Open Risks & Unverified Items (Deferred for Future Benchmarks)
 
-1. **WhatsApp & Telegram Native Idempotency:** Unverified whether WhatsApp Cloud API or Telegram Bot API provide native request idempotency tokens or message deduplication keys.
+1. **WhatsApp & Telegram Native Idempotency:** Unverified whether WhatsApp Cloud API or Telegram Bot API provide native request idempotency tokens or message deduplication keys. Strictly classified as `INVESTIGATE` / `UNVERIFIED`.
 2. **Graph RAG Resource Impact:** Unverified whether Neo4j Graph RAG provides measurable retrieval improvements over relational JSONB in [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) that justify the additional memory overhead on a modest VPS.
 3. **Savepoint Connection Duration:** Needs empirical benchmarking: does wrapping tool execution in `session.begin_nested()` hold PostgreSQL connections long enough to risk pool exhaustion under high concurrency?
 

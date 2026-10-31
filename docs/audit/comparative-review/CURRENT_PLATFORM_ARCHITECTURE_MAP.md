@@ -1,12 +1,12 @@
 # CURRENT_PLATFORM_ARCHITECTURE_MAP.md
 ## AI-Employee-Platform — Baseline Architecture & Execution Topology Map
 
-> **Review Target:** `AI-Employee-Platform` (Stage 2C Final Consistency Pass)  
-> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/`)  
-> **Documentation Review Commit:** `982236bb944543a248af6f7d509ad51b5b1fa7d1`  
+> **Review Target:** `AI-Employee-Platform` (Stage 2D Final Metadata & Evidence Calibration)  
+> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/` across subsequent documentation commits)  
+> **Prior Documentation Commits:** `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C)  
 > **Git Branch:** `checkpoint/phase-12-knowledge-base`  
 > **Classification:** Physical Codebase Map & Component Topology  
-> **Status:** Strictly Verified Against Application Source Snapshot  
+> **Status:** Strictly Calibrated Against Application Source Snapshot  
 
 ---
 
@@ -240,18 +240,18 @@ graph TD
 
 ---
 
-## 5. Known Risk Points & Forensic Gap Matrix (Verified vs Conditional)
+## 5. Known Risk Points & Forensic Gap Matrix (Calibrated Evidence)
 
-Drawing from direct codebase inspection and verified tests, the current physical status of each gap is documented below:
+Drawing from direct codebase inspection and verified tests, the current physical status of each gap is calibrated below:
 
-| Risk Point / Gap | Code Location | Forensic Classification | Concrete Code Reality |
+| Risk Point / Gap | Code Location | Forensic Classification | Concrete Code Reality & Evidence Calibration |
 | :--- | :--- | :---: | :--- |
-| **Worker Handler Out-of-Scope** | [`packages/services/outbox_worker.py:929`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L929) | **Verified Defect** | Defined outside `class OutboxWorker` at module level under `if __name__ == "__main__":`. Raises `AttributeError` if called from worker instance. |
-| **Tool Execution Stubbed** | [`packages/services/outbox_worker.py:1017-1030`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1017-L1030) | **Verified Defect** | `ToolExecutor` is not invoked. Code commits `executing` and records `is_success=True` via independent session without performing the approved action. |
-| **Inoperative Worker Fencing** | [`packages/services/outbox_service.py:210, 342`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L210) | **Verified Defect** | Column `claim_generation` exists in schema, but queries in `claim_events` and `recover_stale_events` never increment it. Generation remains `0`. |
-| **Recovery State Divergence** | [`packages/services/outbox_service.py:294-362`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L294-L362) | **Verified Defect** | `recover_stale_events` resets `outbox_events.status` to `pending` but does not update `approvals`, leaving `execution_status` stuck in `'executing'`. |
-| **Audit Flush Inside Aborted Transaction** | [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592) | **Verified Defect** | If a tool raises an SQL exception, transaction enters aborted state. Line 592 calls `session.flush()`, raising `psycopg.errors.InFailedSqlTransaction` and masking original error. |
-| **Uncommitted External Timestamp** | [`packages/services/outbox_worker.py:966`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966) | **Conditional Risk** | `first_external_attempt_at` is flushed without commit. In the current path, no external HTTP socket is called; this becomes an active double-dispatch vulnerability if external tools are wired in. |
-| **Lack of Tool-Level Idempotency Constraints** | [`packages/models/domain.py:270, 2000`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L270) | **Verified Defect** | Tables `tasks` and `knowledge` lack unique constraints on business idempotency keys. Re-running `TaskCreateTool` creates duplicate records. |
-| **PostgreSQL Timeout Misconception** | PostgreSQL 17 `transaction_timeout` | **Reported Prior Finding** | Reported in prior audit: PostgreSQL terminates backend process with `57P05` and releases row locks, but Python OS thread continues executing in memory; cannot abort external network call. |
+| **Worker Handler Out-of-Scope** | [`packages/services/outbox_worker.py:929`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L929) | **Verified Defect** | Verified by source inspection: defined outside `class OutboxWorker` at module level under `if __name__ == "__main__":`. Raises `AttributeError` if called from worker instance. |
+| **Tool Execution Stubbed** | [`packages/services/outbox_worker.py:1017-1030`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1017-L1030) | **Verified Defect** | Verified by source inspection: `ToolExecutor` is not invoked. Code commits `executing` and records `is_success=True` via independent session without performing the approved action. |
+| **Inoperative Worker Fencing** | [`packages/services/outbox_service.py:210, 342`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L210) | **Verified Defect** | Verified by source & schema inspection: column `claim_generation` exists in schema, but queries in `claim_events` and `recover_stale_events` never increment it. Generation remains `0`. |
+| **Recovery State Divergence** | [`packages/services/outbox_service.py:294-362`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L294-L362) | **Verified Defect** | Verified by source inspection: `recover_stale_events` resets `outbox_events.status` to `pending` but does not update `approvals`, leaving `execution_status` stuck in `'executing'`. |
+| **Audit Flush Inside Aborted Transaction** | [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592) | **Source-Supported Inference** | Source-supported inference from PostgreSQL transaction semantics; not runtime-reproduced in this review pass. Calling `session.flush()` in an exception handler after statement failure triggers `InFailedSqlTransaction`. |
+| **Uncommitted External Timestamp** | [`packages/services/outbox_worker.py:966`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966) | **Conditional Risk** | Verified by source inspection: `first_external_attempt_at` is flushed without commit. In the current path, no external HTTP socket is called; this becomes an active double-dispatch vulnerability if external tools are wired in. |
+| **Lack of Tool-Level Idempotency Constraints** | [`packages/models/domain.py:270, 2000`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L270) | **Verified Schema Absence** | Verified by schema inspection: absence of unique constraint on task title or idempotency key in `tasks` and `knowledge` tables. May allow duplicate entity creation upon retry; duplicate creation was not experimentally demonstrated during this documentation task. |
+| **PostgreSQL Timeout Misconception** | PostgreSQL 17 `transaction_timeout` | **Prior Audit Finding** | Finding reported by prior CR-05-01 audit: PostgreSQL terminates backend process with `57P05` and releases row locks, but Python OS thread continues executing in memory; not independently re-tested in Stage 2D. |
 | **Model Embellishment on Zero Facts** | [`packages/services/conversational_agent_engine.py`](file:///d:/AI-Employee-Platform/packages/services/conversational_agent_engine.py) | **Potential Risk** | If fact retrieval returns empty results, prompt instructions must guarantee explicit refusal to prevent hallucination. |

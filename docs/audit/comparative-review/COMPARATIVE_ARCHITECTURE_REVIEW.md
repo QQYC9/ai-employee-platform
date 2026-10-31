@@ -2,13 +2,14 @@
 ## AI-Employee-Platform — Comparative Architecture Review (Stage 2)
 
 > **Repository:** `d:/AI-Employee-Platform` (`https://github.com/QQYC9/ai-employee-platform.git`)  
-> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/`)  
-> **Documentation Review Commit:** `982236bb944543a248af6f7d509ad51b5b1fa7d1`  
+> **Review Target:** `AI-Employee-Platform` (Stage 2D Final Metadata & Evidence Calibration)  
+> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/` across subsequent documentation commits)  
+> **Prior Documentation Commits:** `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C)  
 > **Branch:** `checkpoint/phase-12-knowledge-base`  
 > **Review Date:** 2026-10-31  
 > **Scope:** Architectural Study & Comparative Evaluation of 6 External Agent Architectures vs. Current Platform  
 > **Target Systems:** Memento-Skills, LangGraph, Microsoft Agent Framework, Dify, n8n, RagLeap Core  
-> **Status:** Stage 2C Final Consistency Pass  
+> **Status:** Stage 2D Final Metadata & Evidence Calibration  
 
 ---
 
@@ -29,7 +30,7 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 - **From RagLeap Core:** Adapt the **Role-Based Digital Employee Persona Contracts** and **Approval Mode Safety Gating** directly suited for omni-channel customer service.
 - **From Memento-Skills:** Adapt the **Reflective Memory & Structured Skill Synthesis** to evolve tenant knowledge and tool recipes without model fine-tuning.
 - **From n8n:** Adapt the **Webhook Callback Reconciliation Pattern** for deterministic resolution of external side-effects and unknown network outcomes.
-- **From Dify & Microsoft Agent Framework:** Avoid monolithic deployment overhead, but adapt **Sandboxed Tool Execution** and **Standardized Observability Filters**.
+- **From Dify & Microsoft Agent Framework:** Avoid wholesale platform replacement, but adapt **Sandboxed Tool Execution** and **Standardized Observability Filters**.
 
 ---
 
@@ -40,9 +41,9 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 - **Evidence-Based Code Comparison:** Every claim regarding `AI-Employee-Platform` is grounded in concrete file paths, class names, and verified line numbers.
 - **Official Documentation Priority:** Evaluation of external systems is based on official repositories, published research papers, and technical specifications as of October 2026.
 - **Classification Categories:**
-  - `Adopt`: Preliminary architectural preference to implement natively without external package dependencies (requires formal plan approval before implementation).
-  - `Adapt`: Borrow the concept and customize it to fit our decoupled SQLAlchemy/FastAPI architecture.
-  - `Avoid`: Explicitly reject the pattern or dependency, documenting the technical risk or cost.
+  - `Adopt`: Preliminary architectural preference to implement natively without external package dependencies (requires formal plan approval before implementation; zero implementation authorization).
+  - `Adapt`: Borrow the concept and customize it to fit our decoupled SQLAlchemy/FastAPI architecture (requires formal plan approval before implementation; zero implementation authorization).
+  - `Avoid`: Preliminary architectural preference against wholesale full-platform replacement under current VPS resource, multi-tenancy, and anti-hijack constraints, without judging broader utility or precluding selective future auxiliary integrations.
   - `Investigate`: Requires empirical benchmarking or prototype testing prior to commitment.
 
 ---
@@ -53,9 +54,9 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 | :--- | :--- | :--- |
 | **Git Repository** | `https://github.com/QQYC9/ai-employee-platform.git` | Publicly synchronized on GitHub |
 | **Active Branch** | `checkpoint/phase-12-knowledge-base` | Fast-forward synchronized with `origin` |
-| **Application Source Snapshot** | `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` | Verified identical application source files |
-| **Documentation Review Commit** | `982236bb944543a248af6f7d509ad51b5b1fa7d1` | Prior independent verification commit |
-| **Tracked Working Tree State** | Clean | Tracked working tree clean; 5 untracked diagnostic scripts in `scripts/` |
+| **Application Source Snapshot** | `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` | Verified identical application source files in `packages/`, `apps/`, `infrastructure/`, `tests/` across subsequent documentation commits |
+| **Prior Documentation Commits** | `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C) | Prior independent verification and consistency passes |
+| **Tracked Working Tree State** | Clean | Tracked working tree clean; 5 untracked files present: `scripts/check_live_db.py`, `scripts/cleanup_test_tenants.py`, `scripts/debug_runtime_failure.py`, `scripts/execute_inquiry_6_answer.py`, `scripts/resolve_inquiry_7_live.py` (local operational/diagnostic utility scripts from earlier ad-hoc debugging; not part of review documentation deliverables and must remain untouched and uncommitted) |
 | **Database Engines** | PostgreSQL 17.11 (Debian), Redis 7.0 | Port 5433; `ai_employee_test` migrated to `2a3b4c5d6e7f` |
 | **Production Guard** | [`packages/core/safety_guard.py`](file:///d:/AI-Employee-Platform/packages/core/safety_guard.py) | Active; aborts non-production processes targeting `ai_employee` |
 
@@ -157,7 +158,7 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 12. **Limitations & Risks:** Monolithic architecture; significant operational resource overhead; lacks transactional outbox reliability for messaging channels.
 13. **Relevance to `AI-Employee-Platform`:**
     - *What to Adapt:* **Sandboxed Tool Execution** principles and **Hybrid RAG Reranking** (combining exact keyword/fact lookup with vector embeddings).
-    - *What to Avoid:* Deploying Dify's multi-container stack on cost-constrained VPS hosting.
+    - *What to Avoid:* Wholesale replacement of AI-Employee-Platform with Dify's multi-container stack under current VPS resource, multi-tenancy, and anti-hijack constraints (this preliminary architectural preference does not judge Dify's broader utility or preclude selective future auxiliary integrations).
 
 ---
 
@@ -181,7 +182,7 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 12. **Limitations & Risks:** Multi-tenancy gated behind commercial licensing; AI agent capabilities are secondary to deterministic workflow automation; lacks domain-specific fact verification and anti-hallucination guardrails.
 13. **Relevance to `AI-Employee-Platform`:**
     - *What to Adapt:* **The Webhook Callback & Asynchronous Wait Pattern** for external approvals and third-party actions.
-    - *What to Avoid:* Relying on n8n as the primary agent brain or multi-tenant database layer.
+    - *What to Avoid:* Wholesale replacement of our core agent brain and multi-tenant database layer with n8n under current constraints (this preliminary preference does not judge n8n's broader workflow utility or preclude selective future auxiliary integrations).
 
 ---
 
@@ -216,8 +217,8 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 | **Memento-Skills** | Self-evolving skill library | No documented native support | Limited native HITL | Markdown files + RL router | Environment variables | Very Low (Python) | **ADAPT** (Skill/Fact Memory) |
 | **LangGraph** | Cyclical state graph | Manual scoping | `interrupt()` & `resume` protocol | `PostgresSaver` checkpoints | Application level | Low (Postgres + Python) | **ADAPT** (Interrupt & Checkpoints) |
 | **Microsoft Agent FW** | Enterprise multi-agent | Azure / Entra ID | Pre-invocation action filters | Session stores + MCP | Key Vault / Env | Medium to High | **ADAPT** (Action Policy Filters) |
-| **Dify** | Visual LLM app platform | Native (Orgs) | Conversational turns | Redis/Postgres + Vector DB | AES-256 in DB | High (8-9 containers, 4-8 GB RAM) | **AVOID** (Platform) / **ADAPT** (Sandbox) |
-| **n8n** | Visual workflow automation | Commercial tiers only | Approval & Wait nodes | Webhook wait state | Encrypted DB vault | Medium (Node.js + Redis) | **ADAPT** (Webhook Reconciliation) |
+| **Dify** | Visual LLM app platform | Native (Orgs) | Conversational turns | Redis/Postgres + Vector DB | AES-256 in DB | High (8-9 containers, 4-8 GB RAM) | **AVOID** (Wholesale Platform Replacement) / **ADAPT** (Sandbox Principles) |
+| **n8n** | Visual workflow automation | Commercial tiers only | Approval & Wait nodes | Webhook wait state | Encrypted DB vault | Medium (Node.js + Redis) | **ADAPT** (Webhook Reconciliation) / **AVOID** (Wholesale Replacement) |
 | **RagLeap Core** | Autonomous AI Employees | Native (Orgs) | Default approval-gated mode | Vector store + Neo4j Graph | BYOK / Config | Medium (Postgres + Neo4j) | **ADAPT** (Employee Roles & Safety Gate) |
 
 ---
@@ -249,8 +250,8 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 2. **Stubbed Tool Execution:** In [`packages/services/outbox_worker.py:1017-1030`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1017-L1030), `ToolExecutor` is not invoked; success is hardcoded via an independent session without performing the approved action.
 3. **Inoperative Worker Fencing:** In [`packages/services/outbox_service.py:210, 342`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L210), `claim_generation` is never incremented.
 4. **Recovery State Divergence:** In [`packages/services/outbox_service.py:294-362`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L294-L362), `recover_stale_events` resets outbox events but leaves approvals stuck in `'executing'`.
-5. **Audit Exception Trap:** In [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592), audit logging inside an aborted transaction raises `InFailedSqlTransaction`, masking the original exception.
-6. **Lack of Entity Idempotency Constraints:** Missing unique constraints on `tasks` and `knowledge` tables risk duplicate records upon re-execution.
+5. **Audit Exception Trap:** In [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592), audit logging inside an aborted transaction triggers `psycopg.errors.InFailedSqlTransaction` (SQLSTATE `25P02`), masking the original exception. *(Evidence classification: Source-supported inference from PostgreSQL transaction semantics; not runtime-reproduced in this review).*
+6. **Lack of Entity Idempotency Constraints:** Missing unique constraints on `tasks` and `knowledge` tables in [`packages/models/domain.py:270, 2000`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L270). *(Evidence classification: Verified schema absence; re-running `TaskCreateTool` may allow duplicate entity creation upon retry; duplicate creation was not experimentally demonstrated during this documentation task).*
 7. **Conditional External Side-Effect Risk:** In [`packages/services/outbox_worker.py:966`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966), `first_external_attempt_at` is flushed without commit. In the current path, no external HTTP socket is called; this becomes an active double-dispatch vulnerability if external network tools are wired into this handler.
 
 ---
@@ -293,7 +294,7 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 
 1. **Question 1 (Savepoint vs. Two-Phase Execution):** Should tool execution occur within the worker's outer transaction using `session.begin_nested()`, or should the outbox claim commit first, followed by an isolated execution transaction?
 2. **Question 2 (Graph RAG Utility):** Does relational PostgreSQL JSONB in [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) sufficiently represent complex tenant hierarchies, or will Graph RAG become necessary for large retail enterprise tenants?
-3. **Question 3 (External Provider Probing):** Which channel providers (WhatsApp Cloud API, Telegram Bot API) support deterministic idempotency keys or message status lookup queries to enable automated retry reconciliation? (Remains `INVESTIGATE`).
+3. **Question 3 (External Provider Probing):** Whether external messaging providers (WhatsApp Cloud API, Telegram Bot API) support deterministic idempotency keys or message status lookup queries to enable automated retry reconciliation remains unverified by empirical tests in this repository and is strictly classified as `INVESTIGATE` / `UNVERIFIED`.
 
 ---
 
@@ -302,6 +303,9 @@ None of the six evaluated external frameworks should replace `AI-Employee-Platfo
 1. **Architecture Validation:** The core architecture of `AI-Employee-Platform` (Transactional Outbox + Decoupled Multi-Tenancy + FactService + Approval Challenge) is structurally sound for our multi-tenant requirements.
 2. **Implementation Debt:** The defects identified in CR-05-01 are **implementation bugs** (indentation outside class scope, stubbed execution bypass, omitted generation increment query, and missing savepoint error isolation) rather than conceptual flaws.
 3. **Targeted Evolution:** By adapting LangGraph's interrupt/checkpoint pattern and n8n's external reconciliation semantics into our native code, `AI-Employee-Platform` can achieve high resilience without introducing heavy third-party framework dependencies.
+
+> [!NOTE]
+> All pattern recommendations in this review represent preliminary architectural preferences only and carry zero implementation authorization, zero database schema commitments, and zero Phase 5 start.
 
 ---
 
