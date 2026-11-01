@@ -454,3 +454,50 @@ Before any code modification or implementation phase may begin, the following ch
    - Incorporate the resolution of the 9 forensic blockers into a formal, reviewed step-by-step implementation plan.
 3. **Test-First Verification Harness:**
    - Commit the acceptance integration tests into `tests/` to verify failures on current code before applying any patches.
+
+
+---
+
+## 19. Post-Implementation Forensic Verification & Status Calibration (Phase 4D Isolated Repair)
+
+> **Calibration Date:** 2026-11-01  
+> **Evaluation Mode:** Post-Implementation Audit of Isolated Approval Execution Repair  
+> **Target Subsystem:** Phase 4D / CR-05-01 Approval Action Execution Path (`OutboxWorker._handle_approval_action_execution`)  
+> **Status Classifications:**  
+> - **Functional Execution-Path Defects:** **`CLOSED`** (Verified in source code and passing automated tests)  
+> - **Overall Approval Execution Safety:** **`CONDITIONALLY READY`** (NOT fully closed; bounded by at-least-once external semantics)  
+> - **Phase 4D Overall Milestone Status:** **`OPEN`** (Campaign Scheduler G-1, Multi-Batch Continuation G-2, Campaign RBAC G-5 remain open)  
+
+### 19.1 Verification of Isolated Code Repair & Execution Lifecycle
+Following the isolated repair executed in [`packages/services/outbox_worker.py`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py):
+1. **Module Scoping Bug Resolved:** `_handle_approval_action_execution` was relocated from module scope into `class OutboxWorker` (Lines 893–1104), eliminating the fatal runtime `AttributeError: 'OutboxWorker' object has no attribute '_handle_approval_action_execution'`.
+2. **Tool Execution Integrated:** `OutboxWorker.__init__` now accepts `tool_executor: Any = None` (Lines 119, 132), lazily falling back to `ToolExecutor(session)` bound to `create_default_registry(session)`. The action handler is resolved from `tool_executor.handlers` and invoked with arguments and `ToolExecutionContext`.
+3. **Atomic Result Recording Enforced:** Result persistence is routed through `ApprovalService.record_execution_result`:
+   - Tool successes record `is_success=True` (`approvals.execution_status="completed"`, `outbox_events.status="completed"`).
+   - Tool exceptions record `is_tool_success=False` (`approvals.execution_status="failed"`, `outbox_events.status="failed"` with sanitized error details). Success is never falsely recorded on failure.
+4. **Triple-Layer Tenant Isolation:** Confirmed operational:
+   - PostgreSQL Check Constraint: `ck_outbox_approval_execution_requires_approval_id` prevents null `approval_id`.
+   - PostgreSQL Composite Foreign Key: `fk_outbox_events_approval_composite` prevents inserting cross-tenant approval events.
+   - Application Worker Row Lock: `select(Approval)...with_for_update()` rejects foreign approvals and logs critical security violations.
+
+### 19.2 Delivery Semantics & Idempotency Boundaries
+- **At-Least-Once External Delivery Semantics:** The system provides **at-least-once execution** across external side effects; **exactly-once execution is NOT guaranteed**.
+- **Context Idempotency Key Limitation:** Passing an `idempotency_key` inside `ToolExecutionContext` does **not** prove that every tool handler or third-party provider honors it. Handlers interacting with external APIs without native server-side deduplication remain vulnerable to duplicate execution upon worker retry.
+- **Crash Window & Stale Re-execution Risk:**
+  - Commit #1 occurs *before* executing the external side effect (marking `execution_status = "executing"`).
+  - Commit #2 occurs *after* executing the external side effect (updating results via `record_execution_result`).
+  - If an external side effect completes (e.g., HTTP POST to payment gateway or SMS provider) but the worker crashes before Commit #2, the local database retains `execution_status = "executing"`.
+  - Because Line 985 hardcodes `last_outcome = "confirmed_not_processed"`, stale recovery (`recover_stale_events`) resets the outbox event to `"pending"` after 300 seconds, and the next worker will **re-execute the handler, resulting in a duplicate external side effect**.
+
+### 19.3 Architectural Deviations & Unresolved Policy Questions
+- **Policy Checks & Explicit-Deny Bypass:** The approval path invokes `handler(**exec_params)` directly from `tool_executor.handlers`, completely bypassing `ToolExecutor.execute()`. This bypasses `permission_service.has_tenant_explicit_deny()`. This is documented as an **unresolved policy question** (whether owner HMAC token approval strictly supersedes tenant explicit deny rules, or if tenant explicit denies must block approved actions), rather than an automatically acceptable architectural behavior.
+- **Audit & Tracing Bypass:** Direct handler invocation bypasses `AuditService.record_event()` and `ExecutionTracingService.record_step()`. While the action is captured in `approvals` and `outbox_events`, it leaves no trace in the unified `audit_events` or `execution_traces` tables.
+
+### 19.4 Test Suite Reality vs. Untested Failure Windows
+- **What Passing Tests Cover (42/42 Tests Passing):**
+  - `tests/test_phase4d_approval_execution_path.py` (6/6 passing): Happy-path worker dispatch to custom handler, exception capture and failure recording, rejection of unapproved challenges, triple-layer cross-tenant rejection, deduplication of already-completed approvals, and safe failure on missing handlers.
+  - Regression suites (36/36 passing): CR-01 challenge crypto/OTP suites (14 tests in `test_phase5_cr01_owner_approval_anti_hijack.py`), general OutboxWorker message suites (13 tests in `test_outbox_worker.py`), and Phase 4D campaign lifecycle suites (9 tests in `test_phase4d_campaigns_and_proactive_notifications.py`).
+- **Untested Failure Windows:**
+  - Mid-handler crashes while `execution_status == "executing"`.
+  - Built-in catalog tools loaded via `create_default_registry()`.
+  - Provider idempotency window expiration transitioning to `reconciliation_required`.
