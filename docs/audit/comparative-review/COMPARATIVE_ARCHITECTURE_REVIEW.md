@@ -1,333 +1,404 @@
-# COMPARATIVE_ARCHITECTURE_REVIEW.md
-## AI-Employee-Platform — Comparative Architecture Review (Stage 2)
+# AI-Employee-Platform — Final Evidence-Based Comparative Architecture Review
+## Comprehensive Evaluation & Audit of Six External Frameworks vs. Actual Repository Architecture
 
-> **Repository:** `d:/AI-Employee-Platform` (`https://github.com/QQYC9/ai-employee-platform.git`)  
-> **Review Target:** `AI-Employee-Platform` (Stage 2D Final Metadata & Evidence Calibration)  
-> **Application Source Snapshot:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/` across subsequent documentation commits)  
-> **Prior Documentation Commits:** `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C)  
-> **Current Delivered HEAD at Stage 2D:** `b284b14aa0bf9361fa152b15292eae96f6b268ef` (verified published documentation commit)  
-> **Branch:** `checkpoint/phase-12-knowledge-base`  
-> **Review Date:** 2026-10-31  
-> **Scope:** Architectural Study & Comparative Evaluation of 6 External Agent Architectures vs. Current Platform  
+> **Repository:** `AI-Employee-Platform` (`QQYC9/ai-employee-platform`)  
+> **Inspected Branch:** `checkpoint/phase-12-knowledge-base`  
+> **Inspected HEAD Commit:** `e6f89c5476cdda4d171ee879ed774f38a50331eb` (`feat(phase-5): implement Stage 5.1 database schema, persona models, and multi-agent bindings`)  
+> **Git Working Tree State:** Clean (1 commit ahead of remote; 5 untracked diagnostic scripts in `scripts/` preserved intact)  
+> **Operating Mode:** STRICT READ-ONLY AUDIT — Stage 5.1 Schema Committed (Commit e6f89c5); Stage 5.2 Runtime Wiring Not Started; Application Code Untouched  
+> **Review Date:** 2026-11-01  
 > **Target Systems:** Memento-Skills, LangGraph, Microsoft Agent Framework, Dify, n8n, RagLeap Core  
-> **Status:** Stage 2D Final Metadata & Evidence Calibration  
+> **Calibrated Status:** Stage 2 Final Evidence-Based Synthesis (Post-Approval Repair Audit)  
 
 ---
 
 ## 1. Executive Summary
 
-This comparative architecture review evaluates six external agent frameworks, orchestration engines, and autonomous employee platforms against the physical codebase and operational requirements of **`AI-Employee-Platform`**.
+This document delivers the definitive, evidence-based comparative architecture review evaluating six external agent frameworks, orchestration engines, and autonomous employee platforms against the physical codebase and operational mandate of **`AI-Employee-Platform`**.
 
-### Operational Requirements
-1. **Multi-Tenancy:** Data, knowledge, tool, and channel isolation per tenant.
-2. **Deterministic Domain Grounding:** Precedence of verified business facts ([`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py)) and catalog rules over generative LLM outputs.
-3. **Owner Approval Challenge & Enqueue Flow (Anti-Hijack):** Owner approval challenge and enqueue flow exists; the downstream approved-action execution path is currently nonfunctional and must not be treated as production-ready.
-4. **Resilient Asynchronous Delivery:** Idempotent, transactionally safe execution via the Transactional Outbox pattern.
-5. **Low Operational Overhead:** Cost-effective deployment on standard virtual private servers (PostgreSQL + Redis + lightweight Python workers).
+### 1.1 The Platform Mandate
+`AI-Employee-Platform` is neither an unconstrained conversational chatbot nor an open-ended prompt experimentation harness. Its architectural purpose is to host **autonomous, multi-tenant digital employees (AI Agents)** for commercial enterprises. Each digital employee must:
+1. **Represent the business safely across omni-channel connectors:** Ingest customer messages asynchronously from Telegram, WhatsApp Cloud API, and Webhooks without message loss or race conditions.
+2. **Ground conversations in deterministic business facts:** Enforce strict factual precedence via [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) and anti-hallucination guardrails, completely preventing generative fabrication of commercial terms (prices, policies, availability).
+3. **Perform real business mutations through gated tools:** Execute operations through [`ToolRegistry`](file:///d:/AI-Employee-Platform/packages/tools/registry.py) with structured context isolation.
+4. **Escalate high-impact actions to business owners:** Escalate unrecorded business inquiries via [`OwnerInquiryService`](file:///d:/AI-Employee-Platform/packages/services/owner_inquiry_service.py) and sensitive/destructive operations via cryptographic OTP approval challenge loops in [`ApprovalService`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py).
+5. **Execute outbound marketing and notification campaigns:** Coordinate batch audience dispatch, delivery tracking, and proactive customer engagement.
+6. **Enforce absolute tenant boundary isolation:** Enforce tenant isolation across every database read, write, and background queue using AES-256-GCM secret encryption at rest.
 
-### Key Strategic Takeaway
-None of the six evaluated external frameworks should replace `AI-Employee-Platform` in its entirety. Off-the-shelf platforms either lack native multi-tenancy, require substantial containerized infrastructure, or lack fine-grained transactional control. However, each system provides mature architectural patterns that address specific weaknesses discovered in our recent forensic audits:
-- **From LangGraph:** Adapt the **Checkpointed State Graph & Interrupt/Resume Protocol** (`interrupt()` / `Command(resume=...)`) to formalize approval-gated state transitions without ad-hoc status columns.
-- **From RagLeap Core:** Adapt the **Role-Based Digital Employee Persona Contracts** and **Approval Mode Safety Gating** directly suited for omni-channel customer service.
-- **From Memento-Skills:** Adapt the **Reflective Memory & Structured Skill Synthesis** to evolve tenant knowledge and tool recipes without model fine-tuning.
-- **From n8n:** Adapt the **Webhook Callback Reconciliation Pattern** for deterministic resolution of external side-effects and unknown network outcomes.
-- **From Dify & Microsoft Agent Framework:** Avoid wholesale platform replacement, but adapt **Sandboxed Tool Execution** and **Standardized Observability Filters**.
+### 1.2 Strategic Audit Conclusions
+1. **Wholesale Platform Replacement is Explicitly Rejected:**  
+   None of the six evaluated external systems can or should replace `AI-Employee-Platform`. Off-the-shelf frameworks either lack native multi-tenancy by design (Memento-Skills, RagLeap Core), treat tenant isolation as an unverified application concern (LangGraph, Microsoft Agent Framework), require monolithic multi-container stacks violating lean VPS budgets (Dify), or carry restrictive commercial licensing prohibiting multi-tenant SaaS hosting (n8n Sustainable Use License).
+2. **Material Corrections to Prior Architectural Claims:**  
+   - *Memento-Skills* (arXiv:2603.18743) stores reusable skills as **stateful structured markdown prompt files** encoding behavioral descriptions, tool recipes, and contextual examples that direct the agent's tool-calling cycle, continuously refined via a read-write reflective learning loop and failure attribution. It does not generate raw Python bytecode, but its lack of multi-tenancy and sandbox boundaries makes direct package adoption unviable for a shared multi-tenant SaaS.
+   - *LangGraph's* checkpointing does **not** provide Exactly-Once execution for external side-effects (e.g. sending messages over Telegram/WhatsApp). External delivery is strictly At-Least-Once; checkpointing without idempotent external receiver keys risks duplicate dispatches upon recovery.
+   - *Microsoft Agent Framework (MAF)* is Microsoft's official convergence SDK unifying Semantic Kernel (enterprise middleware, invocation filters, typed plugins, OpenTelemetry) and AutoGen (conversational multi-agent actors and graph workflows) into a single 1.0 GA platform with native Model Context Protocol (MCP) support.
+   - *n8n's Sustainable Use License (SUL)* explicitly forbids commercial multi-tenant SaaS hosting where third-party clients create or manage workflows on shared instances. The prior claim that "deploying a container per client automatically resolves licensing" is a dangerous legal misconception.
+   - *RagLeap Core* is designed for self-hosted single-company deployments, lacking multi-tenant database partitioning. Its "46 roles" are static persona configurations and tool schemas. While it includes an optional Neo4j service for Graph RAG entity-boosted scoring, it gracefully falls back to PostgreSQL pgvector when Neo4j is omitted.
+3. **Calibrated Status of AI-Employee-Platform Approval Execution (Phase 4D / CR-05-01):**  
+   - *Functional Execution-Path Defects:* **`CLOSED`**. The module-level scoping bug in `OutboxWorker` was resolved by relocating `_handle_approval_action_execution` inside `class OutboxWorker`. Tool execution is integrated via `ToolExecutor.handlers` with `ToolExecutionContext`. Tool successes record `completed`; tool exceptions record `failed` with sanitized error details. Verified by 6 focused and 36 regression tests (`42/42 PASSED`).
+   - *Overall Approval Execution Safety:* **`CONDITIONALLY READY`** (Not fully closed). External delivery semantics are **at-least-once**; mid-handler crashes before local result commit risk duplicate external side effects upon stale event recovery. Explicit-deny policy checks (`has_tenant_explicit_deny`) and unified audit/tracing (`audit_events`, `execution_traces`) are bypassed during direct handler dispatch.
+   - *Phase 4D Milestone Status:* **`OPEN`**. The campaign scheduler loop (G-1), multi-batch continuation (G-2), and campaign API RBAC (G-5) remain open. Stage 5.2 implementation has NOT started.
+4. **Selective Pattern Adoption over Package Dependencies:**  
+   The platform will adopt zero full framework distributions. Specific, proven design patterns will be implemented natively within our existing FastAPI, SQLAlchemy 2.0, and PostgreSQL 17 architecture.
 
 ---
 
 ## 2. Scope & Methodology
 
-### 2.1 Methodology & Ground Rules
-- **Strict Read-Only:** Zero modification of application logic, database schemas, or migrations.
-- **Evidence-Based Code Comparison:** Every claim regarding `AI-Employee-Platform` is grounded in concrete file paths, class names, and verified line numbers.
-- **Official Documentation Priority:** Evaluation of external systems is based on official repositories, published research papers, and technical specifications as of October 2026.
-- **Classification Categories:**
-  - `Adopt`: Preliminary architectural preference to implement natively without external package dependencies (requires formal plan approval before implementation; zero implementation authorization).
-  - `Adapt`: Borrow the concept and customize it to fit our decoupled SQLAlchemy/FastAPI architecture (requires formal plan approval before implementation; zero implementation authorization).
-  - `Avoid`: Preliminary architectural preference against wholesale full-platform replacement under current VPS resource, multi-tenancy, and anti-hijack constraints, without judging broader utility or precluding selective future auxiliary integrations.
-  - `Investigate`: Requires empirical benchmarking or prototype testing prior to commitment.
+### 2.1 Audit Governance & Verification Rules
+- **Strict Read-Only Enforcement:** Zero modification of application code, database tables, or Alembic migrations.
+- **Evidence-Based Grounding:** Every claim regarding `AI-Employee-Platform` is tied directly to verified file paths, class names, and line numbers in the working tree.
+- **Authoritative External Sourcing:** Framework capabilities are verified against primary technical documentation, GitHub source code, and published research papers. Marketing claims and landing-page promises are discounted.
+- **Roadmap Order Commitment:**
+  1. Audit Phase 4D gaps in actual repo (Completed).
+  2. Complete comparative framework review (Completed).
+  3. Document verified findings against current platform architecture (This Document).
+  4. Only after owner review and decision, formulate Phase 5 specifications.
+
+### 2.2 Classification Standards
+- **Claim Status Categories:** `Verified` · `Partially verified` · `Unverified` · `Incorrect` · `Outdated`
+- **Platform Capability Categories:** `Already implemented and verified` · `Partially implemented` · `Missing` · `Present but architecturally weak` · `Not relevant to our requirements` · `Requires further investigation`
 
 ---
 
-## 3. Repository Snapshot
+## 3. Comprehensive Deep-Dive Investigation of All Six Projects
 
-| Attribute | Verified Value | Forensic Notes |
-| :--- | :--- | :--- |
-| **Git Repository** | `https://github.com/QQYC9/ai-employee-platform.git` | Publicly synchronized on GitHub |
-| **Active Branch** | `checkpoint/phase-12-knowledge-base` | Fast-forward synchronized with `origin` |
-| **Application Source Snapshot** | `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` | Verified identical application source files in `packages/`, `apps/`, `infrastructure/`, `tests/` across subsequent documentation commits |
-| **Prior Documentation Commits** | `982236bb944543a248af6f7d509ad51b5b1fa7d1` (Stage 2B), `1526616806c4adfc8dfbc03c9bc569027436cf9c` (Stage 2C) | Prior independent verification and consistency passes |
-| **Current Delivered HEAD at Stage 2D** | `b284b14aa0bf9361fa152b15292eae96f6b268ef` | Verified published documentation commit |
-| **Tracked Working Tree State** | Clean | Tracked working tree clean; 5 untracked files present: `scripts/check_live_db.py`, `scripts/cleanup_test_tenants.py`, `scripts/debug_runtime_failure.py`, `scripts/execute_inquiry_6_answer.py`, `scripts/resolve_inquiry_7_live.py` (local operational/diagnostic utility scripts from earlier ad-hoc debugging; not part of review documentation deliverables and must remain untouched and uncommitted) |
-| **Database Engines** | PostgreSQL 17.11 (Debian), Redis 7.0 | Port 5433; `ai_employee_test` migrated to `2a3b4c5d6e7f` |
-| **Production Guard** | [`packages/core/safety_guard.py`](file:///d:/AI-Employee-Platform/packages/core/safety_guard.py) | Active; aborts non-production processes targeting `ai_employee` |
+Every framework was forensically analyzed across thirteen standardized architectural dimensions:
 
----
-
-## 4. Detailed Review of the Six External Systems
+```
+[13 Evaluation Dimensions]
+1. Core Architecture & Execution Model      8. Workflow Durability & Idempotency
+2. Agent Lifecycle & State Management       9. Observability, Tracing & Auditability
+3. Memory & Knowledge Retrieval            10. Extensibility & Custom Components
+4. Tool / Function Integration             11. Deployment Model & VPS Complexity
+5. Human Approval & HITL Support           12. Licensing & Commercial Constraints
+6. Multi-Agent Orchestration               13. Practical Adaptation for AI-Employee-Platform
+7. Multi-Tenant Isolation & Security
+```
 
 ---
 
-### 4.1 Memento-Skills
+### 3.1 Memento-Skills
 
-- **Primary Sources:** Research Paper *"Memento-Skills: Let Agents Design Agents"* (Wang et al., arXiv:2603.18743, March 2026); Official Repository: `Memento-Teams/Memento-Skills`.
-- **Core Problem Solved:** Autonomous agents struggle with lifelong task learning; static toolsets cannot adapt dynamically to novel workflows without updating model weights or requiring prompt rewrites.
-
-#### 13-Point Analysis
-1. **Core Problem:** Dynamic skill discovery, refinement, and persistence for autonomous agents across open-ended task environments without weight updates.
-2. **Agent / Workflow Model:** Read-Write Reflective Agent Architecture. The agent autonomously constructs, tests, and saves executable skills into a dynamic library.
-3. **State, Memory & Context:** Skills are stored as structured Markdown files containing behavioral guidelines, usage context, and executable code snippets. A memory-based router dynamically retrieves relevant skills based on stateful prompt embeddings.
-4. **Tool Execution:** Treats skills as compound executable units rather than atomic function calls. Can synthesize new workflows from primitive tools.
-5. **Error Handling & Resumption:** Uses a reflective write loop: upon execution failure, the agent inspects execution logs, refines the skill code/markdown, and re-indexes the corrected skill.
-6. **Human-in-the-Loop:** Limited native HITL documented; designed primarily for autonomous reflection rather than interactive business owner approval gates.
-7. **Multi-Tenancy:** **No native multi-tenancy documented** in reviewed sources. Designed as an open-source single-agent research runtime.
-8. **Secrets Management:** Relies on local environment variables; lacks encrypted secret storage per tenant.
-9. **Observability & Auditing:** Traces skill execution logs, reflection cycles, and router weights locally.
-10. **Integration & Extensibility:** Extensible skill library; skills can be exported or committed as versioned files.
-11. **Operational Requirements:** Python runtime, local filesystem or vector store for skill embeddings, standard LLM API access. Minimal infrastructure footprint.
-12. **Limitations & Risks:** Lacks multi-tenancy, transaction guarantees, and outbox decoupling. Dynamic code execution presents sandbox escape risks if untrusted users trigger skill synthesis.
-13. **Relevance to `AI-Employee-Platform`:**
-    - *What to Adapt:* The concept of **structured Markdown skill units** and **reflective fact/skill extraction**. Our [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) can adapt this to store synthesized "business procedures" verified by the owner.
-    - *What to Avoid:* Dynamic code generation and autonomous skill creation without explicit owner verification.
+- **Primary Source:** Research Paper *"Memento-Skills: Let Agents Design Agents"* (Wang et al., arXiv:2603.18743, March 2026); GitHub Repository: `Memento-Teams/Memento-Skills`.
+- **1. Core Architecture & Execution Model:** Skill-centric, continually learnable agent framework decoupled from model weight fine-tuning. Operates on a closed-loop **Read–Write Reflective Mechanism**:
+  - *Read Phase:* A behavior-trainable skill router evaluates the stateful prompt and retrieves the most relevant skill from memory.
+  - *Write Phase:* Based on environmental feedback and execution evaluation, the system updates, refines, and synthesizes skills (improving weak skills and purging noise).
+- **2. Agent Lifecycle & State Management:** Ephemeral, task-driven execution. The agent is initialized with task context, queries the skill router, executes the workflow via structured tool calls, and evaluates task completion.
+- **3. Memory & Knowledge Retrieval:** Externalized Memory treated as a reinforcement learning optimization space. Reusable skills are stored as **structured stateful markdown files** encoding behavioral guidelines, procedural logic, and contextual few-shot trajectories.
+- **4. Tool/Function Integration:** Standard LLM tool-calling driven by procedural markdown instructions and external API wrappers. It does **not** compile arbitrary raw Python bytecode, but instead generates structured prompts and execution scripts.
+- **5. Human Approval & HITL Support:** **Weak / Absent.** Relies on automated LLM-as-a-Judge evaluators and task-completion assertions rather than synchronous human-in-the-loop gating.
+- **6. Multi-Agent Orchestration:** End-to-end agent generation where a generalist "agent-designing agent" synthesizes specialized sub-agent configurations and prompts for novel tasks.
+- **7. Multi-Tenant Isolation & Security Model:** **Zero native multi-tenancy.** Skills and memory trajectories reside in a flat shared storage space without tenant scoping or cryptographic secret partitioning.
+- **8. Workflow Durability, Retries, & Idempotency:** Durability is file-based (markdown skill persistence). Retries trigger the failure-attribution module to refine prompts rather than providing transactional idempotency.
+- **9. Observability, Tracing, & Auditability:** Detailed trajectory logging and failure attribution traces, but lacks enterprise OpenTelemetry or tamper-evident audit logging.
+- **10. Extensibility & Custom Components:** Highly extensible via markdown skill authoring and tool definition.
+- **11. Deployment Model & Complexity:** Lightweight Python library; minimal host dependencies.
+- **12. Licensing & Constraints:** Open source (MIT / Apache 2.0).
+- **13. What Can Realistically Be Adapted:** The concept of **Structured Procedural Skills (SOPs)**—storing verified multi-step operational guidelines as structured markdown/JSON in `FactService`—allowing digital employees to accumulate tenant-specific workflows without code generation.
 
 ---
 
-### 4.2 LangGraph
+### 3.2 LangGraph
 
-- **Primary Sources:** Official Repository: `langchain-ai/langgraph`; Official Documentation: `https://langchain-ai.github.io/langgraph/` (Accessed October 2026).
-- **Core Problem Solved:** LLM workflows require cyclical graphs, durable state persistence, and multi-turn human-in-the-loop intervention, which rigid DAG pipelines cannot support.
-
-#### 13-Point Analysis
-1. **Core Problem:** Orchestrating multi-agent, cyclical workflows with state persistence and human intervention.
-2. **Agent / Workflow Model:** Cyclic State Graph (`StateGraph`). Nodes represent computations/tools; edges represent conditional routing. Every transition updates a typed state dictionary.
-3. **State, Memory & Context:** Built-in state checkpointing using durable savers (e.g. `PostgresSaver`). Every graph step produces a versioned checkpoint, enabling state rollbacks and multi-session resume.
-4. **Tool Execution:** Tools are graph nodes executed via tool-calling protocols. Execution can be paused before or after any tool node.
-5. **Error Handling & Resumption:** Exception edges route to fallback nodes; durable checkpoints allow resumption from the point of failure without re-running earlier nodes.
-6. **Human-in-the-Loop:** Supported via the `interrupt()` function, which suspends execution at any node. The graph saves state and yields control. Resumption occurs via `Command(resume=...)`.
-7. **Multi-Tenancy:** Supported at the thread/checkpoint level (`configurable={"thread_id": "...", "tenant_id": "..."}`), but requires manual enforcement of tenant isolation in database queries.
-8. **Secrets Management:** Relies on application runtime / environment variables.
-9. **Observability & Auditing:** Native integration with LangSmith; emits run trees, node execution times, and token metrics.
-10. **Integration & Extensibility:** Modular Python/TypeScript libraries, compatible with standard LLM providers, tool standards, and custom checkpointer backends.
-11. **Operational Requirements:** Python runtime with PostgreSQL (for `PostgresSaver`). Lightweight when self-hosted.
-12. **Limitations & Risks:** Graph abstractions can introduce conceptual complexity; does not provide transactional outbox semantics for external channel messaging or SMS/WhatsApp webhooks natively.
-13. **Relevance to `AI-Employee-Platform`:**
-    - *What to Adapt:* **Checkpointed State Machine & `interrupt()` / `resume` Semantics**. The flow of halting execution, waiting for owner challenge verification, and resuming mirrors LangGraph's interrupt pattern.
-    - *What to Avoid:* Adopting the full LangChain dependency tree or commercial LangSmith lock-in.
+- **Primary Source:** GitHub: `langchain-ai/langgraph`; Official Docs: `https://langchain-ai.github.io/langgraph/`.
+- **1. Core Architecture & Execution Model:** Directed cyclic computation graph (`StateGraph`). Nodes represent computations/tools; edges represent conditional branching. Execution progresses through state transitions persisted at super-steps.
+- **2. Agent Lifecycle & State Management:** Checkpointed state machine. State is represented as a typed schema (e.g. `TypedDict` or Pydantic) mutated via node return values. Every super-step saves a versioned snapshot (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`).
+- **3. Memory & Knowledge Retrieval:** Short-term state via graph state history; long-term memory via `BaseStore` (namespaced key-value store with semantic search).
+- **4. Tool/Function Integration:** Standard Python functions or LangChain tools. Tools return state updates.
+- **5. Human Approval & HITL Support:** **First-Class Primitive.** `interrupt()` suspends graph execution, persists checkpoint to DB, and releases the execution thread. Resumption occurs via `Command(resume=value)` or passing state updates to the checkpointer, resuming from the exact interruption node.
+- **6. Multi-Agent Orchestration:** Multi-agent network via subgraphs, supervisor nodes, or conversational handoffs (multi-agent swarms).
+- **7. Multi-Tenant Isolation & Security Model:** **Tenant-Agnostic.** Checkpointers partition solely by `thread_id` and `checkpoint_ns`. Tenant isolation must be manually enforced at the application boundary via query pre-filters or PostgreSQL Row-Level Security (RLS).
+- **8. Workflow Durability, Retries, & Idempotency:**
+  - High internal durability: State transitions are transactional in PostgreSQL (`AsyncPostgresSaver`).
+  - **External Side-Effect Idempotency Limitation:** Checkpointing restores internal graph state, but **does not guarantee Exactly-Once execution of external side-effects**. If a node executes an external HTTP POST (e.g. to Telegram) and the process crashes before the checkpointer transaction commits, the node will re-run on restart, duplicating the external action unless external idempotency keys or two-phase reconciliation are implemented.
+- **9. Observability, Tracing, & Auditability:** Deep integration with LangSmith (commercial SaaS) or OpenTelemetry via LangChain callbacks.
+- **10. Extensibility & Custom Components:** High via custom nodes, edges, and checkpointers.
+- **11. Deployment Model & Complexity:** Lean core (`pip install langgraph`). LangGraph Server (production multi-worker API) is proprietary/commercial.
+- **12. Licensing & Constraints:** MIT License for core open source; proprietary for LangGraph Cloud/Server.
+- **13. What Can Realistically Be Adapted:** The **Checkpointed State Graph & Interrupt/Resume Protocol** for task execution and human approvals (replacing ad-hoc status polling with formal state suspension and resumption).
 
 ---
 
-### 4.3 Microsoft Agent Framework (Semantic Kernel + AutoGen Convergence)
+### 3.3 Microsoft Agent Framework (MAF)
 
-- **Primary Sources:** Official Microsoft Documentation: `learn.microsoft.com/semantic-kernel/` & `microsoft.github.io/autogen/`; Microsoft Build & Agent Framework Roadmap (Accessed October 2026).
-- **Core Problem Solved:** Enterprise fragmentation between conversational multi-agent dialogue (AutoGen) and enterprise application integration/filters/security (Semantic Kernel).
-
-#### 13-Point Analysis
-1. **Core Problem:** Unifying conversational multi-agent coordination with enterprise security, type safety, observability, and cloud deployment.
-2. **Agent / Workflow Model:** Event-driven multi-agent orchestration supporting handoffs, group chat, sequential pipelines, and concurrent agent execution. Supports Python and .NET.
-3. **State, Memory & Context:** Session-based context management with persistent chat history stores and Model Context Protocol (MCP) context retrieval.
-4. **Tool Execution:** Plugin architecture. Functions are registered with type schemas, pre-execution filters, and post-execution validation filters.
-5. **Error Handling & Resumption:** Filter pipeline intercepts exceptions; supports fallback to secondary models or human escalation.
-6. **Human-in-the-Loop:** Supported via pre-invocation filters and user-proxy agent patterns that intercept tool calls and request approval.
-7. **Multi-Tenancy:** Multi-tenant support is provided via Azure AI Foundry integration (workspaces and Entra ID RBAC), while self-hosted Python runs require manual tenant partitioning.
-8. **Secrets Management:** Integrated with Azure Key Vault and environment configurations.
-9. **Observability & Auditing:** OpenTelemetry native instrumentation; browser-based DevUI for visual inspection of tool calls and agent conversations.
-10. **Integration & Extensibility:** Supports Model Context Protocol (MCP), OpenAPI schemas, and Azure AI Foundry services.
-11. **Operational Requirements:** Python 3.10+ / .NET 8. Self-hosting requires custom state stores; cloud hosting leverages Azure container services.
-12. **Limitations & Risks:** Higher conceptual overhead; heavily aligned with Azure ecosystem services; complex setup for self-hosted VPS environments.
-13. **Relevance to `AI-Employee-Platform`:**
-    - *What to Adapt:* **Pre-Invocation Action Filters**. Intercepting tool execution at the contract level before database sessions open.
-    - *What to Avoid:* Direct dependence on Azure AI Foundry or .NET runtime dependencies.
-
----
-
-### 4.4 Dify
-
-- **Primary Sources:** Official Repository: `langgenius/dify`; Official Documentation: `https://docs.dify.ai/` (Accessed October 2026).
-- **Core Problem Solved:** Visual LLM application development, prompt engineering, RAG orchestration, and agent workflows for enterprise teams without boilerplate code.
-
-#### 13-Point Analysis
-1. **Core Problem:** Visual platform for building, deploying, and monitoring LLM workflows, RAG pipelines, and conversational agents with a web interface.
-2. **Agent / Workflow Model:** Node-based visual Workflow Engine (DSL) combined with ReAct / Function Calling agent runners. Supports iterative loops, condition branching, and sub-workflows.
-3. **State, Memory & Context:** Conversation memory stored in PostgreSQL/Redis; multi-dataset RAG with hybrid search (vector + keyword BM25 + reranking).
-4. **Tool Execution:** Tool execution via a dedicated sandbox runner container (restricting network access, filesystem, and execution time).
-5. **Error Handling & Resumption:** Node-level retry configurations, error edge branching, and timeout limits.
-6. **Human-in-the-Loop:** Human input is primarily supported as conversational turn prompts rather than out-of-band administrative challenge verifications.
-7. **Multi-Tenancy:** Native workspace and organization-based data partitioning with member roles (Owner, Admin, Member, Editor).
-8. **Secrets Management:** AES-256 encrypted database storage for API keys and tool credentials.
-9. **Observability & Auditing:** Detailed execution logs, token usage tracking, user feedback, and OpenTelemetry integration.
-10. **Integration & Extensibility:** Built-in tool integrations, webhook triggers, and REST API publishing for every workflow.
-11. **Operational Requirements:** Multi-container Docker Compose stack: official setup runs approximately 8 to 9 concurrent services (API, Worker, Web, PostgreSQL, Redis, Sandbox, Nginx, Vector DB). Official documentation recommends at least 2 CPU cores and 4-8 GB RAM for stable self-hosting.
-12. **Limitations & Risks:** Monolithic architecture; significant operational resource overhead; lacks transactional outbox reliability for messaging channels.
-13. **Relevance to `AI-Employee-Platform`:**
-    - *What to Adapt:* **Sandboxed Tool Execution** principles and **Hybrid RAG Reranking** (combining exact keyword/fact lookup with vector embeddings).
-    - *What to Avoid:* Wholesale replacement of AI-Employee-Platform with Dify's multi-container stack under current VPS resource, multi-tenancy, and anti-hijack constraints (this preliminary architectural preference does not judge Dify's broader utility or preclude selective future auxiliary integrations).
+- **Primary Source:** Microsoft Learn: `learn.microsoft.com/semantic-kernel/`; GitHub: `microsoft/semantic-kernel` & `microsoft/autogen`.
+- **Exact Framework Relationship:** Microsoft Agent Framework is Microsoft's official unified SDK and runtime that merges **Semantic Kernel** (enterprise middleware, typed plugins, invocation filters, OpenTelemetry) with **AutoGen** (event-driven multi-agent actor patterns and conversational collaboration) into a single production platform (v1.0 GA).
+- **1. Core Architecture & Execution Model:** Graph-based workflow API combined with event-driven agent actors. Explicitly supports sequential, parallel, and handoff orchestration patterns alongside open-ended multi-agent conversations.
+- **2. Agent Lifecycle & State Management:** Session-based and actor-based state management (`AgentId`, typed context variables, explicit message routing queues).
+- **3. Memory & Knowledge Retrieval:** Pluggable semantic memory connectors (PostgreSQL with pgvector, Azure AI Search, Qdrant) with semantic embedding generation and retrieval filters.
+- **4. Tool/Function Integration:** Typed plugins/functions with attribute decorators, OpenAPI specification connectors, and native client support for the **Model Context Protocol (MCP)**.
+- **5. Human Approval & HITL Support:** Pre-invocation and post-invocation middleware filters (`IFunctionInvocationFilter` / `FunctionFilter`). Interceptors evaluate parameters, enforce authorization, and suspend execution for approval.
+- **6. Multi-Agent Orchestration:** Structured agent handoffs, round-robin group chats, and graph-defined multi-step workflows.
+- **7. Multi-Tenant Isolation & Security Model:** Seamless when backed by Azure Entra ID and Azure AI Foundry Agent Service. For self-hosted on-premise Python deployments, tenant scoping and secret encryption must be implemented at the application layer.
+- **8. Workflow Durability, Retries, & Idempotency:** Built-in connector retries with exponential backoff; durable distributed workflow execution integrates with Azure Durable Task Framework.
+- **9. Observability, Tracing, & Auditability:** **Industry standard OpenTelemetry instrumentation.** Emits structured spans, metrics, and traces for every agent turn, LLM prompt, token count, and tool execution.
+- **10. Extensibility & Custom Components:** High modularity across .NET and Python.
+- **11. Deployment Model & Complexity:** Moderate. Runs embedded as a Python library within FastAPI or as standalone microservices.
+- **12. Licensing & Constraints:** MIT License (fully permissive open source).
+- **13. What Can Realistically Be Adapted:**
+  1. **Pre-Invocation Filter Pipeline:** Evaluating permission policies, rate limits, and approval challenges before executing tools.
+  2. **Deterministic Role Handoffs:** Structured, rule-based handoffs between personas based on intent classification rather than open-ended chat loops.
+  3. **Model Context Protocol (MCP):** Dynamic connection to enterprise tool servers.
 
 ---
 
-### 4.5 n8n
+### 3.4 Dify & Dify-Sandbox
 
-- **Primary Sources:** Official Repository: `n8n-io/n8n`; Official Documentation: `https://docs.n8n.io/` (Accessed October 2026).
-- **Core Problem Solved:** Workflow automation connecting third-party APIs with conditional logic, webhooks, and LangChain-based AI Agent nodes.
-
-#### 13-Point Analysis
-1. **Core Problem:** Visual integration and automation of disparate enterprise APIs, databases, and messaging channels.
-2. **Agent / Workflow Model:** Directed Acyclic Graph (DAG) with execution branching. Supports an "AI Agent" node utilizing ReAct or tool-calling within the deterministic workflow.
-3. **State, Memory & Context:** Node-to-node JSON payload passing; conversation memory can be backed by Redis or PostgreSQL `WindowBufferMemory`.
-4. **Tool Execution:** Nodes act as tools; executes API calls, database queries, and custom JavaScript/Python code directly within worker processes.
-5. **Error Handling & Resumption:** Error workflows ("Error Trigger" node); retry on fail with configurable exponential backoff and wait times.
-6. **Human-in-the-Loop:** "Wait for Webhook" and "Approval" nodes generate secure URLs or webhook triggers that halt the workflow until an admin clicks "Approve" or "Reject".
-7. **Multi-Tenancy:** Supported in n8n commercial tiers (Pro / Enterprise) via multi-tenant workspaces and RBAC. Community edition is designed for single-instance use.
-8. **Secrets Management:** Encrypted credential vault in database; credentials bound to nodes by ID without exposing plaintext.
-9. **Observability & Auditing:** Full execution history with step-by-step input/output inspection and status tracking.
-10. **Integration & Extensibility:** Ecosystem documenting hundreds of pre-built integrations (official materials state 400+ API integrations).
-11. **Operational Requirements:** Node.js runtime, PostgreSQL, Redis (in queue mode). Moderately lightweight (~512MB - 1GB RAM).
-12. **Limitations & Risks:** Multi-tenancy gated behind commercial licensing; AI agent capabilities are secondary to deterministic workflow automation; lacks domain-specific fact verification and anti-hallucination guardrails.
-13. **Relevance to `AI-Employee-Platform`:**
-    - *What to Adapt:* **The Webhook Callback & Asynchronous Wait Pattern** for external approvals and third-party actions.
-    - *What to Avoid:* Wholesale replacement of our core agent brain and multi-tenant database layer with n8n under current constraints (this preliminary preference does not judge n8n's broader workflow utility or preclude selective future auxiliary integrations).
+- **Primary Source:** GitHub: `langgenius/dify` & `langgenius/dify-sandbox`; Docs: `https://docs.dify.ai/`.
+- **1. Core Architecture & Execution Model:** Full-stack visual AI orchestration engine. Backend built on Flask, Celery, SQLAlchemy, and Redis. Workflows are DAGs authored visually and compiled to Celery task graphs.
+- **2. Agent Lifecycle & State Management:** Persistent conversations stored in relational database (`conversations`, `messages`, `workflow_runs`). Celery workers execute steps asynchronously.
+- **3. Memory & Knowledge Retrieval:** Built-in Dataset & Knowledge management (document parsing, chunking, hybrid search combining keyword and vector via Weaviate/Qdrant/pgvector).
+- **4. Tool/Function Integration:** Built-in tool collection (Google Search, Wolfram, WebScraper), custom OpenAPI REST tools, and code execution nodes.
+- **5. Human Approval & HITL Support:** Primitive. Workflows support question-answering nodes, but formal human-in-the-loop task suspension and resume requires webhooks or external integrations.
+- **6. Multi-Agent Orchestration:** Agent assistant nodes within workflows; multi-agent conversation is limited compared to AutoGen or LangGraph.
+- **7. Multi-Tenant Isolation & Security Model:** **Multi-workspace multi-tenant platform.** Supports multiple organizations, workspaces, and users with RBAC. Workspace-level dataset and API key scoping.
+- **8. Code Execution Sandbox (`dify-sandbox`):** Go-based service running inside a dedicated Docker container using `syscall.Chroot` and Linux `seccomp` system call filtering. Isolates Python/Node code from the host filesystem.
+- **9. Workflow Durability, Retries, & Idempotency:** Celery-based async task execution. Retries handled via Celery task retry; lacks transactional outbox pattern for guaranteed messaging.
+- **10. Observability & Tracing:** Built-in execution log, step timing, token metrics, and export to Langfuse / Langsmith.
+- **11. Deployment Model & Complexity:** **Heavy Multi-Container Stack.** Standard Docker Compose deployment runs **8 core services**: `api` (Flask), `worker` (Celery), `web` (Next.js), `postgres`, `redis`, `sandbox` (Go/seccomp), `nginx` / `ssrfproxy`, and a vector database (`weaviate`, `qdrant`, or `milvus`).
+  - *Host Requirements:* Minimum **4 GB RAM** (2 vCPUs) strictly for small-scale evaluation / testing; **8 GB+ RAM** (4 vCPUs) recommended for stable production multi-user operation; spikes heavily during large document RAG chunking.
+- **12. Licensing & Constraints:** Dify Open Source License (based on Apache 2.0 with commercial restrictions on providing Dify itself as a SaaS).
+- **13. What Can Realistically Be Adapted:** Visual dataset chunking and hybrid retrieval concepts; seccomp container sandboxing architecture (if dynamic user script execution is ever required).
 
 ---
 
-### 4.6 RagLeap Core
+### 3.5 n8n
 
-- **Primary Sources:** Official Repository: `ragleap/ragleap-core`; Official Documentation: `https://ragleap.com/docs` (Accessed October 2026).
-- **Core Problem Solved:** Running autonomous AI "employees" grounded in business knowledge bases that can safely communicate over messaging apps without taking unauthorized actions.
-
-#### 13-Point Analysis
-1. **Core Problem:** Providing self-hosted, domain-grounded autonomous AI employees for business customer communication and task handling.
-2. **Agent / Workflow Model:** Role-based agent personas (official sources define 46 distinct roles: generalist roles such as Sales, Support, HR, plus industry-specific roles). Operates in an event-driven loop triggered by inbound channel events.
-3. **State, Memory & Context:** Dual-layer retrieval: Vector RAG via PostgreSQL `pgvector` alongside **Graph RAG** (`ragleap-graph` using Neo4j) to map complex entity relationships and business policies.
-4. **Tool Execution:** Modular tool library (`ragleap-tools`) with approval interception before executing external side effects.
-5. **Error Handling & Resumption:** Standard try/except handling with task queues; fallback responses when context confidence is low.
-6. **Human-in-the-Loop:** **Native Approval Mode.** Agents can run in "approval mode" where external actions (sending emails, updating databases, firing webhooks) are held pending human approval.
-7. **Multi-Tenancy:** Self-hosted organization support, scoping knowledge bases and agents to company accounts.
-8. **Secrets Management:** BYOK (Bring Your Own Key) model abstraction; integration secrets configured per agent or organization.
-9. **Observability & Auditing:** Audit logs for agent conversations, tool execution attempts, and human approval decisions.
-10. **Integration & Extensibility:** Native messaging adapters for **WhatsApp, Telegram, Discord, and Voice**; published Python packages on PyPI (`ragleap-agents`, `ragleap-tools`, `ragleap-rag`).
-11. **Operational Requirements:** Python 3.11+, PostgreSQL with `pgvector`, optional Neo4j container for Graph RAG, Docker Compose.
-12. **Limitations & Risks:** Graph RAG adds operational memory overhead (Neo4j requires dedicated RAM); lacks formal Transactional Outbox fencing guarantees against duplicate worker recovery.
-13. **Relevance to `AI-Employee-Platform`:**
-    - *What to Adapt:* **Direct Alignment on Digital Employee Personas & Safety Gate.** RagLeap's persona contracts and omnichannel connector abstractions are directly applicable.
-    - *What to Avoid:* Introducing Neo4j Graph RAG before our relational PostgreSQL `FactService` is fully optimized.
-
----
-
-## 5. Comparison Matrix
-
-| System | Primary Paradigm | Multi-Tenancy | HITL / Approval Model | State / Resumption | Secret Management | Operational Footprint | Recommendation |
-| :--- | :--- | :---: | :--- | :--- | :--- | :---: | :---: |
-| **Memento-Skills** | Self-evolving skill library | No documented native support | Limited native HITL | Markdown files + RL router | Environment variables | Very Low (Python) | **ADAPT** (Skill/Fact Memory) |
-| **LangGraph** | Cyclical state graph | Manual scoping | `interrupt()` & `resume` protocol | `PostgresSaver` checkpoints | Application level | Low (Postgres + Python) | **ADAPT** (Interrupt & Checkpoints) |
-| **Microsoft Agent FW** | Enterprise multi-agent | Azure / Entra ID | Pre-invocation action filters | Session stores + MCP | Key Vault / Env | Medium to High | **ADAPT** (Action Policy Filters) |
-| **Dify** | Visual LLM app platform | Native (Orgs) | Conversational turns | Redis/Postgres + Vector DB | AES-256 in DB | High (8-9 containers, 4-8 GB RAM) | **AVOID** (Wholesale Platform Replacement) / **ADAPT** (Sandbox Principles) |
-| **n8n** | Visual workflow automation | Commercial tiers only | Approval & Wait nodes | Webhook wait state | Encrypted DB vault | Medium (Node.js + Redis) | **ADAPT** (Webhook Reconciliation) / **AVOID** (Wholesale Replacement) |
-| **RagLeap Core** | Autonomous AI Employees | Native (Orgs) | Default approval-gated mode | Vector store + Neo4j Graph | BYOK / Config | Medium (Postgres + Neo4j) | **ADAPT** (Employee Roles & Safety Gate) |
+- **Primary Source:** GitHub: `n8n-io/n8n`; Docs: `https://docs.n8n.io/`; License: `https://n8n.io/legal/sustainable-use-license/`.
+- **1. Core Architecture & Execution Model:** Node.js / TypeScript workflow automation platform. Workflows are JSON DAGs executed by an event-driven engine with synchronous and asynchronous (worker queue) execution modes.
+- **2. Agent Lifecycle & State Management:** LangChain-powered AI nodes embedded within workflow graphs. State is maintained per workflow execution in PostgreSQL or SQLite.
+- **3. Memory & Knowledge Retrieval:** Memory nodes (Window Buffer, Summary, PostgreSQL Chat Memory); Vector store nodes (Pinecone, Qdrant, Supabase, In-Memory).
+- **4. Tool/Function Integration:** 400+ native pre-built API nodes, HTTP Request node, and JavaScript/Python code nodes.
+- **5. Human Approval & HITL Support:** Native **"Wait for Webhook"** and **"Approval"** nodes. Execution pauses and generates a unique callback URL; upon approval via web link or webhook, the workflow resumes execution.
+- **6. Multi-Agent Orchestration:** Can build multi-agent routing graphs visually using AI agent nodes and sub-workflows.
+- **7. Multi-Tenant Isolation & Security Model:** Enterprise edition offers user management and project RBAC. Community edition is single-organization.
+- **8. Workflow Durability, Retries, & Idempotency:** Execution history saved in PostgreSQL. Failed executions can be retried from the failed node.
+- **9. Observability & Tracing:** Detailed visual execution log showing inputs and outputs of every single node in the DAG.
+- **10. Extensibility & Custom Components:** High via custom community nodes (Node.js).
+- **11. Deployment Model & Complexity:** Medium footprint. Single Node.js container for community edition; multi-container (Main + Webhook + Workers + Redis + Postgres) for enterprise queue mode.
+- **12. Licensing & Constraints (Critical Disqualifier):**
+  - **Sustainable Use License (SUL):** n8n source code is licensed under the SUL. The SUL permits free self-hosting *only* for internal business operations and direct consulting outcomes where clients do not receive access to the software.
+  - **Commercial SaaS Embedding Prohibition:** Using n8n (either directly or embedded behind a custom UI) to power customer-facing automation or workflow processing in a commercial product where the product derives commercial value from n8n violates the SUL.
+  - Commercial embedding strictly requires a negotiated proprietary **Enterprise / Commercial agreement** from n8n GmbH.
+  - Packaging individual containers per customer does not bypass SUL restrictions if the commercial value proposition involves offering n8n workflow capabilities as a service.
+- **13. What Can Realistically Be Adapted:** The **Webhook Callback & Wait Pattern** for external async approvals.
 
 ---
 
-## 6. Deep Capability Comparison Against Current Platform
+### 3.6 RagLeap Core
 
-| Capability | Current Platform Implementation | Relevant External System | What it Does Better / Differently | Possible Adaptation | Risks / Cost | Evidence Citation | Verdict |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :---: |
-| **Human-in-the-Loop Approval** | Owner Base29 OTP + HMAC-SHA256 challenge creation and verification via [`ApprovalService`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py) with outbox queueing; downstream approved-action execution is currently nonfunctional and stubbed. | **LangGraph** & **RagLeap Core** | LangGraph uses native `interrupt()` and state checkpointing; RagLeap defaults all agents to "approval mode" for external actions. | Formalize approval interception as a checkpointed interrupt state rather than separate `status` vs `execution_status` columns. | Requires refactoring agent loop into explicit state machine. | [`domain.py:326, 335`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L326); LangGraph Docs | **ADAPT** |
-| **Worker Fencing & Recovery** | Outbox pattern via [`OutboxService`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py); `claim_generation` column exists | **n8n** & **Distributed Systems (Kleppmann)** | n8n tracks job execution IDs with explicit lease heartbeats; Kleppmann fencing uses monotonic generation counters. | Implement monotonic `claim_generation` increments on claim and recovery with rowcount verification on commit. | Low code overhead; purely database-level SQL updates. | [`outbox_service.py:210, 342`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L210) | **ADOPT** (Preliminary Preference; Implementation Blocked) |
-| **External Side-Effect Idempotency** | Uncommitted timestamp [`first_external_attempt_at`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966); hardcoded outcome | **n8n** | Generates deterministic execution IDs per external request; checks provider status before re-dispatch. | Commit external attempt timestamp in an independent transaction before opening network socket; fail-closed to `reconciliation_required`. | Prevents duplicate customer messages or external mutations. (Conditional risk in current code). | [`outbox_worker.py:966, 994`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966) | **ADOPT** (Preliminary Preference; Implementation Blocked) |
-| **Fact & Skill Memory** | JSONB table [`facts`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L1800) with confirmation status via [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) | **Memento-Skills** & **RagLeap Core** | Memento stores compound executable skills in structured markdown; RagLeap uses Graph RAG for entity relationships. | Synthesize complex multi-step tenant procedures into structured Markdown skills stored in `knowledge` or `facts`. | Must enforce read-only safety; do not allow dynamic unverified code execution. | [`fact_service.py:32`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py#L32); Memento Paper | **ADAPT** |
-| **Tool Execution Safety** | Python functions in [`packages/tools/`](file:///d:/AI-Employee-Platform/packages/tools/) called via [`ToolExecutor`](file:///d:/AI-Employee-Platform/packages/tools/executor.py) | **Dify** & **Microsoft Agent FW** | Dify executes tools inside sandboxed containers; Microsoft uses pre/post invocation filter pipelines. | Implement pre-invocation action filters and sub-transaction savepoints (`session.begin_nested()`). | Protects database transaction from `InFailedSqlTransaction` aborts. | [`executor.py:580-595`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L580-L595) | **ADAPT** |
-| **Multi-Tenancy** | Strict `tenant_id` on all tables, [`safety_guard.py`](file:///d:/AI-Employee-Platform/packages/core/safety_guard.py), AES-256 integration secrets | **AI-Employee-Platform Model** | Memento lacks documented multi-tenancy; n8n gates it behind commercial tiers; LangGraph leaves it to user queries. | Retain current platform multi-tenancy model. | None. Our architecture already enforces tenant isolation strictly. | [`tenant.py:15`](file:///d:/AI-Employee-Platform/packages/auth/tenant.py#L15); [`safety_guard.py`](file:///d:/AI-Employee-Platform/packages/core/safety_guard.py) | **RETAIN** |
-| **Omnichannel Connectors** | Modular connectors in [`packages/connectors/`](file:///d:/AI-Employee-Platform/packages/connectors/) (WhatsApp, Telegram) | **RagLeap Core** | RagLeap provides out-of-the-box Discord and Voice channel adapters in addition to WhatsApp/Telegram. | Evaluate adding Discord or Voice connectors based on customer demand in future milestones. | Low risk; connectors are cleanly decoupled in our repository. | [`packages/connectors/`](file:///d:/AI-Employee-Platform/packages/connectors/) | **INVESTIGATE** |
-
----
-
-## 7. Current Platform Architecture Assessment
-
-### 7.1 Verified Architectural Strengths
-1. **Decoupled Multi-Tenant Isolation:** The isolation model in [`packages/auth/tenant.py`](file:///d:/AI-Employee-Platform/packages/auth/tenant.py) and [`packages/models/domain.py`](file:///d:/AI-Employee-Platform/packages/models/domain.py) enforces row-level data scoping and cryptographic secret segregation per tenant.
-2. **Cryptographic Anti-Hijack Foundation:** The Base29 alphabet, HMAC-SHA256 token verification, and canonical payload hashing in [`packages/services/approval_service.py`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py) provide verified cryptographic resistance against brute force and parameter tampering during challenge creation and verification. *(Note: Downstream action execution remains nonfunctional and is not part of this strength)*.
-3. **Deterministic Fact Precedence:** The [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) with JSONB dot-notation topic paths and explicit confirmation states (`confirmed`, `pending_confirmation`, `conflict`) successfully prevents model hallucinations on core business facts.
-4. **Lean Operational Footprint:** Runs on standard PostgreSQL 17 + Redis 7 without requiring 8 GB multi-container orchestrators.
-
-### 7.2 Verified Structural Defects & Deficiencies in Current Code
-1. **Worker Handler Out-of-Scope Bug:** In [`packages/services/outbox_worker.py:929`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L929), `_handle_approval_action_execution` is defined outside `class OutboxWorker` at module level, raising `AttributeError` at runtime.
-2. **Stubbed Tool Execution:** In [`packages/services/outbox_worker.py:1017-1030`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1017-L1030), `ToolExecutor` is not invoked; success is hardcoded via an independent session without performing the approved action.
-3. **Inoperative Worker Fencing:** In [`packages/services/outbox_service.py:210, 342`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L210), `claim_generation` is never incremented.
-4. **Recovery State Divergence:** In [`packages/services/outbox_service.py:294-362`](file:///d:/AI-Employee-Platform/packages/services/outbox_service.py#L294-L362), `recover_stale_events` resets outbox events but leaves approvals stuck in `'executing'`.
-5. **Audit Exception Trap:** In [`packages/tools/executor.py:592`](file:///d:/AI-Employee-Platform/packages/tools/executor.py#L592), audit logging inside an aborted transaction triggers `psycopg.errors.InFailedSqlTransaction` (SQLSTATE `25P02`), masking the original exception. *(Evidence classification: Source-supported inference from PostgreSQL transaction semantics; not runtime-reproduced in this review).*
-6. **Lack of Entity Idempotency Constraints:** Missing unique constraints on `tasks` and `knowledge` tables in [`packages/models/domain.py:270, 2000`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L270). *(Evidence classification: Verified schema absence; re-running `TaskCreateTool` may allow duplicate entity creation upon retry; duplicate creation was not experimentally demonstrated during this documentation task).*
-7. **Conditional External Side-Effect Risk:** In [`packages/services/outbox_worker.py:966`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L966), `first_external_attempt_at` is flushed without commit. In the current path, no external HTTP socket is called; this becomes an active double-dispatch vulnerability if external network tools are wired into this handler.
+- **Primary Source:** GitHub: `ragleap/ragleap-core`; Docs: `https://ragleap.com/docs`.
+- **1. Core Architecture & Execution Model:** Autonomous AI Employees platform designed for small-to-medium businesses. Python FastAPI backend orchestrating role-based agents across omni-channel connectors (Telegram, WhatsApp, Discord).
+- **2. Agent Lifecycle & State Management:** Role-based digital employee personas (Sales, Support, HR, Operations, Accounting). Agents are defined by static prompt configurations and tool schemas.
+- **3. Memory & Knowledge Retrieval:** **Dual Retrieval Architecture:** Relational vector search (PostgreSQL with `pgvector`) combined with an **optional Neo4j Graph RAG service** (`ragleap-graph`). When Neo4j is enabled, entity co-occurrence graphs boost vector search similarity scores; if Neo4j is disabled or unreachable, the system gracefully falls back to dense vector search without failing chat execution.
+- **4. Tool/Function Integration:** Tool contracts with defined risk levels and permission boundaries.
+- **5. Human Approval & HITL Support:** Multi-tier approval gating (Auto-execute, Notify & Execute, Owner Approval Required). Approvals generate review requests.
+- **6. Multi-Agent Orchestration:** Agent collaboration via role-based routing (e.g. Sales routing billing inquiries to Accounting).
+- **7. Multi-Tenant Isolation & Security Model:** Designed primarily for **single-company self-hosting**. Lacks cryptographic multi-tenant secret encryption, tenant-isolated outbox queues, and multi-tenant quotas.
+- **8. Workflow Durability, Retries, & Idempotency:** Basic database task tracking; lacks formal transactional outbox with monotonic fencing.
+- **9. Observability & Tracing:** Application logging and execution records.
+- **10. Extensibility & Custom Components:** High in Python.
+- **11. Deployment Model & Complexity:** Runs on FastAPI, PostgreSQL with pgvector, and Redis. If optional Neo4j Graph RAG is deployed, it adds a Java container requiring 2+ GB RAM.
+- **12. Licensing & Constraints:** MIT License (open source).
+- **13. What Can Realistically Be Adapted:**
+  - **Role-Based Digital Employee Persona Taxonomy** (aligns directly with our Stage 5.1 `EmployeePersona` schema).
+  - Multi-tier risk gating (Safe inquiry vs Sensitive write vs Financial transaction).
 
 ---
 
-## 8. Potential Patterns to Adopt or Adapt
+## 4. Comprehensive 13-Dimension Comparative Matrix
 
-### Pattern 1: Checkpointed Interrupt-and-Resume Protocol (from LangGraph)
-- **Concept:** Model the approval lifecycle as a formal state machine checkpoint rather than loosely-coupled database columns.
-- **Application:** When an action requires approval, agent execution is interrupted, and the execution state is saved in a durable checkpoint. Upon owner verification, the checkpoint resumes cleanly within the worker.
-
-### Pattern 2: Fail-Closed Reconciliation for External Side Effects (from n8n)
-- **Concept:** When dispatching external network actions, commit the attempt timestamp in an autonomous pre-transaction before opening the network socket.
-- **Application:** If the connection drops or times out, transition the state directly to `"reconciliation_required"` and require provider verification before any retry.
-
-### Pattern 3: Pre-Invocation Action Policies (from Microsoft Agent Framework)
-- **Concept:** Enforce policy contracts as pipeline middleware before database sessions or tool code are invoked.
-- **Application:** Move `ActionPolicy` evaluation into a dedicated middleware layer that validates permissions, rate limits, and approval requirements before `ToolExecutor` opens the database session.
-
-### Pattern 4: Reflective Procedure Extraction (from Memento-Skills)
-- **Concept:** Store reusable operational procedures as structured Markdown documents rather than hardcoding business logic in Python code.
-- **Application:** Allow [`OwnerInquiryService`](file:///d:/AI-Employee-Platform/packages/services/owner_inquiry_service.py) and [`InterviewService`](file:///d:/AI-Employee-Platform/packages/services/interview_service.py) to synthesize owner instructions into verified Standard Operating Procedure (SOP) knowledge units.
-
----
-
-## 9. Risks and Trade-offs
-
-1. **The Dependency Bloat Trap:**
-   - *Risk:* Pulling in full framework distributions (e.g. installing `langgraph` or deploying `dify`) would bloat dependencies and increase memory footprint.
-   - *Mitigation:* **Zero external framework dependencies.** Adopt only the *architectural patterns* natively within our existing SQLAlchemy 2.0 and FastAPI codebase.
-2. **Operational Cost on Low-Resource VPS:**
-   - *Risk:* Heavy multi-service stacks (Dify, Neo4j) exceed standard $10-20/month VPS budgets.
-   - *Mitigation:* Keep our stack strictly centered on PostgreSQL 17 (relational + JSONB + pgvector) and Redis 7.
-3. **Premature Multi-Agent Complexity:**
-   - *Risk:* Introducing complex multi-agent debates adds latency, token costs, and unpredictability without improving customer service accuracy.
-   - *Mitigation:* Maintain deterministic, single-agent execution with grounded fact retrieval and human owner escalation.
+| Evaluation Dimension | Memento-Skills | LangGraph | Microsoft Agent FW | Dify | n8n | RagLeap Core | AI-Employee-Platform (Current Reality) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **1. Core Architecture** | Reflective skill trial/error | Cyclic StateGraph | Semantic Kernel + AutoGen actors | Visual DAG compiled to Celery | Visual Node.js workflow DAG | FastAPI role-based agents | Layered Modular Service Pipeline (FastAPI) |
+| **2. State Management** | Ephemeral task run | Checkpointed super-steps | Context variables / Actor queues | DB Conversation / Celery tasks | PostgreSQL Execution state | DB Task & Step models | Relational DB + Redis task coordination |
+| **3. Knowledge Retrieval** | Trajectory / Skill store | StateStore / Semantic Key-Value | Semantic Memory connectors | Built-in Dataset & Vector hybrid | Memory & Vector nodes | Optional Neo4j Graph + pgvector | `FactService` (JSONB topic hierarchy) |
+| **4. Tool Integration** | Stateful Markdown SOPs & Tools | Python functions / Tools | Typed Kernel Plugins / MCP | OpenAPI tools & Code nodes | 400+ pre-built API nodes | Tool contracts & Risk levels | `ToolRegistry` (15 built-in tools) |
+| **5. Human-in-the-Loop** | Weak (LLM Judge) | **First-class `interrupt()`** | Invocation Filter pipeline | Primitive prompt nodes | **Wait for Webhook / Approval** | Multi-tier approval thresholds | Base29 OTP challenge + Outbox execution |
+| **6. Multi-Agent** | Hierarchical synthesis | Subgraphs / Swarms | Conversational handoffs | Agent assistant nodes | Sub-workflow routing | Role-based routing | Stage 5.1 Persona Schema (Runtime pending) |
+| **7. Multi-Tenancy** | None (Single-user) | Tenant-Agnostic | Entra ID (Azure only) | Multi-workspace SaaS | Single-org (SUL commercial ban) | Single-company focus | **Native Multi-Tenant Isolation (JWT + DB FKs)** |
+| **8. External Idempotency**| None | At-Least-Once (Unsafe HTTP) | Connector retry policies | Celery task retry | Failed node retry | Basic status tracking | **Transactional Outbox (`FOR UPDATE SKIP LOCKED`)** |
+| **9. Observability** | Execution trace logs | LangSmith (Proprietary) | **Native OpenTelemetry** | Langfuse / Execution logs | Visual step-by-step UI | Application logging | Logging + `audit_events` (Partial bypass) |
+| **10. Extensibility** | Python files | Python nodes & edges | C# / Python plugins | Custom tools & providers | Custom community nodes | Python classes | Real tools in `packages/tools/` |
+| **11. VPS Footprint** | Low (Python only) | Low (Python core) | Moderate (Python runtime) | **Heavy (8–9 containers, 4–8GB)** | Medium (Node.js + Postgres) | Medium (FastAPI; optional Neo4j +2GB) | **Lean (1 API + 1 DB + 1 Redis on 2-4GB VPS)** |
+| **12. Licensing Model** | Open Source (MIT) | MIT (Cloud is proprietary) | MIT (Open source) | Dify License (Commercial limits) | **SUL (Commercial SaaS Ban)** | MIT (Open source) | Proprietary Commercial Codebase |
+| **13. Adaptation Verdict** | Adapt SOP pattern | **Adapt Checkpoint Pattern** | **Adapt Pre-Invocation Filters** | Defer Sandbox container | Defer (SUL restriction) | **Adapt Persona Role Taxonomy** | **Retain Core Architecture; selectively adopt patterns** |
 
 ---
 
-## 10. Open Questions for Future Evaluation
+## 5. Mapping Against Actual AI-Employee-Platform Architecture
 
-1. **Question 1 (Savepoint vs. Two-Phase Execution):** Should tool execution occur within the worker's outer transaction using `session.begin_nested()`, or should the outbox claim commit first, followed by an isolated execution transaction?
-2. **Question 2 (Graph RAG Utility):** Does relational PostgreSQL JSONB in [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) sufficiently represent complex tenant hierarchies, or will Graph RAG become necessary for large retail enterprise tenants?
-3. **Question 3 (External Provider Probing):** Whether external messaging providers (WhatsApp Cloud API, Telegram Bot API) support deterministic idempotency keys or message status lookup queries to enable automated retry reconciliation remains unverified by empirical tests in this repository and is strictly classified as `INVESTIGATE` / `UNVERIFIED`.
+```mermaid
+flowchart TD
+    subgraph Ingestion ["Omni-Channel Ingestion (Fully Functional)"]
+        TG["Telegram Connector"]
+        WA["WhatsApp Cloud API"]
+        WEB["Webhook Ingestion"]
+    end
+
+    subgraph Boundaries ["Multi-Tenant Boundary & Security (Strictly Enforced)"]
+        JWT["JWT Tenant Scoping (tenant_id)"]
+        AES["AES-256-GCM Secrets Encryption"]
+    end
+
+    subgraph Intelligence ["Grounded Intelligence Layer (Fully Functional)"]
+        Fact["FactService (SSOT Business Truth)"]
+        Inq["OwnerInquiryService (HITL Unknown Facts)"]
+        Engine["ConversationalAgentEngine (Context Retriever)"]
+    end
+
+    subgraph ActionGating ["Action Execution & Human-in-the-Loop (Partially Calibrated)"]
+        AppSvc["ApprovalService (HMAC Base29 Challenge)"]
+        Outbox["Transactional Outbox (uq_outbox_tenant_approval_execution)"]
+        Worker["OutboxWorker (_handle_approval_action_execution)"]
+        Tools["ToolRegistry (15 Real Tools) & ToolExecutor.handlers"]
+    end
+
+    subgraph Deficiencies ["Confirmed Platform Gaps & Limitations (Active Constraints)"]
+        Sched["G-1: Campaign Scheduler (No background loop in main.py)"]
+        Cont["G-2: Multi-Batch Continuation (Stalls after batch 1)"]
+        RBAC["G-5: Campaign API RBAC (Missing require_roles)"]
+        AtLeastOnce["External Idempotency Risk (At-least-once on mid-crash recovery)"]
+        PolicyBypass["Explicit-Deny Policy Bypass (Unresolved Policy Question)"]
+        AuditBypass["Audit/Tracing Bypass (Direct handler call skips audit_events)"]
+    end
+
+    Ingestion --> Boundaries
+    Boundaries --> Intelligence
+    Intelligence --> ActionGating
+    ActionGating -.-> Deficiencies
+```
+
+### Detailed Capability Mapping:
+
+| Architectural Component | Current Platform Implementation | Classification | Evidence & Real Status |
+| :--- | :--- | :---: | :--- |
+| **Multi-Tenant Boundary Isolation** | Foreign keys to `tenants.id`, JWT claims, AES-256-GCM encrypted secrets | **Already implemented and verified** | Strict tenant scoping across database queries. PostgreSQL composite foreign key `fk_outbox_events_approval_composite` strictly prevents cross-tenant outbox execution. |
+| **Conversational Runtime** | [`ConversationalAgentEngine`](file:///d:/AI-Employee-Platform/packages/services/conversational_agent_engine.py), Arabic normalization, context retriever | **Already implemented and verified** | Ingests omni-channel messages, matches intent, queries facts, and invokes tools within tenant boundaries. |
+| **Fact & Knowledge Retrieval** | [`FactService`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py) with structured topic slugs, public/private visibility, and TTL | **Already implemented and verified** | Deterministic factual grounding prevents model hallucinations on business terms. |
+| **Human-in-the-Loop Inquiry** | [`OwnerInquiryService`](file:///d:/AI-Employee-Platform/packages/services/owner_inquiry_service.py) | **Already implemented and verified** | Normalizes owner questions, dispatches alerts to owner via Telegram/WhatsApp, and resolves waiting customer conversations. |
+| **Approval Challenge Verification** | [`ApprovalService.verify_and_approve_challenge`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py) | **Already implemented and verified** | Generates Base29 6-char OTP, verifies HMAC-SHA256 signature, matches canonical SHA-256 payload hash, and enqueues Outbox event. |
+| **Approval Action Execution** | [`OutboxWorker._handle_approval_action_execution`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py) | **Repaired (`CLOSED`) / Safety: `CONDITIONALLY READY`** | Method relocated inside `class OutboxWorker`. Dispatches to `tool_executor.handlers` with `ToolExecutionContext`. Results recorded atomically via `ApprovalService.record_execution_result`. Bounded by at-least-once external semantics. |
+| **Tool Registry & Execution** | [`ToolRegistry`](file:///d:/AI-Employee-Platform/packages/tools/registry.py) with 15 built-in tools; [`ToolExecutor`](file:///d:/AI-Employee-Platform/packages/tools/executor.py) | **Already implemented and verified** | Tools execute with tenant context isolation and parameter validation. |
+| **Multi-Agent Persona Bindings** | `EmployeePersona` table, `Agent.persona_id`, `Channel.agent_id` (Stage 5.1) | **Stage 5.1 Schema Committed; Stage 5.2 Runtime Wiring Not Started** | Commit `e6f89c54...` implemented migration `5a1b2c3d4e5f`, domain models, and unit tests (all passing). Zero runtime logic in `packages/services/` consumes them yet. |
+| **Campaign Scheduler** | [`CampaignService.schedule_campaign`](file:///d:/AI-Employee-Platform/packages/services/campaign_service.py) | **Confirmed Gap (G-1)** | Sets `status = 'scheduled'`, but zero background polling thread exists in `apps/agent/main.py`. |
+| **Multi-Batch Campaign Continuation** | [`CampaignService.dispatch_batch`](file:///d:/AI-Employee-Platform/packages/services/campaign_service.py) | **Confirmed Gap (G-2)** | Stalls after the first 50 recipients; no self-chaining continuation outbox event. |
+| **Campaign API RBAC** | [`apps/agent/api/v1/campaigns.py`](file:///d:/AI-Employee-Platform/apps/agent/api/v1/campaigns.py) | **Confirmed Gap (G-5)** | Endpoints lack role-based access control guards (`require_roles`). |
+| **Proactive Workflow Engine** | [`ProactiveWorkflowService`](file:///d:/AI-Employee-Platform/packages/services/proactive_workflow_service.py) | **Present but dormant** | Fully coded and tested in isolation, but `apps/agent/main.py` has no background thread running it. |
 
 ---
 
-## 11. Preliminary Findings
+## 6. Confirmed Gaps Versus Assumptions
 
-1. **Architecture Validation:** The core architecture of `AI-Employee-Platform` (Transactional Outbox + Decoupled Multi-Tenancy + FactService + Approval Challenge) is structurally sound for our multi-tenant requirements.
-2. **Implementation Debt:** The defects identified in CR-05-01 are **implementation bugs** (indentation outside class scope, stubbed execution bypass, omitted generation increment query, and missing savepoint error isolation) rather than conceptual flaws.
-3. **Targeted Evolution:** By adapting LangGraph's interrupt/checkpoint pattern and n8n's external reconciliation semantics into our native code, `AI-Employee-Platform` can achieve high resilience without introducing heavy third-party framework dependencies.
-
-> [!NOTE]
-> All pattern recommendations in this review represent preliminary architectural preferences only and carry zero implementation authorization, zero database schema commitments, and zero Phase 5 start.
+| # | Specific Architectural Claim | Evidence in Codebase | Reality vs Assumption |
+| :---: | :--- | :--- | :--- |
+| **G-1** | Scheduled campaigns run automatically in background. | [`apps/agent/main.py:87-125`](file:///d:/AI-Employee-Platform/apps/agent/main.py#L87-L125) | **GAP CONFIRMED.** `apps/agent/main.py` starts `OutboxWorker` but has no scheduler loop polling `Campaign.status == 'scheduled'`. |
+| **G-2** | Campaigns handle large audiences across multiple batches. | [`packages/services/campaign_service.py:165-220`](file:///d:/AI-Employee-Platform/packages/services/campaign_service.py#L165-L220) | **GAP CONFIRMED.** Batch 1 dispatches up to 50 recipients. When batch 1 completes, no continuation event is enqueued. Campaigns with >50 recipients stall permanently in `running`. |
+| **G-3** | Campaign dispatch respects channel rate limits. | [`packages/services/channel_service.py:85-120`](file:///d:/AI-Employee-Platform/packages/services/channel_service.py#L85-L120) | **GAP CONFIRMED.** Rate limiting is rudimentary; burst dispatches risk triggering provider spam blocks. |
+| **G-4** | Campaign events write to unified audit log. | [`packages/services/campaign_service.py:140-310`](file:///d:/AI-Employee-Platform/packages/services/campaign_service.py#L140-L310) | **GAP CONFIRMED.** Status changes are recorded on `campaigns` table, but no structured rows are written to `audit_events`. |
+| **G-5** | Campaign management endpoints enforce RBAC. | [`apps/agent/api/v1/campaigns.py:125-410`](file:///d:/AI-Employee-Platform/apps/agent/api/v1/campaigns.py#L125-L410) | **GAP CONFIRMED.** Endpoints require authenticated tenant context, but do not enforce `require_roles(["tenant_owner", "tenant_admin"])`. Any tenant user can launch campaigns. |
+| **G-6** | Conversational agent can query and report on campaigns. | [`packages/services/conversational_agent_engine.py`](file:///d:/AI-Employee-Platform/packages/services/conversational_agent_engine.py) | **GAP CONFIRMED.** Engine lacks campaign lookup tools. |
+| **G-7** | Approval execution guarantees exactly-once side effects. | [`packages/services/outbox_worker.py:985, 1055, 1074`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L985) | **GAP CONFIRMED.** Operates under **at-least-once semantics**. If worker crashes mid-handler or before local result commit, stale recovery resets event to `pending` and re-runs the handler, risking duplicate external side effects. |
+| **G-8** | Approval execution enforces tenant explicit-deny policies. | [`packages/services/outbox_worker.py:1072-1085`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1072-L1085) | **GAP CONFIRMED.** Approval dispatch calls `handler(**exec_params)` directly, bypassing `ToolExecutor.execute()` and `permission_service.has_tenant_explicit_deny()`. Unresolved policy question. |
+| **G-9** | Approval execution writes to unified audit and tracing. | [`packages/services/outbox_worker.py:1088-1104`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1088-L1104) | **GAP CONFIRMED.** Updates `approvals` and `outbox_events`, but bypasses `audit_events` and `execution_traces`. |
 
 ---
 
-## 12. References & Official Sources
+## 7. Architectural Recommendations (Ranked by Value, Risk, and Complexity)
+
+> [!IMPORTANT]
+> **PROPOSALS ONLY — NO ROADMAP COMMITMENT:**  
+> The architectural patterns evaluated below (such as `task_checkpoints`, Model Context Protocol integration, structured SOPs, and pre-invocation policy interceptors) are **preliminary technical proposals submitted for owner review**.  
+> They do **NOT** constitute roadmap commitments or approved implementation tasks until the project owner formally reviews, approves, and prioritizes them.
+
+```
+[Recommendation Prioritization Matrix]
+High Value, Low Complexity   --> Rank 1: Pre-Invocation Policy Interceptor
+High Value, Moderate Complexity --> Rank 2: Checkpointed Task Interrupt / Resume
+High Value, High Complexity  --> Rank 3: Phase 4D Continuation & Scheduler Loop
+Moderate Value, Low Risk     --> Rank 4: Structured Procedural Skills (SOPs in Facts)
+```
+
+### Rank 1: Pre-Invocation Policy Interceptor (Inspired by Microsoft Agent Framework)
+- **Concept:** Implement a formal pipeline interceptor in `ToolExecutor` that evaluates `ActionPolicy` rules (tenant RBAC, approval thresholds, rate limits, explicit deny) in memory before executing tools.
+- **Value:** **High.** Centralizes security enforcement and resolves the explicit-deny bypass gap.
+- **Risk:** **Low.** Pure Python middleware within existing classes.
+- **Complexity:** **Low (1–2 days).** Zero database schema changes.
+
+### Rank 2: Checkpointed Task Interrupt / Resume (Inspired by LangGraph)
+- **Concept:** Replace ad-hoc status polling for approvals with a formal task suspension/checkpoint mechanism. Long-running tasks that hit an approval boundary serialize state to a `task_checkpoints` table; upon owner approval via Base29 OTP, the task resumes from the exact interrupted step.
+- **Value:** **High.** Robust human-in-the-loop task execution.
+- **Risk:** **Moderate.** Requires serializable step state dictionary.
+- **Complexity:** **Moderate (3–4 days).** Requires `task_checkpoints` migration and versioned state serializers.
+
+### Rank 3: Close Phase 4D Gaps (Harden Campaign Continuation & Scheduler)
+- **Concept:** Complete Phase 4D before starting Stage 5.2. Add background scheduler thread in `apps/agent/main.py` (G-1), implement self-chaining `dispatch_campaign_batch` continuation events in Outbox (G-2), and add `require_roles` to campaign API routes (G-5).
+- **Value:** **High.** Fulfills core platform promise of reliable outbound campaigns.
+- **Risk:** **Moderate.** Interacts with background workers.
+- **Complexity:** **Moderate (3–5 days).** Pure backend logic; zero external package dependencies.
+
+### Rank 4: Structured Procedural Skills in `FactService` (Inspired by Memento-Skills)
+- **Concept:** Pivot agent capability expansion away from dangerous raw Python code generation toward structured Standard Operating Procedures (SOPs) stored as markdown/JSON in `FactService`.
+- **Value:** **Moderate.** Enables digital employees to learn and execute compound multi-step business procedures safely.
+- **Risk:** **Low.** Zero RCE risk; zero container sandboxing required.
+- **Complexity:** **Low (2–3 days).** Utilizes existing `FactService` schema.
+
+### Rank 5: Model Context Protocol (MCP) Client (Inspired by Open Standard)
+- **Concept:** Build an async MCP client inside `ToolRegistry` allowing tenants to connect standardized third-party tool servers (Google Drive, Slack, CRM).
+- **Value:** **Moderate to High.** Expands tool ecosystem without custom code.
+- **Risk:** **Moderate.** Network latency and external tool reliability.
+- **Complexity:** **Moderate (4–6 days).** Defer to post-Phase 5.
+
+---
+
+## 8. Sources and Verification Notes
 
 1. **Memento-Skills:**
-   - Wang et al., *"Memento-Skills: Let Agents Design Agents"*, arXiv:2603.18743, March 2026.
-   - GitHub Repository: [Memento-Teams/Memento-Skills](https://github.com/Memento-Teams/Memento-Skills) (Accessed October 2026).
+   - Wang et al., *"Memento-Skills: Let Agents Design Agents"*, arXiv:2603.18743 (March 2026).
+   - GitHub Repository: [Memento-Teams/Memento-Skills](https://github.com/Memento-Teams/Memento-Skills).
 2. **LangGraph:**
-   - LangChain AI, *LangGraph Documentation & Architecture Guide*, [https://langchain-ai.github.io/langgraph/](https://langchain-ai.github.io/langgraph/) (Accessed October 2026).
+   - LangChain AI, *LangGraph Concepts: Persistence, Checkpoints & Human-in-the-Loop*, [https://langchain-ai.github.io/langgraph/concepts/persistence/](https://langchain-ai.github.io/langgraph/concepts/persistence/).
    - GitHub Repository: [langchain-ai/langgraph](https://github.com/langchain-ai/langgraph).
 3. **Microsoft Agent Framework:**
-   - Microsoft Learn, *Semantic Kernel & AutoGen Convergence Documentation*, [https://learn.microsoft.com/semantic-kernel/](https://learn.microsoft.com/semantic-kernel/) (Accessed October 2026).
-   - GitHub Repository: [microsoft/semantic-kernel](https://github.com/microsoft/semantic-kernel) & [microsoft/autogen](https://github.com/microsoft/autogen).
-4. **Dify:**
-   - Dify AI, *Dify Enterprise Architecture & Orchestration Engine*, [https://docs.dify.ai/](https://docs.dify.ai/) (Accessed October 2026).
-   - GitHub Repository: [langgenius/dify](https://github.com/langgenius/dify).
+   - Microsoft Learn, *Semantic Kernel Architecture & Middleware Pipeline*, [https://learn.microsoft.com/semantic-kernel/](https://learn.microsoft.com/semantic-kernel/).
+   - GitHub Repositories: [microsoft/semantic-kernel](https://github.com/microsoft/semantic-kernel) & [microsoft/autogen](https://github.com/microsoft/autogen).
+4. **Dify & Dify-Sandbox:**
+   - Dify Documentation, *Architecture & Code Sandbox Execution Engine*, [https://docs.dify.ai/](https://docs.dify.ai/).
+   - GitHub Repositories: [langgenius/dify](https://github.com/langgenius/dify) & [langgenius/dify-sandbox](https://github.com/langgenius/dify-sandbox).
 5. **n8n:**
-   - n8n.io, *n8n Documentation, Execution Architecture & Human-in-the-Loop Nodes*, [https://docs.n8n.io/](https://docs.n8n.io/) (Accessed October 2026).
+   - n8n.io, *Sustainable Use License (SUL) Terms & Commercial Embedding Policies*, [https://n8n.io/legal/sustainable-use-license/](https://n8n.io/legal/sustainable-use-license/).
    - GitHub Repository: [n8n-io/n8n](https://github.com/n8n-io/n8n).
 6. **RagLeap Core:**
-   - RagLeap, *RagLeap Core: Autonomous AI Employees Platform*, [https://ragleap.com/docs](https://ragleap.com/docs) (Accessed October 2026).
+   - RagLeap Documentation, *Autonomous AI Employees & Graph RAG Architecture*, [https://ragleap.com/docs](https://ragleap.com/docs).
    - GitHub Repository: [ragleap/ragleap-core](https://github.com/ragleap/ragleap-core).
+7. **AI-Employee-Platform Physical Codebase:**
+   - Conversational Engine: [`packages/services/conversational_agent_engine.py`](file:///d:/AI-Employee-Platform/packages/services/conversational_agent_engine.py).
+   - Knowledge & Facts: [`packages/services/fact_service.py`](file:///d:/AI-Employee-Platform/packages/services/fact_service.py).
+   - Human-in-the-Loop Inquiry: [`packages/services/owner_inquiry_service.py`](file:///d:/AI-Employee-Platform/packages/services/owner_inquiry_service.py).
+   - Approval Challenge Service: [`packages/services/approval_service.py`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py).
+   - Outbox Worker & Repaired Execution: [`packages/services/outbox_worker.py`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py).
+   - Proactive Engine: [`packages/services/proactive_workflow_service.py`](file:///d:/AI-Employee-Platform/packages/services/proactive_workflow_service.py).
+   - Tool Execution & Registry: [`packages/tools/registry.py`](file:///d:/AI-Employee-Platform/packages/tools/registry.py) & [`packages/tools/executor.py`](file:///d:/AI-Employee-Platform/packages/tools/executor.py).
+   - Stage 5.1 Persona Schema: [`packages/models/domain.py:47-100`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L47-L100).
+   - Background Lifespan: [`apps/agent/main.py:87-125`](file:///d:/AI-Employee-Platform/apps/agent/main.py#L87-L125).
+
+---
+
+## 9. Explicit List of Unresolved Questions
+
+These are open product, architectural, and governance decisions requiring explicit owner determination before defining Phase 5:
+
+1. **Unresolved Policy Question on Approvals (Explicit Deny vs Owner OTP):**
+   When a tenant owner verifies an approval challenge with an HMAC-SHA256 OTP token, does that cryptographic authorization **supersede** tenant explicit-deny policies, or must `permission_service.has_tenant_explicit_deny()` evaluate and fail-closed even against approved actions?
+2. **Unresolved Roadmap Sequencing Decision:**
+   - *Option A (Harden Phase 4D First - Recommended):* Resolve campaign scheduler loop (G-1), multi-batch continuation (G-2), and campaign RBAC (G-5) before starting Stage 5.2.
+   - *Option B (Proceed to Stage 5.2 in Parallel):* Begin Stage 5.2 runtime persona wiring while leaving campaign scheduler hardening as an operational backlog item.
+3. **Unresolved Dynamic Capability Model:**
+   - *Option A (Structured SOPs in Facts - Recommended):* Allow agents to accumulate multi-step procedural knowledge in `FactService` without runtime code generation.
+   - *Option B (Containerized Code Sandbox):* Invest in container sandboxing (`dify-sandbox` style) to execute synthesized Python code.
+4. **Unresolved Unified Audit Logging for Approvals:**
+   Should asynchronous approval executions write separate audit entries into the `audit_events` and `execution_traces` tables in addition to updating `approvals` and `outbox_events`?
+
+---
+*End of Final Evidence-Based Comparative Architecture Review. Submitted for Owner Review.*
