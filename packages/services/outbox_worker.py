@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 import threading
 import time
@@ -116,6 +116,7 @@ class OutboxWorker:
         session_factory: Callable[[], Session] = SessionLocal,
         ai_provider: AIProvider | None = None,
         channel_service: Any = None,
+        tool_executor: Any = None,
     ):
         self.worker_id = worker_id or f"worker-{uuid4().hex[:8]}"
         self.tenant_id = tenant_id
@@ -128,6 +129,7 @@ class OutboxWorker:
         self.session_factory = session_factory
         self.ai_provider = ai_provider
         self.channel_service = channel_service
+        self.tool_executor = tool_executor
 
         self._stop_event = threading.Event()
         self._is_running = False
@@ -888,6 +890,219 @@ class OutboxWorker:
 
         return processed_count
 
+    def _handle_approval_action_execution(self, session: Session, event: OutboxEvent) -> bool:
+        """
+        CR-05-01 / Phase 4D: Processes an approved action execution event with strict fencing,
+        payload hash verification, provider idempotency window checks, real tool execution
+        via ToolExecutor, and atomic result recording.
+        """
+        from packages.services.approval_service import ApprovalService
+        from packages.models.domain import Approval
+        from packages.tools.contract import ToolExecutionContext
+
+        tenant_id = event.tenant_id
+        approval_id = event.approval_id
+        if not approval_id and event.payload:
+            app_id_str = event.payload.get("approval_id")
+            if app_id_str:
+                try:
+                    approval_id = UUID(str(app_id_str))
+                except Exception:
+                    pass
+
+        if not approval_id:
+            logger.error("Outbox event %s of type approval_action_execution lacks approval_id", event.id)
+            OutboxService(session).mark_failed(event.id, "Missing approval_id", is_transient=False)
+            session.commit()
+            return False
+
+        # 1. Load approval strictly within tenant scope with row lock
+        approval = session.scalar(
+            select(Approval)
+            .where(Approval.id == approval_id, Approval.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        if not approval:
+            cross_tenant = session.scalar(select(Approval).where(Approval.id == approval_id))
+            if cross_tenant is not None:
+                logger.critical(
+                    "Security violation: Outbox event %s for tenant %s attempted to execute foreign approval %s (belongs to tenant %s)",
+                    event.id, tenant_id, approval_id, cross_tenant.tenant_id,
+                )
+            else:
+                logger.error("Approval %s not found for outbox event %s", approval_id, event.id)
+            OutboxService(session).mark_failed(event.id, "Approval record not found or cross-tenant", is_transient=False)
+            session.commit()
+            return False
+
+        # 2. Idempotency Check: if already completed, do not re-execute!
+        if approval.execution_status in ("completed", "succeeded"):
+            logger.info("Approval %s is already completed. Skipping duplicate tool execution.", approval.id)
+            OutboxService(session).mark_completed(event.id)
+            session.commit()
+            return True
+
+        # 3. Status Check: must be in 'approved' status
+        if approval.status != "approved":
+            is_transient = (approval.status == "pending")
+            err_msg = f"Cannot execute approval in status '{approval.status}' (must be 'approved')"
+            logger.error("Approval %s: %s", approval.id, err_msg)
+            OutboxService(session).mark_failed(event.id, err_msg, is_transient=False)
+            session.commit()
+            return False
+
+        # 4. Conservative pre-send timestamping (written once, strictly immutable)
+        now = datetime.now(timezone.utc)
+        if event.first_external_attempt_at is None:
+            event.first_external_attempt_at = now
+            session.flush()
+
+        # 5. Payload Hash Verification
+        expected_hash = approval.payload_hash
+        event_payload = event.payload or {}
+        runtime_params = event_payload.get("parameters") or approval.parameters_json or {}
+        calc_hash = ApprovalService.compute_payload_hash(runtime_params)
+        if expected_hash and calc_hash != expected_hash:
+            err = "Payload hash mismatch during outbox execution (action parameters tampered)"
+            logger.error("Approval %s: %s", approval_id, err)
+            try:
+                ApprovalService(session).record_execution_result(
+                    tenant_id=tenant_id,
+                    approval_id=approval.id,
+                    outbox_event_id=event.id,
+                    claim_generation=event.claim_generation,
+                    is_success=False,
+                    error_message=err,
+                )
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                logger.warning("Failed to record hash mismatch failure: %s", e)
+            return False
+
+        # 6. Provider Idempotency Window Check
+        provider_window = timedelta(hours=24)
+        last_outcome = "confirmed_not_processed" if event.attempt_count > 0 else "confirmed_not_processed"
+        can_proceed, eval_status = ApprovalService.evaluate_retry_eligibility(
+            first_external_attempt_at=event.first_external_attempt_at,
+            provider_retention_window=provider_window,
+            last_outcome=last_outcome,
+            now=now,
+        )
+
+        if not can_proceed:
+            logger.warning(
+                "Approval %s execution cannot proceed automatically (status -> %s)",
+                approval_id, eval_status,
+            )
+            approval.execution_status = "reconciliation_required"
+            event.status = "reconciliation_required"
+            session.commit()
+            return False
+
+        # 7. Action Resolution
+        action_name = (approval.action or "").strip()
+        if not action_name:
+            err_msg = "Approval missing action name"
+            logger.error("Approval %s: %s", approval.id, err_msg)
+            OutboxService(session).mark_failed(event.id, err_msg, is_transient=False)
+            session.commit()
+            return False
+
+        clean_slug = action_name.lower()
+        if clean_slug.startswith("tools:"):
+            clean_slug = clean_slug[6:]
+        elif clean_slug.startswith("tool:"):
+            clean_slug = clean_slug[5:]
+
+        # 8. Resolve ToolExecutor and Handler
+        tool_executor = self.tool_executor
+        if tool_executor is None:
+            from packages.tools.registry import create_default_registry
+            from packages.tools.executor import ToolExecutor
+            registry = create_default_registry(session)
+            tool_executor = ToolExecutor(session)
+            registry.bind_to_executor(tool_executor, tenant_id=tenant_id)
+
+        handler = getattr(tool_executor, "handlers", {}).get(clean_slug)
+
+
+        if handler is None:
+            err_msg = f"No execution handler registered for approved action '{action_name}'"
+            logger.error("Approval %s: %s", approval.id, err_msg)
+            approval.execution_status = "executing"
+            session.flush()
+            session.commit()
+            try:
+                with self.session_factory() as err_session:
+                    app_svc = ApprovalService(err_session)
+                    app_svc.record_execution_result(
+                        tenant_id=tenant_id,
+                        approval_id=approval.id,
+                        outbox_event_id=event.id,
+                        claim_generation=event.claim_generation,
+                        is_success=False,
+                        error_message=err_msg,
+                    )
+                    err_session.commit()
+            except Exception as e:
+                logger.warning("Failed to record missing action handler failure: %s", e)
+            return False
+
+        # 9. Mark executing in short transaction
+        approval.execution_status = "executing"
+        session.flush()
+        session.commit()
+
+        # 10. Execute the Approved Tool
+        tool_output = None
+        exec_error = None
+        is_tool_success = False
+
+        exec_params = dict(runtime_params)
+        ctx = ToolExecutionContext(
+            tenant_id=tenant_id,
+            agent_id=approval.requested_by_agent_id,
+            task_id=approval.task_id,
+            actor_id=approval.decision_by_user_id,
+            idempotency_key=event.idempotency_key or approval.idempotency_key,
+        )
+        exec_params["_context"] = ctx
+
+        try:
+            try:
+                tool_output = handler(**exec_params)
+            except TypeError as te:
+                if "_context" in exec_params and "unexpected keyword argument '_context'" in str(te):
+                    exec_params.pop("_context", None)
+                    tool_output = handler(**exec_params)
+                else:
+                    raise
+            is_tool_success = True
+            logger.info("Successfully executed approved action '%s' for approval %s", action_name, approval.id)
+        except Exception as exc:
+            exec_error = str(exc)
+            is_tool_success = False
+            logger.error("Execution of approved action '%s' failed for approval %s: %s", action_name, approval.id, exc)
+
+        # 11. Record Execution Result Atomically
+        try:
+            with self.session_factory() as res_session:
+                app_svc = ApprovalService(res_session)
+                app_svc.record_execution_result(
+                    tenant_id=tenant_id,
+                    approval_id=approval.id,
+                    outbox_event_id=event.id,
+                    claim_generation=event.claim_generation,
+                    is_success=is_tool_success,
+                    error_message=exec_error if not is_tool_success else None,
+                )
+                res_session.commit()
+            return is_tool_success
+        except Exception as rec_err:
+            logger.critical("Failed to record execution result for approval %s: %s", approval.id, rec_err)
+            return False
+
     def run(self, max_iterations: int | None = None) -> None:
         """
         Continuously poll and process events until stopped or max_iterations reached.
@@ -924,124 +1139,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-
-
-    def _handle_approval_action_execution(self, session: Session, event: OutboxEvent) -> bool:
-        """
-        CR-05-01: Processes an approved action execution event with strict fencing,
-        payload hash verification, provider idempotency window checks, and atomic result recording.
-        """
-        from packages.services.approval_service import ApprovalService
-        from packages.models.domain import Approval
-
-        tenant_id = event.tenant_id
-        approval_id = event.approval_id
-        if not approval_id and event.payload:
-            app_id_str = event.payload.get("approval_id")
-            if app_id_str:
-                try:
-                    approval_id = UUID(str(app_id_str))
-                except Exception:
-                    pass
-
-        if not approval_id:
-            logger.error("Outbox event %s of type approval_action_execution lacks approval_id", event.id)
-            OutboxService(session).mark_failed(event.id, "Missing approval_id", is_transient=False)
-            session.commit()
-            return False
-
-        approval = session.scalar(
-            select(Approval).where(Approval.id == approval_id, Approval.tenant_id == tenant_id)
-        )
-        if not approval:
-            logger.error("Approval %s not found for outbox event %s", approval_id, event.id)
-            OutboxService(session).mark_failed(event.id, "Approval record not found", is_transient=False)
-            session.commit()
-            return False
-
-        # 1. Conservative pre-send timestamping (written once, strictly immutable)
-        now = datetime.now(timezone.utc)
-        if event.first_external_attempt_at is None:
-            event.first_external_attempt_at = now
-            session.flush()
-
-        # 2. Payload Hash Verification
-        expected_hash = approval.payload_hash
-        event_payload = event.payload or {}
-        runtime_params = event_payload.get("parameters") or {}
-        calc_hash = ApprovalService.compute_payload_hash(runtime_params)
-        if expected_hash and calc_hash != expected_hash:
-            err = "Payload hash mismatch during outbox execution (action parameters tampered)"
-            logger.error("Approval %s: %s", approval_id, err)
-            try:
-                ApprovalService(session).record_execution_result(
-                    tenant_id=tenant_id,
-                    approval_id=approval.id,
-                    outbox_event_id=event.id,
-                    claim_generation=event.claim_generation,
-                    is_success=False,
-                    error_message=err,
-                )
-                session.commit()
-            except Exception as e:
-                session.rollback()
-                logger.warning("Failed to record hash mismatch failure: %s", e)
-            return False
-
-        # 3. Provider Idempotency Window Check
-        # Default nominal window for internal platform actions is 24 hours
-        provider_window = timedelta(hours=24)
-        last_outcome = "confirmed_not_processed" if event.attempt_count > 0 else "confirmed_not_processed"
-        can_proceed, eval_status = ApprovalService.evaluate_retry_eligibility(
-            first_external_attempt_at=event.first_external_attempt_at,
-            provider_retention_window=provider_window,
-            last_outcome=last_outcome,
-            now=now,
-        )
-
-        if not can_proceed:
-            logger.warning(
-                "Approval %s execution cannot proceed automatically (status -> %s)",
-                approval_id, eval_status
-            )
-            approval.execution_status = "reconciliation_required"
-            event.status = "reconciliation_required"
-            session.commit()
-            return False
-
-        # 4. Mark executing in short transaction
-        approval.execution_status = "executing"
-        session.flush()
-        session.commit()
-
-        # 5. Execute action and record result atomically
-        try:
-            # Atomic result update using dedicated session
-            with self.session_factory() as res_session:
-                app_svc = ApprovalService(res_session)
-                app_svc.record_execution_result(
-                    tenant_id=tenant_id,
-                    approval_id=approval.id,
-                    outbox_event_id=event.id,
-                    claim_generation=event.claim_generation,
-                    is_success=True,
-                )
-                res_session.commit()
-            return True
-        except Exception as exc:
-            logger.error("Approval action execution error for %s: %s", approval_id, exc)
-            try:
-                with self.session_factory() as err_session:
-                    app_svc = ApprovalService(err_session)
-                    app_svc.record_execution_result(
-                        tenant_id=tenant_id,
-                        approval_id=approval.id,
-                        outbox_event_id=event.id,
-                        claim_generation=event.claim_generation,
-                        is_success=False,
-                        error_message=str(exc),
-                    )
-                    err_session.commit()
-            except Exception as rec_err:
-                logger.warning("Failed to record execution failure for %s: %s", approval_id, rec_err)
-            return False
