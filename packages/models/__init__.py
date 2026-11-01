@@ -2,6 +2,7 @@ from packages.models.tenant import Tenant
 from packages.models.domain import (
     User,
     Agent,
+    EmployeePersona,
     Capability,
     Tool,
     Integration,
@@ -37,6 +38,7 @@ __all__ = [
     "Tenant",
     "User",
     "Agent",
+    "EmployeePersona",
     "Capability",
     "Tool",
     "Integration",

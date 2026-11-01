@@ -44,6 +44,62 @@ class User(Base):
     )
 
 
+class EmployeePersona(Base):
+    __tablename__ = "employee_personas"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True
+    )  # NULL for global system templates; non-NULL for future custom tenant personas
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    slug: Mapped[str] = mapped_column(String(50), nullable=False)
+    role_type: Mapped[str] = mapped_column(String(50), nullable=False)  # support | sales | operations | accounting | etc.
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)  # Incremented on template changes
+
+    # Behavioral & Governance Configuration
+    tone_profile: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    system_instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    permitted_tool_categories: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    escalation_policy: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+    # Metadata & Flags
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
+    is_system_template: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_employee_personas_system_slug",
+            "slug",
+            unique=True,
+            postgresql_where=text("tenant_id IS NULL"),
+        ),
+        Index(
+            "uq_employee_personas_tenant_slug",
+            "tenant_id",
+            "slug",
+            unique=True,
+            postgresql_where=text("tenant_id IS NOT NULL"),
+        ),
+    )
+
+
 class Agent(Base):
     __tablename__ = "agents"
 
@@ -57,6 +113,17 @@ class Agent(Base):
     )
     status: Mapped[str] = mapped_column(
         String(50), nullable=False, default="active", server_default="active"
+    )
+    persona_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("employee_personas.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    persona_overrides: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
     )
     system_config: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
@@ -937,6 +1004,11 @@ class Channel(Base):
         server_default="active",
         index=True,
     )
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     config: Mapped[dict] = mapped_column(
         JSONB,
         nullable=False,
@@ -972,6 +1044,11 @@ class Conversation(Base):
     )
     channel_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("channels.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )

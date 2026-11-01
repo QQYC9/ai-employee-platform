@@ -3,70 +3,73 @@
 ### Role-Based Digital Employee Persona Contracts & Action Policy Guardrails
 
 > **STATUS: APPROVED ARCHITECTURAL SPECIFICATION — IMPLEMENTATION REQUIRES SEPARATE EXPLICIT AUTHORIZATION**
-> **Review Target:** Phase 5 Final Architectural Calibration & Safety Boundary Hardening
-> **Approved Architectural Decisions Baseline:** Decisions 1–20 Formally Approved by Project Owner (2026-11-01)
-> **Prior Delivered Documentation Commit:** `23e9f60781962b17d248061582c3ccf23bc5df9f`
-> **Current Repository HEAD Commit:** `de42151e9c6bbd556d7d16aa7441cc2786578c75`
+> **Review Target:** Phase 5 Final Architectural Calibration & Multi-Employee Architecture Realignment
+> **Architectural Decisions Baseline:** Decisions 1–20 Realigned with Multi-Employee Paradigm + Owner Calibration Directives (2026-11-01)
+> **Prior Delivered Commit:** `5b32ee341921a81acd69795a933d8ea34f5a2483`
 > **Application Source Snapshot Baseline:** `8803f3c634ca17f9bf79f7cce0f15b01dc0b7660` / `e3a1c4450215df1c4a0fdd8e77369352257efdc4` (verified identical in `packages/`, `apps/`, `infrastructure/`, `tests/`)
 > **Branch:** `checkpoint/phase-12-knowledge-base`
-> **Specification Revision Date:** 2026-11-01
-> **Governance Notice:** This document is the authoritative, approved architectural specification for Phase 5 Track A. It incorporates all 20 formal architectural decisions agreed upon with the project owner. **This document conveys ZERO authorization to write application code, create migrations, modify database state, or begin Phase 5 implementation.** Execution of Track A (Micro-Stages 5.1 through 5.5) remains strictly gated until the project owner provides the separate, explicit instruction: `"ابدأ تنفيذ Stage 5.1"`.
+> **Specification Revision Date:** 2026-11-01 (Multi-Employee Governance & Lifecycle Calibration)
+> **Governance Notice:** This document is the authoritative architectural specification for Phase 5 Track A. It reflects all approved architectural decisions, establishing the clean separation between Digital Employees (`Agent`) and Behavioral Contracts (`EmployeePersona`), enabling multiple independent digital employees per tenant, binding channels to specific agents, enforcing fail-closed unbound channel routing, paused agent silent ingestion, disabled agent strict halt, and engine-level AI silence on escalation. **This document conveys ZERO authorization to write application code, create migrations, modify database state, create commits, or begin Phase 5 implementation.** Execution of Track A (Micro-Stages 5.1 through 5.5) remains strictly gated until the project owner explicitly reviews this calibrated specification and issues the separate prompt: `"ابدأ تنفيذ Stage 5.1"`.
 
 ---
 
 ## 1. Executive Summary & Strategic Intent
 
-Following the completion of the Phase 4D Outbound Campaigns milestone, the forensic audit of CR-05-01 (Owner Approval Anti-Hijack), and the Stage 2 Comparative Architecture Review across six external agent systems (**Memento-Skills**, **LangGraph**, **Microsoft Agent Framework**, **Dify**, **n8n**, and **RagLeap Core**), this document establishes the definitive, approved architectural specification for **Phase 5**.
+Following the completion of the Phase 4D Outbound Campaigns milestone, the forensic audit of CR-05-01 (Owner Approval Anti-Hijack), the Stage 2 Comparative Architecture Review across external agent systems, and the **Phase 5 Read-Only Architecture Verification**, this document establishes the definitive, realigned architectural specification for **Phase 5**.
 
-### The Core Strategic Problem
-In the current codebase ([`packages/services/conversational_agent_engine.py:142-156`](file:///d:/AI-Employee-Platform/packages/services/conversational_agent_engine.py#L142-L156)), every tenant is provisioned with a generic agent instance. Agent identity is constructed dynamically via ad-hoc string formatting combining `tenant.employee_name` and `tenant.name`. There is no persisted, verifiable contract defining the digital employee's specific job role, behavioral dialect/tone, operational boundaries, permitted tool categories, or escalation thresholds.
+### The Core Strategic Problem: The Single-Agent Legacy Fallacy
+In the existing codebase ([`packages/services/conversational_agent_engine.py:142-156`](file:///d:/AI-Employee-Platform/packages/services/conversational_agent_engine.py#L142-L156)), every tenant is fundamentally constrained by a legacy single-agent assumption:
+1. **The Single-Name Monolith:** The engine dynamically formats agent identity using `tenant.employee_name` and `tenant.name`. A single string field on the tenant represents the entire workforce.
+2. **Table Bypass:** The database entity [`Agent` in `packages/models/domain.py:75`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L75) is completely bypassed during incoming message processing. `select(Agent)` is called zero times in the conversational chat path.
+3. **Missing Relationships:** Neither [`Channel`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L382) nor [`Conversation`](file:///d:/AI-Employee-Platform/packages/models/domain.py#L425) possesses an `agent_id` foreign key. Inbound traffic belongs vaguely to the tenant, not to a specific digital employee.
+4. **Persona vs. Employee Conflation:** Prior drafts attempted to bind `persona_id` directly to channels, effectively treating personas as costumes worn by a single generic bot, rather than establishing distinct, autonomous digital employees with independent lifecycles.
 
-Consequently:
-1. **Role Ambiguity:** The agent acts as an unconstrained generalist, risking conversational overreach regarding its business responsibilities.
-2. **Tool Scope Leakage:** Without pre-invocation role filters, all tenant-registered tools in [`packages/tools/registry.py`](file:///d:/AI-Employee-Platform/packages/tools/registry.py) are theoretically exposed to every incoming conversational context.
-3. **Prompt Brittleness:** Tone, dialect (e.g. Formal Saudi Corporate vs. Warm GCC Friendly), and operational constraints cannot be tailored per business vertical without modifying backend Python code.
+### Approved Solution: Clean Decoupling of Digital Employees & Behavioral Contracts
+Phase 5 resolves this architectural flaw by enforcing a clean, three-tier separation of concerns:
 
-### Approved Solution for Phase 5: Role-Based Digital Employee Persona Contract & Policy Guard
-Phase 5 adapts the **Role-Based Digital Employee Persona Contract** pattern (identified in RagLeap Core and prioritized in Decision Log Entry 05) and combines it with a **Pre-Invocation Action Policy Guard** evaluated centrally inside [`packages/services/decision_engine.py:DecisionEngine.decide`](file:///d:/AI-Employee-Platform/packages/services/decision_engine.py#L57).
-
-Phase 5 introduces a declarative, database-backed `EmployeePersona` schema and middleware layer that equips each digital employee with:
-- An explicit, immutable system template role specification (e.g., *Customer Care Specialist*, *Consultative Sales Consultant*, *Operations & Appointment Coordinator*).
-- Calibrated Arabic dialect and behavioral tone configurations structured declaratively (`tone_profile`).
-- Whitelisted tool categories evaluated *before* tool execution.
-- Deterministic escalation and refusal boundaries for inquiries exceeding the assigned persona's authority, backed by an **AI Silence Invariant**.
-- Grounded business fact precedence where confirmed enterprise facts always supersede prompt persona instructions.
+1. **Digital Employee (`Agent`):**
+   - The autonomous enterprise worker entity in the platform.
+   - Holds an immutable primary key (`id`), tenant association (`tenant_id`), distinct human-like professional name (`name`, e.g. "موظف الدعم الفني", "مستشار المبيعات"), operational role (`agent_type`, e.g. "support", "sales"), operational lifecycle state (`status: active | paused | disabled`), and an assigned behavioral contract (`persona_id`).
+   - Owns assigned communication channels (`Channel.agent_id`) and ongoing customer conversations (`Conversation.agent_id`).
+2. **Behavioral Contract (`EmployeePersona`):**
+   - The declarative, versioned, database-backed specification governing *how* a digital employee speaks, what tools it may invoke, and when it must escalate.
+   - Defines dialect and tone profiles (`tone_profile`), whitelisted tool categories (`permitted_tool_categories`), structured system prompts (`system_instructions`), and escalation rules.
+   - A persona NEVER executes actions itself; it acts as a subtractive behavioral filter on an active Digital Employee.
+3. **Multi-Employee Enterprise Workforce:**
+   - A single business tenant can employ, configure, and govern **multiple distinct Digital Employees** simultaneously (e.g. a Customer Care Specialist on Telegram, a Consultative Sales Consultant on WhatsApp, an Operations Coordinator on Web Chat, and a future Accounting Specialist).
+   - Each employee possesses independent lifecycle control: pausing the Sales Employee (`agent.status = 'paused'`) has zero impact on the active Support Employee.
 
 ### Decoupled Dual-Track Strategy
-To guarantee platform safety while CR-05-01 approval execution is decoupled:
-- **Track A (Safe Conversational Persona Delivery):** Actionable immediately in Phase 5 across Micro-Stages 5.1–5.5 upon explicit owner authorization. Delivers system persona templates, schema, canonical tool taxonomy, pre-invocation policy guard, prompt synthesizer, token budget measurement, and tenant-level overrides governance.
-- **Track B (Approved Sensitive Action Execution via Outbox):** Strictly **BLOCKED and quarantined** until a dedicated CR-05-01 remediation milestone resolves the missing outbox worker handler.
+To guarantee platform safety while CR-05-01 approval execution is quarantined:
+- **Track A (Safe Conversational Multi-Employee Delivery):** Actionable immediately in Phase 5 across Micro-Stages 5.1–5.5 upon explicit owner authorization. Delivers system persona templates, schema extensions for multi-agent routing (`Channel.agent_id`, `Conversation.agent_id`, `Agent.persona_id`), canonical tool taxonomy, pre-invocation policy guard in `DecisionEngine.decide`, prompt synthesizer, design-time token budget measurement, and engine-level AI silence.
+- **Track B (Approved Sensitive Action Execution via Outbox):** Strictly **BLOCKED and quarantined** until a dedicated CR-05-01 remediation milestone resolves the missing outbox worker handler and faked execution stub.
 
 ---
 
 ## 2. Context & Reconciliation with Prior Milestones
 
-This specification builds directly upon the established repository roadmap without reopening settled research:
+This specification builds directly upon established repository evidence:
 
-1. **Phase 4D Baseline:** Omni-channel connectors (Telegram, WhatsApp, Webhooks), Outbound Campaigns, and Lifecycle Management are implemented and verified across all existing regression test suites (`9/9` targeted campaign tests, `65/65` total regression suite passing).
-2. **CR-05-01 Forensic Reality & Defect Isolation:**
-   - **Approval Challenge Creation:** *Functional.* Base29 6-character OTP generation, HMAC-SHA256 signature hashing, and ephemeral code delivery operate as designed in `ApprovalService.create_approval_challenge`.
-   - **Approval Verification & Execution:** *Defective.* In [`packages/services/outbox_worker.py:929`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L929), the function `process_approval_action_execution` is defined outside `OutboxWorker`, receives raw `dict` payloads instead of an `OutboxEvent` instance, has zero registration in `OutboxWorker.process_pending_events()` at line 170, and is completely stubbed out.
-   - **Resolution:** By Decision 4, Track B workflows are strictly blocked. Owner approvals transition to `approved_execution_blocked`, zero outbox events are inserted for sensitive tool executions while the worker is broken, and zero fake success messages are returned.
-3. **Stage 2 Comparative Architecture Review:**
-   - Architectural lessons from **RagLeap Core** (subtractive constraint, declarative persona contract, prompt envelope budgets) and **LangGraph** (pre-tool policy filters) are fully integrated into Track A design.
+1. **Phase 4D Baseline:** Omni-channel connectors (Telegram, WhatsApp, Webhooks), Outbound Campaigns, and Lifecycle Management are implemented and verified (`9/9` targeted campaign tests, `65/65` total regression suite passing).
+2. **Test Environment Reality:** There are **zero real clients or production tenants** in the system. All existing tenants are test artifacts controlled by the project owner. Complex legacy migration heuristics (Decision 1) are therefore unnecessary and replaced with clean schema evolution and on-demand workforce provisioning.
+3. **CR-05-01 Forensic Reality & Defect Isolation:**
+   - In [`packages/services/outbox_worker.py:929`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L929), `_handle_approval_action_execution` is defined outside the class scope (after `if __name__ == "__main__": main()`).
+   - In [`packages/services/outbox_worker.py:1018-1030`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L1018-L1030), the code calls `app_svc.record_execution_result(..., is_success=True)` without ever invoking `ToolExecutor` or executing any physical tool handler.
+   - By Decision 4, Track B remains completely quarantined. No outbox events are inserted for sensitive actions, and no fake success messages are returned.
 
 ---
 
 ## 3. Section A: Phase Objective & User/Business Value
 
 ### A.1 Phase Objective
-To transition `AI-Employee-Platform` from a single-agent generic chatbot model to a **Structured Multi-Role Digital Workforce**, allowing business tenants to deploy, configure, and govern specialized AI Digital Employees with guaranteed behavioral boundaries, role-specific tool restrictions, and verified Arabic tone profiles.
+To transform `AI-Employee-Platform` from a single-agent generic chatbot into a **Multi-Role Autonomous Digital Workforce Platform**, enabling tenants to deploy, configure, and govern multiple specialized Digital Employees with guaranteed behavioral boundaries, role-specific tool restrictions, dedicated channel bindings, and verified Arabic tone profiles.
 
 ### A.2 Business & User Value
-- **Enterprise-Grade Role Specialization:** Business owners can assign specific job titles (e.g. "موظف خدمة العملاء والدعم الفني", "مستشار المبيعات التسويقي", "منسق العمليات والمواعيد") with calibrated behavioral profiles, preventing the AI from answering out-of-scope inquiries.
-- **Arabic Dialect & Tone Calibration:** Declarative tone configuration (`saudi_corporate`, `gcc_friendly`, `modern_standard_arabic`) with pre-validated Arabic prompt directives tailored to regional commerce.
-- **Pre-Invocation Defense & Sandboxing:** Prevents unauthorized tool execution at the decision bottleneck before any physical tool handler or backend service is reached.
-- **Truthful Identity & Fact Integrity:** Eliminates commercial hallucinations by enforcing strict precedence of confirmed facts (`FactService` / `BusinessBrain`) over persona style, and mandating transparent disclosure of AI employee identity.
+- **True Multi-Employee Workforce:** Tenants deploy distinct employees with unique identities, roles, and lifecycles without arbitrary count or role limitations.
+- **Dedicated Channel Routing:** Channels route traffic directly to specific digital employees (e.g. Support Telegram Bot routes to Support Agent; Sales WhatsApp Number routes to Sales Agent).
+- **Independent Lifecycle Management:** Owners can pause, reconfigure, or update one digital employee without affecting any other employee in the organization.
+- **Pre-Invocation Action Defense:** Prevents unauthorized tool execution at the decision bottleneck before any physical tool handler is invoked.
+- **Grounded Fact Truthfulness & Identity Honesty:** Eliminates commercial hallucinations by enforcing strict precedence of confirmed facts (`FactService` / `BusinessBrain`) over persona style, and mandating transparent disclosure of AI employee identity.
 
 ---
 
@@ -74,33 +77,46 @@ To transition `AI-Employee-Platform` from a single-agent generic chatbot model t
 
 ### B.1 In-Scope Deliverables
 1. **`EmployeePersona` Domain Model:** A tenant-isolated entity storing role type, tone configuration, permitted tool categories, escalation policies, and prompt templates, equipped with an explicit integer `version` field (Decision 18).
-2. **Standard System Persona Catalog:** Three pre-packaged, expert-tested system templates:
-   - `system_customer_support`: Specializes in FAQ resolution, operating hours, store locations, policy explanations, and product/conversation read inquiries.
-   - `system_sales_consultant`: Specializes in consultative selling, product comparisons, lead qualification, and customer profile registration (`customer_create_or_update`).
-   - `system_operations_coordinator`: Specializes in appointment coordination, internal task creation (`task_create`), document generation (`generate_document`), and order status inquiries.
-3. **Dual Persona Binding Hierarchy:** Support for persona binding at both the `Agent` and `Channel` levels, with resolution order: `Channel Override` > `Agent Base` > Tenant Default (Decision 5).
-4. **Canonical Tool Category Taxonomy:** Formal `category: ToolCategory` in `ToolContract` with explicit Read/Write classification and fail-closed registration in `ToolRegistry` (Decision 6).
-5. **Calibrated Track A Tool Permissions:** 10 read tools + 3 calibrated write tools (`customer_create_or_update`, `task_create`, `generate_document`), with `product_add_or_update` strictly locked to Owner/Admin only (Decision 2).
-6. **Pre-Invocation Action Policy Guard:** Centralized in `DecisionEngine.decide()` to block unpermitted tool calls before `ToolExecutor` is reached.
-7. **Persona Prompt Synthesizer:** Compiles role instructions, structured `tone_profile`, and whitelisted overrides into a compact prompt envelope strictly bounded at design-time to <= 250 tokens across every approved model (Decision 7).
-8. **In-Memory Worker Cache:** High-performance in-memory cache with configurable 60-second TTL and fail-closed PostgreSQL reload (Decision 8).
-9. **Granular Three-Tier Rollback:** Tenant-scoped soft rollback, global system kill-switch `ENABLE_PHASE5_PERSONAS`, and tested migration downgrade (Decision 13).
-10. **Enterprise RBAC Endpoints:** Tenant Admin management and Platform Superadmin template governance with strict tenant isolation (Decision 16).
+2. **Standard System Persona Catalog:** Pre-packaged, expert-tested system templates (`system_customer_support`, `system_sales_consultant`, `system_operations_coordinator`). This catalog serves as the baseline and is explicitly designed to expand to future roles (e.g. Accounting, HR).
+3. **Multi-Agent Schema Extensions:**
+   - `Agent.persona_id`: Foreign key pointing to `employee_personas.id`.
+   - `Agent.persona_overrides`: Whitelisted presentation customizations.
+   - `Channel.agent_id`: Foreign key pointing to `agents.id`, binding incoming channel traffic directly to a specific Digital Employee.
+   - `Conversation.agent_id`: Foreign key pointing to `agents.id`, recording which Digital Employee owns each conversation.
+4. **End-to-End Routing Pipeline:** Webhook ingestion preserves `agent_id` across `outbox_events` payload into `ConversationalAgentEngine.process_incoming_message`.
+5. **Fail-Closed Unbound Channel Enforcement:** Incoming messages on channels where `channel.agent_id IS NULL` fail closed: zero auto-selection of agents, zero LLM calls, zero replies to customers, explicit reason logged, and an owner alert enqueued.
+6. **Digital Employee Lifecycle Enforcement:**
+   - `active`: Process incoming messages normally.
+   - `paused`: Silent Ingestion — messages are persisted in conversation history, model is NOT invoked, zero automated reply is sent, human operator replies remain enabled.
+   - `disabled`: Strict halt of automated interaction; event is halted and state/reason recorded.
+7. **Engine-Level AI Silence:** Hard check at engine entry immediately halting automated AI response if `conversation.status == 'escalated'`.
+8. **Canonical Tool Category Taxonomy:** Formal `category: ToolCategory` in `ToolContract` with explicit Read/Write classification and fail-closed registration in `ToolRegistry` (Decision 6).
+9. **Calibrated Track A Tool Permissions:** 10 read tools + 3 calibrated write tools (`customer_create_or_update`, `task_create`, `generate_document`), with `product_add_or_update` strictly locked to Owner/Admin only (Decision 2).
+10. **Pre-Invocation Action Policy Guard:** Centralized in `DecisionEngine.decide()` to block unpermitted tool calls for the active `agent_id` before `ToolExecutor` is reached.
+11. **Persona Prompt Synthesizer:** Compiles role instructions, structured `tone_profile`, and whitelisted overrides into a compact prompt envelope strictly bounded at design-time to <= 250 tokens across every approved model (Decision 7).
+12. **In-Memory Worker Cache:** High-performance in-memory cache with configurable 60-second TTL and fail-closed PostgreSQL reload (Decision 8).
+13. **Granular Three-Tier Rollback:** Agent-scoped soft rollback, global system kill-switch `ENABLE_PHASE5_PERSONAS`, and tested migration downgrade (Decision 13).
+14. **Deprecation of `Tenant.employee_name`:** Formal deprecation plan transitioning all identity lookups to `agent.name`.
 
 ### B.2 Explicit Non-Goals (Out of Scope)
 1. **Track B Approved Sensitive Action Execution:** Zero execution of sensitive tools via Outbox until the CR-05-01 defect is resolved in a separate milestone (Decision 4).
-2. **Tenant-Facing Custom Persona CRUD APIs:** Track A delivers the 3 pre-packaged system templates + whitelisted overrides only; custom persona authoring APIs are deferred to Phase 6+ (Decision 11).
-3. **Dynamic / Runtime Token Counting:** No per-turn LLM tokenizer calls in the production chat loop; prompt envelope bounds (<= 250 tokens) are guaranteed at design-time and seed-time (Decision 7).
-4. **Automatic Owner Identity Guessing:** Zero heuristics or auto-inference of the first tenant owner (`Owner.first()`); unauthenticated or unverified requests fail closed (Decision 3).
-5. **Direct Redis Read-Path Coupling:** Persona caching in the prompt path relies on local in-memory TTL without mandatory Redis dependency (Decision 8).
+2. **Tenant-Facing Custom Persona CRUD APIs:** Track A delivers the pre-packaged system templates + whitelisted overrides only; custom persona authoring APIs are deferred to Phase 6+ (Decision 11).
+3. **Dynamic Automated Agent Handoff:** Live automatic transfer of ongoing conversations between agents on a shared channel is deferred to Phase 6+. `Conversation.agent_id` maintains strict continuity.
+4. **Hardcoded Employee Counts or Names:** Zero hardcoding of employee names (e.g. "سارة" or "فهد") or fixed numbers of employees during tenant creation. Workforce creation is driven on-demand.
+5. **Automatic Permission Inheritance for Future Roles:** Future roles (e.g. Accounting) do NOT automatically receive sensitive or financial permissions without explicit tool categorization and approval.
+6. **Dynamic / Runtime Token Counting:** No per-turn LLM tokenizer calls in the production chat loop; prompt envelope bounds (<= 250 tokens) are guaranteed at design-time and seed-time (Decision 7).
+7. **Automatic Owner Identity Guessing:** Zero heuristics or auto-inference of the first tenant owner (`Owner.first()`); unauthenticated or unverified requests fail closed (Decision 3).
 
 ### B.3 Core Architectural Invariants
-1. **Subtractive Permission Invariant:** Persona permissions are strictly narrowing. A persona NEVER grants new authority, bypasses existing security layers, or overrides tenant boundaries.
-2. **Strict Grounded Fact Precedence Invariant:** Confirmed commercial facts and business policies from `FactService`/`BusinessBrain` strictly override any conflicting persona tone or prompt instructions (Decision 17).
-3. **AI Silence Invariant on Escalation:** While a conversation is in `escalated` status, the conversational AI engine MUST REMAIN SILENT (zero automated LLM responses) until an authorized human owner/operator explicitly acts or changes status (Decision 19).
-4. **Fail-Closed Enforcement Invariant:** Missing agent IDs, unmapped tool categories, token budget overflows, or unverified owner requests immediately fail closed (Decision 3, 6, 7).
-5. **Token Envelope Boundary Invariant:** The fully assembled persona envelope must not exceed 250 tokens for every active approved model (Decision 7).
-6. **Tenant Data Isolation Invariant:** `tenant_id` must always be derived from authenticated cryptographic context; zero cross-tenant query or assignment is permitted (Decision 16).
+1. **Agent-Persona Decoupling Invariant:** An `Agent` is an autonomous enterprise employee with identity and lifecycle state. An `EmployeePersona` is a behavioral and security contract. An Agent has a Persona; a Persona is never an Agent.
+2. **Subtractive Permission Invariant:** Persona permissions are strictly narrowing. A persona NEVER grants new authority, bypasses existing security layers, or overrides tenant boundaries. Future personas (e.g. Accounting) never grant uncalibrated sensitive tools.
+3. **Unbound Channel Fail-Closed Invariant:** Channels without an explicit `agent_id` must NEVER guess or auto-assign an agent. They immediately fail closed without customer response, logging an owner alert.
+4. **Paused Agent Silent Ingestion Invariant:** Paused agents persist messages silently for human review, invoking zero AI tokens and sending zero automated replies.
+5. **Strict Grounded Fact Precedence Invariant:** Confirmed commercial facts and business policies from `FactService`/`BusinessBrain` strictly override any conflicting persona tone or prompt instructions (Decision 17).
+6. **Engine-Level AI Silence Invariant:** While a conversation is in `escalated` status, the conversational engine MUST REMAIN SILENT at the entry point (zero automated LLM responses) until an authorized human owner/operator explicitly acts or changes status (Decision 19).
+7. **Fail-Closed Enforcement Invariant:** Inactive agent states, unmapped tool categories, token budget overflows, or unverified owner requests immediately fail closed.
+8. **Token Envelope Boundary Invariant:** The fully assembled persona envelope must not exceed 250 tokens for every active approved model (Decision 7).
+9. **Tenant Data Isolation Invariant:** `tenant_id` must always be derived from authenticated cryptographic context; zero cross-tenant query or assignment is permitted (Decision 16).
 
 ---
 
@@ -123,15 +139,19 @@ flowchart TD
     L4 -->|Fail| D3["DENY: Tool Disabled for Tenant"]
     L4 -->|Pass| L5{"Layer 5: Grounded Business Fact Precedence"}
     L5 -->|Conflict| ADJ["ENFORCE: Override with Confirmed Fact"]
-    L5 -->|Consistent| L6{"Layer 6: Persona Policy Guard (Subtractive)"}
+    L5 -->|Consistent| L6{"Layer 6: Persona Policy Guard for Active Agent"}
     L6 -->|Category Not Permitted| D4["DENY: Tool Outside Persona Scope"]
     L6 -->|Permitted| EXEC["ALLOW: ToolExecutor Invokes Tool Handler"]
 ```
 
-### C.2 Subtractive Hierarchy Rules
-- **Rule 1 (Narrowing Only):** If Layer 4 (ActionPolicy) allows `catalog_search` and `product_add_or_update`, but the assigned persona's `permitted_tool_categories` only includes `READ_ONLY_INQUIRY`, then `product_add_or_update` is strictly **DENIED**.
+### C.2 Subtractive Hierarchy Rules & Future Role Governance
+- **Rule 1 (Narrowing Only):** If Layer 4 (ActionPolicy) allows `catalog_search` and `product_add_or_update`, but the active Digital Employee's assigned persona only permits `READ_ONLY_INQUIRY`, then `product_add_or_update` is strictly **DENIED**.
 - **Rule 2 (No Elevation):** If a tenant has disabled `shipping_rate_inquiry` in Layer 4, an assigned persona listing `READ_ONLY_INQUIRY` **CANNOT** re-enable it.
-- **Rule 3 (Fail-Closed Default):** If a tool does not belong to any permitted category of the active persona, it is denied immediately with `PersonaToolPolicyViolationError`.
+- **Rule 3 (Fail-Closed Default):** If a tool does not belong to any permitted category of the active employee's persona, it is denied immediately with `PersonaToolPolicyViolationError`.
+- **Rule 4 (Future Roles Governance — e.g. Accounting):**
+  - Any future digital employee role (e.g. Accounting Specialist, Financial Analyst, HR Manager) **requires an explicit, independent definition** of its allowed tool categories (`permitted_tool_categories`) and action policies.
+  - The system **STRICTLY PROHIBITS** auto-granting sensitive write, financial debit/credit, or administrative tools simply because the persona's title or description contains "Accounting" or "Finance".
+  - If an Accounting persona is introduced in a future phase, financial mutation tools remain subject to Layer 3 owner approval gating and require formal verification before enablement.
 
 ### C.3 Strict Grounded Fact Precedence Invariant (Decision 17)
 The system establishes a strict, non-negotiable hierarchy for conversational claims:
@@ -144,19 +164,39 @@ The system establishes a strict, non-negotiable hierarchy for conversational cla
 - The digital employee is strictly forbidden from inventing, guessing, or promising commercial terms (e.g., custom discounts, delivery deadlines, warranties) that are not backed by confirmed facts.
 - If a requested fact is missing, uncertain, or conflicting, the agent must decline to speculate, honestly state that the information is unconfirmed, and offer to check with the business owner.
 
-### C.4 Structured Escalation & AI Silence Invariant (Decision 19)
-The system defines deterministic, application-enforced escalation rules for all personas:
+### C.4 Structured Escalation & Hard Engine-Level AI Silence Invariant (Decision 19)
+The system defines deterministic, application-enforced escalation rules:
 - **Triggers for Escalation:**
   1. Explicit customer request for a human agent, supervisor, or store manager.
-  2. Customer inquiries requesting actions outside the persona's authorized scope (e.g. monetary refund requests, contract amendments, legal claims).
+  2. Customer inquiries requesting actions outside the employee's authorized scope (e.g. monetary refund requests, contract amendments, legal claims).
   3. Critical customer frustration or dispute signals identified via defined pattern criteria.
 - **State Transition & Outbox Dispatch:**
-  - The LLM may recommend escalation, but backend application logic deterministically executes the state transition: `conversation.status = 'escalated'`.
-  - Upon transitioning, the system enqueues a transactional outbox event: `notify_owner_escalation`. This event uses the existing, verified outbox worker handler ([`packages/services/outbox_worker.py:170`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L170)) and is protected against duplicates via idempotency keys.
-- **The AI Silence Invariant:**
-  - While `conversation.status == 'escalated'`, the conversational agent engine **MUST REMAIN COMPLETELY SILENT**.
-  - All subsequent inbound messages from the customer are persisted to the database and displayed on the dashboard, but **ZERO automated LLM responses** are generated or dispatched.
-  - The AI remains silent until an authorized human owner or operator explicitly resolves the escalation, replies to the customer, or transitions the conversation status back to `active`.
+  - Application logic deterministically executes the state transition: `conversation.status = 'escalated'`.
+  - The system enqueues a transactional outbox event: `notify_owner_escalation` using the existing, verified handler ([`packages/services/outbox_worker.py:170`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L170)), protected by idempotency keys.
+- **The Hard Engine-Level AI Silence Invariant:**
+  - Phase 5 enforces **Hard Programmatic AI Silence** at the very entrance of [`ConversationalAgentEngine.process_incoming_message`](file:///d:/AI-Employee-Platform/packages/services/conversational_agent_engine.py#L260):
+    ```python
+    if conversation.status == "escalated":
+        logger.info("Conversation %s is escalated; AI Silence enforced (zero LLM invocation)", conversation_id)
+        if trace_id:
+            self.tracing_service.complete_trace(
+                tenant_id=tenant_id,
+                trace_id=trace_id,
+                status="skipped",
+                metadata={"skip_reason": "conversation_escalated_ai_silence"},
+            )
+        return ConversationResponseResult(
+            success=True,
+            message_id=message_id,
+            conversation_id=conversation_id,
+            tenant_id=tenant_id,
+            skipped=True,
+            skip_reason="AI Silence: Conversation is escalated to human operator",
+            trace_id=trace_id,
+        )
+    ```
+  - All subsequent customer messages are persisted to the database and displayed on the dashboard for the human owner/operator, but **ZERO calls to AIProvider and ZERO automated replies** are generated.
+  - The AI remains completely silent until an authorized human operator explicitly replies or resets the conversation status back to `active`.
 
 ### C.5 Distinguishing Physical Action Execution vs Textual Output (Hallucination Reality)
 A critical architectural boundary must be maintained between **backend physical execution** and **model textual hallucination**:
@@ -165,69 +205,92 @@ A critical architectural boundary must be maintained between **backend physical 
 
 ---
 
-## 6. Section D: Persona Guard Enforcement Point & Execution Bottleneck
+## 6. Section D: Persona Guard Enforcement Point & Message Routing Pipeline
 
-### D.1 Settled Enforcement Point: `DecisionEngine.decide()`
-To prevent architectural ambiguity or bifurcated authorization logic, Phase 5 establishes **`DecisionEngine.decide()`** as the **sole authoritative enforcement point** for the Persona Policy Guard:
+### D.1 End-to-End Multi-Employee Routing Pipeline
+To maintain Digital Employee identity throughout asynchronous execution, Phase 5 establishes an unbroken chain of custody for `agent_id`:
 
 ```mermaid
-flowchart TD
-    CALLER["Caller (Conversational Engine / Task Runner)"] --> TE["ToolExecutor.execute()"]
-    TE -->|Line 265| DE["DecisionEngine.decide()"]
+sequenceDiagram
+    autonumber
+    actor Customer
+    participant Webhook as Webhook Ingest (apps/agent/api/v1/webhooks.py)
+    participant Channel as Channel (channels.agent_id)
+    participant Outbox as outbox_events
+    participant Worker as OutboxWorker
+    participant Engine as ConversationalAgentEngine
+    participant Guard as DecisionEngine.decide()
+    participant Tool as ToolExecutor
 
-    subgraph DecisionEngine Pipeline
-        DE --> PS["PermissionService (Layers 1-4)"]
-        DE --> APS["ActionPolicyService (Layer 4)"]
-        DE --> GFP["Grounded Fact Precedence Check (Layer 5)"]
-        DE --> PPG["Persona Guard Evaluation (Layer 6)"]
+    Customer->>Webhook: Inbound Message (Telegram / WhatsApp)
+    Webhook->>Channel: Lookup Channel by ID
+    alt Channel has NO agent_id (Unbound Channel)
+        Webhook->>Outbox: Persist Message & Alert Event (skip_reason="unbound_channel_fail_closed")
+        Webhook-->>Customer: HTTP 202 Accepted (No AI reply emitted)
+    else Channel has valid agent_id
+        Webhook->>Outbox: Atomically persist Message & OutboxEvent(agent_id=channel.agent_id)
+        Webhook-->>Customer: HTTP 202 Accepted
 
-        PPG --> COND1{"agent_id supplied?"}
-        COND1 -->|No / None| CHK_OWNER{"Direct Owner Context?"}
-        CHK_OWNER -->|Verified Owner| BYPASS["BYPASS: Direct Owner Admin Action"]
-        CHK_OWNER -->|Unverified / Missing Actor| DENY_ANON["DENY: Fail-Closed (Missing Identity)"]
+        Worker->>Outbox: Poll pending event (FOR UPDATE SKIP LOCKED)
+        Worker->>Engine: process_incoming_message(tenant_id, message_id)
 
-        COND1 -->|Yes| LOAD_PERS["Resolve Effective Persona (Channel -> Agent)"]
-        LOAD_PERS --> CHK_TOOL{"Tool Category in Permitted Categories?"}
-        CHK_TOOL -->|Yes| ALLOW["ALLOW DECISION"]
-        CHK_TOOL -->|No| DENY_POL["DENY: Tool Outside Persona Scope"]
+        alt Agent is Paused
+            Engine->>Engine: Persist message, Trace(agent_paused), Halt AIProvider (Silent Ingestion)
+        else Agent is Disabled
+            Engine->>Engine: Record strict halt, Trace(agent_disabled), Suppress execution
+        else Agent is Active & Conversation is NOT Escalated
+            Engine->>Engine: Bind Conversation.agent_id = agent.id
+            Engine->>Guard: decide(tool_name, agent_id=agent.id)
+            alt Tool Permitted
+                Guard-->>Engine: Allow Decision
+                Engine->>Tool: execute(tool_name, agent_id=agent.id)
+            else Tool Denied
+                Guard-->>Engine: Deny (PersonaToolPolicyViolationError)
+            end
+            Engine->>Outbox: Enqueue dispatch_channel_reply
+        end
+        Engine-->>Worker: Completed
     end
-
-    ALLOW --> EXEC_HANDLER["ToolExecutor Calls Tool Handler"]
-    DENY_ANON --> RAISE_SEC["Raise SecurityException"]
-    DENY_POL --> RAISE_VIOL["Raise PersonaToolPolicyViolationError"]
 ```
 
-### D.2 Strict Handling of Agent Identity & Cryptographic Owner Verification (Decision 3)
-Codebase inspection of [`packages/services/owner_intent_router.py:940`](file:///d:/AI-Employee-Platform/packages/services/owner_intent_router.py#L940) shows that direct owner executions operate with `agent_id = None`, `is_owner = True`, and `actor_id = owner_user.id`.
+### D.2 Digital Employee Lifecycle States & Enforcement Rules
+Every `Agent` possesses a first-class lifecycle state (`status: str`):
+1. **`active` (On-Duty):**
+   - The Digital Employee is active. Incoming messages routed to this agent are processed normally, context is assembled, and AI replies are generated.
+2. **`paused` (Silent Ingestion — Approved Decision 2):**
+   - The Digital Employee is temporarily paused by the owner.
+   - *Engine Enforcement:*
+     - The customer's incoming message is **persisted cleanly** in `messages` under the active `conversation`.
+     - The AIProvider is **NOT invoked** (zero tokens consumed).
+     - **Zero automated reply** is dispatched to the customer.
+     - The execution trace records `status="skipped"`, `metadata={"skip_reason": "agent_paused_silent_ingestion"}`.
+     - **Human Take-Over Mode:** A human owner or operator can view the message in the conversation dashboard and reply manually through the dashboard or connector.
+3. **`disabled` (Strict Halt — Approved Decision 3):**
+   - The Digital Employee is permanently deactivated.
+   - *Engine Enforcement:*
+     - Inbound interactions on channels bound to this agent are **strictly halted**.
+     - The system logs an explicit error and trace record (`status="failed"`, `metadata={"skip_reason": "agent_disabled_halt"}`).
+     - Zero AI processing and zero automated replies occur.
 
-To prevent identity spoofing or security bypasses:
-1. **Cryptographic Identity Verification:**
-   - In REST APIs, the caller's identity and tenant context must be cryptographically validated via PyJWT claims (`user_id`, `tenant_id`, `role`).
-   - In omni-channel messaging connectors (Telegram, WhatsApp), the caller must be validated against the pre-bound channel owner record.
-2. **Zero Auto-Inference Invariant:**
-   - The platform strictly **FORBIDS** heuristic guessing or auto-inferring the first tenant owner (`Owner.first()`) when `actor_id` is missing.
-   - Any execution request where `agent_id is None` and `is_owner is False` (or where the actor cannot be cryptographically proven as the tenant owner) is **denied immediately** (fail-closed).
-3. **Conversational Inbound Requests:**
-   - In [`packages/services/conversational_agent_engine.py:270-320`](file:///d:/AI-Employee-Platform/packages/services/conversational_agent_engine.py#L270-L320), inbound conversational messages resolve the active agent and channel. In Phase 5, `agent_id` is always passed explicitly into `ToolExecutor.execute()`.
+### D.3 Unbound Channel Routing: Strict Fail-Closed (Approved Decision 1)
+If a communication channel is configured but has no assigned `agent_id` (`channel.agent_id IS NULL`):
+- **Zero Guessing Invariant:** The system **NEVER** auto-selects or guesses a fallback agent.
+- **Fail-Closed Execution:** The incoming message is stored in the database, but:
+  - Zero calls are made to AIProvider.
+  - Zero replies are sent to the customer.
+  - The trace records `status="skipped"`, `skip_reason="unbound_channel_fail_closed"`.
+  - An outbox event `notify_owner_unbound_channel` is enqueued to alert the tenant owner on the dashboard that a channel is receiving traffic without an assigned digital employee.
 
-### D.3 Legacy Agents Migration: Channel- & Owner-Aware Migration (Decision 1)
-To ensure seamless continuity for existing agents without data loss:
-- **Heuristic Migration Inspection:**
-  - The migration script inspects each existing agent's bound channel and existing instructions.
-  - Channels dedicated to customer inquiries/support map to `system_customer_support`.
-  - Channels dedicated to marketing/sales map to `system_sales_consultant`.
-  - Channels dedicated to operations/appointments map to `system_operations_coordinator`.
-- **Safe Fallback & Custom Instructions Preservation:**
-  - For ambiguous or unmapped legacy agents, the system assigns `system_customer_support` by default.
-  - The agent's existing custom prompt instructions are preserved non-destructively in `agent.persona_overrides["custom_instructions"]` (subject to the 50-token override limit).
-  - An audit event (`AuditEvent(event_type="legacy_agent_migrated_to_persona")`) is recorded for full traceability.
-  - Legacy fields (`tenant.employee_name`, custom agent instructions) remain intact in the database as non-destructive fallbacks.
+### D.4 Agent Handoff Deferral (Approved Decision 4)
+- Dynamic automatic transfer of ongoing conversations between agents on a shared channel is explicitly **deferred to Phase 6+**.
+- In Phase 5 Track A, each channel routes to its dedicated digital employee.
+- `Conversation.agent_id` persistently tracks the assigned employee to guarantee accountability throughout the conversation's lifetime.
 
-### D.4 Current Code Reality vs Implementation Prerequisite
-In current Phase 4D code:
-- `ToolExecutor.execute` receives `agent_id: UUID | None = None` (Line 245).
-- `DecisionEngine.decide` currently does not accept `agent_id`.
-- Therefore, **Micro-Stage 5.2** explicitly updates `DecisionEngine.decide()` signature to receive `agent_id: UUID | None = None` and `channel_id: UUID | None = None`, resolving the active persona and evaluating Layer 6.
+### D.5 Cryptographic Owner Verification & Strict Identity (Decision 3)
+In [`packages/services/owner_intent_router.py:940`](file:///d:/AI-Employee-Platform/packages/services/owner_intent_router.py#L940), owner operations run with `agent_id = None`, `is_owner = True`, and `actor_id = owner_user.id`.
+- In REST APIs, the caller's identity and tenant context must be cryptographically validated via PyJWT claims (`user_id`, `tenant_id`, `role`).
+- In omni-channel messaging connectors (Telegram, WhatsApp), the caller must be validated against the pre-bound channel owner record.
+- **Zero Auto-Inference Invariant:** The platform strictly **FORBIDS** heuristic guessing or auto-inferring the first tenant owner (`Owner.first()`). Unauthenticated requests immediately fail closed.
 
 
 ---
@@ -250,7 +313,7 @@ Phase 5 introduces a formal `ToolCategory` enumeration in `packages/tools/contra
 `ToolRegistry.register()` will validate that every tool declares a valid `category: ToolCategory`. Any attempt to register a tool without a valid category will raise a startup validation error, ensuring zero untyped tools exist.
 
 ### E.2 Track A Permitted Tools Calibration (Decision 2)
-In Track A, conversational personas are granted access to:
+In Track A, digital employees assigned these personas are permitted to access the following categories within their subtractive boundary:
 - **10 Read-Only Tools:** `catalog_search`, `product_details`, `order_status_inquiry`, `customer_history_lookup`, `appointment_check_availability`, `faq_knowledge_search`, `shipping_rate_inquiry`, `inventory_level_check`, `policy_inquiry`, `conversation_summary_fetch`.
 - **3 Calibrated Write Tools:**
   1. `customer_create_or_update`: Permitted for `system_sales_consultant` (lead capture, contact info).
@@ -278,22 +341,23 @@ In Track A, conversational personas are granted access to:
 | `product_add_or_update` | `ProductUpsertTool` | `medium` | `SENSITIVE_WRITE_MUTATION` | **NONE (Owner Only)** | Prevents unauthorized catalog changes. |
 | `trigger_webhook_event` | `WebhookTriggerTool` | `medium` | `SENSITIVE_WRITE_MUTATION` | **NONE (Track B Quarantined)** | Blocked pending CR-05-01 resolution. |
 
+### E.4 Future Roles Tool Governance (Approved Decision 6)
+When future roles (such as Accounting, Bookkeeping, or HR) are introduced:
+1. **Explicit Permission Contract:** Each role must explicitly declare which tool categories from `ToolCategory` it is permitted to execute.
+2. **Zero Inferred Permissions:** A role will NEVER automatically inherit write, sensitive, or financial permissions based on its title. An Accounting employee without explicitly authorized financial tools will be blocked at `DecisionEngine.decide` from executing financial mutations, failing closed.
+
 ---
 
 ## 8. Section F: Provable Safety Boundaries & Resolution of CR-05-01
 
 ### F.1 Technical Reality of the Existing Codebase
-To avoid unproven claims, codebase inspection confirms the exact behavior of approval and outbox records:
-1. **Challenge Creation Path:**
-   - In [`packages/services/approval_service.py:228-304`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py#L228-L304) (`create_approval_challenge`), an `Approval` record is inserted with:
-     - `status = "pending"`
-     - `execution_status = "not_started"`
-     - `failed_attempts = 0`
-   - **Crucial Grounding Fact:** `create_approval_challenge()` creates **ZERO** records in `outbox_events`.
-   - The challenge code is returned strictly in-memory to the caller (`OwnerIntentRouter.execute_plan()`).
-2. **Approval Verification & Execution Defect:**
-   - In [`packages/services/approval_service.py:307-390`](file:///d:/AI-Employee-Platform/packages/services/approval_service.py#L307-L390) (`verify_approval_challenge`), after validating the OTP, the code calls `_enqueue_execution_outbox_event(approval)`.
-   - In [`packages/services/outbox_worker.py:929`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py#L929), the function `process_approval_action_execution` is defined outside `OutboxWorker`, receives raw `dict` payloads instead of an `OutboxEvent` instance, has zero registration in `OutboxWorker.process_pending_events()` at line 170, and is completely stubbed out.
+Forensic inspection of [`packages/services/outbox_worker.py`](file:///d:/AI-Employee-Platform/packages/services/outbox_worker.py) confirms two critical defects:
+1. **Scope and Indentation Defect:**
+   - At line 929, `_handle_approval_action_execution` is defined outside `class OutboxWorker` (after `if __name__ == "__main__": main()`).
+   - Calling it at line 206 fails with `AttributeError: 'OutboxWorker' object has no attribute '_handle_approval_action_execution'`.
+2. **Faked Execution Stub:**
+   - In lines 1018–1030, the handler calls `app_svc.record_execution_result(..., is_success=True)` without ever invoking `ToolExecutor` or executing any real action.
+   - It fakes execution success in the database, deceiving the owner that a sensitive action occurred when zero execution took place.
 
 ### F.2 Gated Execution & Transparent Owner Messaging (Decision 4)
 To resolve this defect cleanly without blocking Phase 5 conversational delivery:
@@ -311,11 +375,26 @@ To resolve this defect cleanly without blocking Phase 5 conversational delivery:
 
 ---
 
-## 9. Section G: Data Model, Partial Unique Index & Override Governance
+## 9. Section G: Data Model, Multi-Agent Relationships & Override Governance
 
-### G.1 Domain Model: `EmployeePersona`
-Phase 5 defines `EmployeePersona` in `packages/models/domain.py`, including an explicit integer `version` field (Decision 18):
+### G.1 Multi-Agent Entity Relationship Model
+Phase 5 implements a clean separation between the enterprise workforce (`Agent`), behavioral contracts (`EmployeePersona`), communication pathways (`Channel`), and dialogue threads (`Conversation`):
 
+```mermaid
+erDiagram
+    TENANT ||--o{ AGENT : "employs multiple on-demand"
+    AGENT ||--|| EMPLOYEE_PERSONA : "assigned behavior (Agent.persona_id)"
+    TENANT ||--o{ CHANNEL : "owns"
+    CHANNEL }o--|| AGENT : "routes traffic to (Channel.agent_id)"
+    CONVERSATION }o--|| AGENT : "handled by (Conversation.agent_id)"
+    CONVERSATION }o--|| CHANNEL : "originates from (Conversation.channel_id)"
+    MESSAGE }o--|| CONVERSATION : "belongs to"
+    EXECUTION_TRACE }o--|| AGENT : "audited under (ExecutionTrace.agent_id)"
+```
+
+### G.2 Schema Definitions
+
+#### 1. `EmployeePersona` (Behavioral Contract)
 ```python
 # Location: packages/models/domain.py
 
@@ -328,7 +407,7 @@ class EmployeePersona(Base):
     )  # NULL for global system templates; non-NULL for future custom tenant personas
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     slug: Mapped[str] = mapped_column(String(50), nullable=False)
-    role_type: Mapped[str] = mapped_column(String(50), nullable=False)  # support | sales | operations
+    role_type: Mapped[str] = mapped_column(String(50), nullable=False)  # support | sales | operations | accounting | etc.
     description: Mapped[str] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)  # Incremented on template changes
 
@@ -345,7 +424,44 @@ class EmployeePersona(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
 ```
 
-### G.2 PostgreSQL Partial Unique Indexes for System Templates
+#### 2. `Agent` (Digital Employee Enhancements)
+```python
+# Additions to class Agent in packages/models/domain.py:
+persona_id: Mapped[uuid.UUID | None] = mapped_column(
+    ForeignKey("employee_personas.id", ondelete="SET NULL"),
+    nullable=True,
+    index=True,
+)
+persona_overrides: Mapped[dict] = mapped_column(
+    JSONB,
+    nullable=False,
+    default=dict,
+    server_default="{}",
+)
+```
+
+#### 3. `Channel` (Digital Employee Binding)
+```python
+# Addition to class Channel in packages/models/domain.py:
+agent_id: Mapped[uuid.UUID | None] = mapped_column(
+    ForeignKey("agents.id", ondelete="SET NULL"),
+    nullable=True,
+    index=True,
+)
+```
+*(Notice: `Channel` binds to `agent_id`, NOT directly to `persona_id`. The Channel routes to an active Digital Employee; the Digital Employee executes under an assigned Persona).*
+
+#### 4. `Conversation` (Digital Employee Responsibility)
+```python
+# Addition to class Conversation in packages/models/domain.py:
+agent_id: Mapped[uuid.UUID | None] = mapped_column(
+    ForeignKey("agents.id", ondelete="SET NULL"),
+    nullable=True,
+    index=True,
+)
+```
+
+### G.3 PostgreSQL Partial Unique Indexes for System Templates
 In PostgreSQL, `NULL != NULL` in standard unique constraints, which would allow duplicate system template slugs. Therefore, Stage 5.1 creates two separate partial unique indexes:
 
 ```sql
@@ -360,16 +476,15 @@ ON employee_personas (tenant_id, slug)
 WHERE tenant_id IS NOT NULL;
 ```
 
-### G.3 Dual Persona Binding Hierarchy on `Agent` and `Channel` (Decision 5)
-Phase 5 supports persona assignment at both the `Agent` and `Channel` levels:
-- `persona_id: Mapped[uuid.UUID | None]` is added to **both** `Agent` and `Channel` models.
-- **Resolution Precedence Order:**
-  1. **Channel Override (`Channel.persona_id`):** If a specific communication channel (e.g., Telegram Sales Channel) has an explicit persona assigned, it takes top precedence.
-  2. **Agent Base (`Agent.persona_id`):** If the channel has no override, the base agent's assigned persona is evaluated.
-  3. **Tenant Default Fallback:** If neither is assigned, the system falls back to `system_customer_support` (or legacy Phase 4D dynamic naming if personas are globally disabled).
+### G.4 Multi-Employee Routing & Hierarchy (Decision 5 Realigned)
+In the calibrated architecture, hierarchy is structured strictly through **Employee Ownership**:
+1. **Primary Route:** Every communication channel is bound to a specific Digital Employee (`Channel.agent_id`).
+2. **Behavioral Contract:** The Digital Employee resolves its behavior from its assigned `Agent.persona_id`.
+3. **Unbound Channel Fail-Closed (Approved Decision 1):** If a channel has no explicit `agent_id` configured (`channel.agent_id IS NULL`), the engine **fails closed immediately** without auto-selecting an agent or replying to the customer.
+4. **Conversation Accountability:** When a conversation is initiated on a channel, `Conversation.agent_id` records the active employee, preserving auditability and dialogue continuity.
 
-### G.4 Strict Persona Overrides Whitelist & Governance (Decision 9)
-Tenants can customize safe presentation details via `agent.persona_overrides` or `channel.persona_overrides`. To prevent prompt injection, privilege escalation, or security bypass, the API strictly enforces a **Whitelist of Allowed Override Keys**:
+### G.5 Strict Persona Overrides Whitelist & Governance (Decision 9)
+Tenants can customize safe presentation details via `agent.persona_overrides`. To prevent prompt injection, privilege escalation, or security bypass, the API strictly enforces a **Whitelist of Allowed Override Keys**:
 
 | Override Key | Permitted Type | Constraint / Budget | Effect on Persona Envelope |
 | :--- | :--- | :--- | :--- |
@@ -383,12 +498,19 @@ Tenants can customize safe presentation details via `agent.persona_overrides` or
 2. **Merged Budget Ceiling:** The merged prompt envelope (base template + overrides) **MUST NOT EXCEED 250 tokens** total.
 3. **Template Immutability:** System templates in the database (`tenant_id IS NULL`) are immutable and cannot be updated or deleted by any tenant.
 
+### G.6 Formal Deprecation Plan for `Tenant.employee_name`
+- **Current Problem:** `Tenant.employee_name` in [`packages/models/tenant.py:51`](file:///d:/AI-Employee-Platform/packages/models/tenant.py#L51) hardcodes the assumption that a tenant has only one digital employee.
+- **Deprecation Path:**
+  1. **Stage 5.1:** Mark `Tenant.employee_name` as deprecated in documentation and models. Add `agents.name` as the sole authoritative source of digital employee names.
+  2. **Stage 5.3:** Refactor `ConversationalAgentEngine` and `AgentIdentityService` to read `agent.name` instead of `tenant.employee_name`.
+  3. **Stage 5.5 / Post-Phase 5:** Drop column `tenants.employee_name` via an Alembic migration after all test scripts are verified clean.
+
 ---
 
 ## 10. Section H: Multi-Tenant Isolation & Cross-Process Cache Synchronization
 
 ### H.1 Preventing Cross-Tenant Persona Assignment
-Because a foreign key from `agents.persona_id` or `channels.persona_id` does not enforce tenant ownership automatically, `PersonaContractService.assign_persona` evaluates:
+Because a database foreign key from `agents.persona_id` does not validate tenant ownership automatically, `PersonaContractService.assign_persona(tenant_id, agent_id, persona_id)` enforces:
 ```python
 persona = self.get_persona(persona_id)
 if persona is None:
@@ -407,10 +529,10 @@ In multi-worker deployments (e.g. multiple Uvicorn instances), workers maintain 
 - **Fail-Closed DB Reload:** Cache misses or eviction reload directly from PostgreSQL using tenant-scoped queries.
 
 ### H.3 Enterprise RBAC & Isolated Governance (Decision 16)
-Access to persona management endpoints is governed strictly by authenticated role context:
+Access to persona and multi-agent management endpoints is governed strictly by authenticated role context:
 - **Tenant Level:**
-  - `tenant_owner`, `owner`, `tenant_admin`: Authorized to assign personas to agents/channels and modify whitelisted `persona_overrides`.
-  - `tenant_user`: Read-only access to view current persona bindings and available system templates.
+  - `tenant_owner`, `owner`, `tenant_admin`: Authorized to create/manage digital employees (`agents`), assign channels, and modify whitelisted `persona_overrides`.
+  - `tenant_user`: Read-only access to view active digital employees and system templates.
   - **No Elevation:** No tenant role can alter `permitted_tool_categories`, bypass approval gates, or modify security policies.
 - **Platform Level:**
   - `superadmin`: Authorized to manage system templates (`tenant_id IS NULL`).
@@ -449,118 +571,134 @@ class ToneProfileSchema(BaseModel):
 - `PersonaPromptSynthesizer` translates these structured values into standardized, pre-tested Arabic prompt directives.
 - **Observability in Execution Traces:**
   Every agent execution logs metadata in `ExecutionTrace.step_metadata`:
+  - `agent_id`: The UUID of the executing Digital Employee.
   - `persona_slug`: The slug of the active persona (e.g. `system_customer_support`).
   - `persona_version`: The integer version of the persona template.
-  - `persona_source`: `channel_override` | `agent_base` | `default_fallback`.
   - `effective_dialect`: The active dialect setting.
   - `envelope_tokens`: Measured token count of the merged persona envelope.
 - Secrets, API keys, and sensitive customer PII are strictly excluded from execution logs.
 
 ---
 
-## 12. Section J: Backward Compatibility, Migration Strategy & Defaults
+## 12. Section J: Backward Compatibility, Provisioning & Defaults
 
 ### J.1 Additive Schema Evolution & Backward Compatibility
-- **Additive Evolution:** The migration creates `employee_personas`, partial indexes, and adds nullable `persona_id` to `agents` and `channels`.
-- **Zero Disruption for Existing Agents:** Existing agents with `persona_id = NULL` fall back smoothly to the Phase 4D legacy system prompt builder verbatim.
-- **Clean Downgrade:** Reverting the migration drops added columns and tables without altering conversations, messages, channels, or outbox records.
+- **Additive Evolution:** The migration creates `employee_personas`, partial indexes, and adds `agents.persona_id`, `channels.agent_id`, and `conversations.agent_id`.
+- **Zero Real Client Impact:** Because all existing tenants in the repository are synthetic test environments, no complex backward-compatibility shims are necessary.
+- **Clean Downgrade:** Reverting the migration cleanly drops added columns and tables without corrupting conversations or messages.
 
-### J.2 New Tenant Provisioning Defaults (Decision 10)
-- **Sensible Default:** Newly created tenants and agents are automatically assigned `system_customer_support` by default.
-- **Template Immutability:** System templates cannot be modified or deleted by tenant operations.
-- **Slug Validation:** Attempting to assign an unknown or invalid `persona_slug` immediately returns HTTP 422 / 404.
-
-### J.3 Legacy Agents Migration Execution Procedure (Decision 1)
-For tenants upgrading from Phase 4D:
-1. Migration scans active channels for each agent.
-2. Infers best matching persona based on channel type and purpose.
-3. Sets `agent.persona_id = resolved_persona.id`.
-4. Moves legacy custom instructions into `persona_overrides["custom_instructions"]` (subject to 50 token cap).
-5. Emits `AuditEvent(event_type="legacy_agent_migrated_to_persona")`.
-6. Preserves `tenant.employee_name` in DB as a non-breaking fallback.
+### J.2 Template-Driven On-Demand Workforce Provisioning (Approved Decision 5)
+To prevent artificial constraints on platform capabilities:
+1. **No Hardcoded Names or Counts:** The platform does NOT enforce hardcoded names (such as "سارة" or "فهد") or a fixed number of digital employees upon tenant creation.
+2. **Standard Templates Catalog:** The platform defines available, verified system persona templates (`system_customer_support`, `system_sales_consultant`, `system_operations_coordinator`).
+3. **Tenant-Driven Creation:** Digital employees are created on-demand according to tenant/owner choices through the REST API or Dashboard (selecting custom name, operational role, and assigned template).
+4. **Extensible Roles:** The initial trio of support, sales, and operations represents the initial template catalog, NOT an upper ceiling on workforce expansion. Future roles (such as Accounting, Logistics, or HR) can be added as new system templates following the same governance model.
 
 
 ---
 
 ## 13. Section K: Implementation Sequencing & Track Separation
 
-To resolve the architectural defect in CR-05-01 while delivering Phase 5 safely, Phase 5 is strictly split into two decoupled tracks:
+To deliver the multi-employee architecture safely without risking interaction with the defective CR-05-01 path, Phase 5 is strictly split into two decoupled tracks:
 
 ```mermaid
 flowchart TD
-    subgraph Track A: Safe Conversational Persona Delivery (Actionable in Phase 5)
-        S51["Stage 5.1: Database Schema, Versioning, Partial Indexes & Models"]
-        S52["Stage 5.2: Tool Registry Canonical Taxonomy & DecisionEngine Guard"]
-        S53["Stage 5.3: Persona Prompt Synthesizer, Token Measurement & Grounded Facts"]
-        S54["Stage 5.4: REST API, RBAC Endpoints, Overrides Whitelist & Cache Sync"]
-        S55["Stage 5.5: Automated Test Suite, Acceptance Sandbox & Phase 4D Regression"]
+    subgraph Track A: Safe Conversational Multi-Employee Delivery (Actionable in Phase 5)
+        S51["Stage 5.1: Schema, Multi-Agent Columns (Channel/Conv agent_id) & Models"]
+        S52["Stage 5.2: Tool Canonical Taxonomy & DecisionEngine Guard (with agent_id)"]
+        S53["Stage 5.3: Prompt Synthesizer, Token Measurement & Engine-Level AI Silence"]
+        S54["Stage 5.4: Multi-Agent Webhook Routing Pipeline, Lifecycle States & Cache Sync"]
+        S55["Stage 5.5: Automated Test Suite, Telegram Sandbox & Phase 4D Regression"]
         S51 --> S52 --> S53 --> S54 --> S55
     end
 
     subgraph Track B: Approved Sensitive Action Execution (BLOCKED)
-        CR1["CR-05-01 Remediation: Worker Outbox Handler Registration"]
-        CR2["Async Safe Tool Dispatch Pipeline"]
+        CR1["CR-05-01 Remediation: Fix Worker Placement & ToolExecutor Invocation"]
+        CR2["Async Safe Sensitive Tool Dispatch Pipeline"]
         CR3["Live Owner Challenge Execution"]
         CR1 --> CR2 --> CR3
     end
 
-    Track A -.->|Independent Delivery| PROD["Production Track A Ready"]
+    Track A -.->|Independent Delivery| PROD["Production Multi-Employee Track A Ready"]
     Track B -.->|Quarantined| BLK_NOTE["BLOCKED: Requires Dedicated Remediation Milestone"]
 ```
 
-### K.1 Track A Scope & Deferred Custom Persona Builder (Decision 11)
-- **Track A Scope:** Focuses entirely on delivering the 3 pre-packaged System Persona Templates (`system_customer_support`, `system_sales_consultant`, `system_operations_coordinator`) and safe tenant `persona_overrides`.
-- **Deferred Custom CRUD:** Tenant-facing custom persona authoring APIs (creating brand-new personas from scratch) are deferred to Phase 6+.
-- **Forward-Compatible Schema:** `EmployeePersona.tenant_id` is created as nullable now, allowing system templates (`tenant_id IS NULL`) and forward compatibility for tenant-scoped custom personas (`tenant_id IS NOT NULL`) in future phases.
+### K.1 Updated Sequencing of Micro-Stages 5.1 to 5.5
+The multi-employee paradigm realigns the scope and execution order of Micro-Stages 5.1–5.5:
 
-### K.2 Strict Incremental Delivery: Micro-Stages 5.1 to 5.5 (Decision 15)
-Track A execution follows strict incremental delivery rules:
-1. **Sequential Progression:** Stages 5.1 to 5.5 are executed one stage at a time in strict sequence.
-2. **Explicit Owner Sign-Off:** No micro-stage may begin until the preceding micro-stage has been reviewed and explicitly approved by the project owner.
-3. **Independent Commits:** Each micro-stage receives an independent commit using Conventional Commits formatting.
-4. **100% Test Pass Gate:** All newly introduced stage tests and related tests must pass 100%.
-5. **Phase 4D Regression Verification:** The full existing regression suite (including all Phase 4D campaign and channel tests) must run and pass without regression.
-6. **Zero Silent Fixes:** Any unexpected regression or failure requires stopping immediately, diagnosing the root cause, and reporting evidence before proceeding.
-
-### K.3 Track B: Approved Sensitive Action Execution (BLOCKED)
-Track B (sensitive tool execution via Outbox after OTP verification) is formally **QUARANTINED** and **BLOCKED**. Zero execution of sensitive tools will be attempted until a separate CR-05-01 remediation milestone is scheduled, planned, and approved.
+1. **Micro-Stage 5.1: Database Schema, Multi-Agent Relationships & Models:**
+   - Create table `employee_personas` (with partial unique indexes and `version: int`).
+   - Add `agents.persona_id` and `agents.persona_overrides`.
+   - Add `channels.agent_id` (ForeignKey to `agents.id`, ondelete="SET NULL").
+   - Add `conversations.agent_id` (ForeignKey to `agents.id`, ondelete="SET NULL").
+   - Seed the 3 baseline system persona templates (`system_customer_support`, `system_sales_consultant`, `system_operations_coordinator`).
+   - Formally mark `tenants.employee_name` as deprecated.
+2. **Micro-Stage 5.2: Tool Canonical Taxonomy & Pre-Invocation DecisionEngine Guard:**
+   - Implement `ToolCategory` enum in `packages/tools/contracts.py`.
+   - Update `DecisionEngine.decide(agent_id=..., tool_name=...)` to resolve the active employee's persona and evaluate Layer 6 subtractive filters.
+   - Implement Future Roles Tool Invariant: ensure tools cannot be executed unless explicitly permitted in `permitted_tool_categories`.
+   - Enforce fail-closed registration in `ToolRegistry`.
+3. **Micro-Stage 5.3: Persona Prompt Synthesizer, Token Measurement & Engine-Level AI Silence:**
+   - Implement `PersonaPromptSynthesizer` compiling role and tone profile <= 250 tokens across approved models.
+   - Refactor `ConversationalAgentEngine` to build prompt identity from `agent.name` instead of `tenant.employee_name`.
+   - Implement Hard Engine-Level AI Silence filter at entry of `process_incoming_message` when `conversation.status == 'escalated'`.
+4. **Micro-Stage 5.4: Multi-Agent Webhook Routing Pipeline, Lifecycle States & In-Memory Cache Sync:**
+   - Update `apps/agent/api/v1/webhooks.py` to extract `channel.agent_id` and attach it to `outbox_events` payload.
+   - Implement Unbound Channel Fail-Closed: if `channel.agent_id IS NULL`, halt processing, suppress AI reply, and enqueue owner alert.
+   - Update `OutboxWorker` to pass `agent_id` into engine.
+   - Implement Agent Lifecycle check:
+     - `active`: normal AI reply.
+     - `paused`: Silent Ingestion (persist message, zero LLM call, zero reply, allow human operator reply).
+     - `disabled`: Strict Halt (record state/reason, halt processing).
+   - Implement 60s TTL local in-memory cache sync.
+5. **Micro-Stage 5.5: Comprehensive Automated Test Suite, Telegram Sandbox & Documentation Closure:**
+   - Author and execute automated tests covering all 5 explicit isolation and lifecycle test cases.
+   - Verify zero regression across all Phase 4D campaign and channel suites.
+   - Conduct manual sandbox testing on Telegram.
 
 ---
 
-## 14. Section L: Automated Testing Strategy
+## 14. Section L: Automated Testing Strategy (Acceptance Criteria & Gating)
 
-Automated test suites will be placed in `tests/test_phase5_personas_and_policy_guard.py` and must verify:
+Automated test suites will be placed in `tests/test_phase5_personas_and_policy_guard.py`. The following test cases are established as **mandatory acceptance criteria** that must pass 100% before Phase 5 is accepted:
 
-1. **Schema & Multi-Tenant Isolation Tests:**
-   - Tenant A cannot view, update, or assign Tenant B's personas.
-   - Cross-tenant persona assignment raises `CrossTenantPersonaAssignmentError`.
-   - Partial unique indexes enforce slug uniqueness independently for system templates vs tenant-scoped personas.
-2. **Pre-Invocation Policy Guard & Bottleneck Tests:**
-   - Persona with `READ_ONLY_INQUIRY` category permits `catalog_search` and `product_details`.
-   - Persona with `READ_ONLY_INQUIRY` category raises `PersonaToolPolicyViolationError` when attempting `product_add_or_update`.
-   - Conversational persona attempting `product_add_or_update` is rejected immediately before reaching tool handler.
-   - Missing `agent_id` for non-owner caller fails closed immediately.
-3. **Token Budget & Prompt Envelope Tests:**
-   - Base system templates compile within <= 200 tokens.
-   - Whitelisted overrides compile within <= 50 tokens.
-   - Fully merged persona envelopes compile within <= 250 tokens across Gemini and approved models.
-   - Token budget overflow raises validation error and emits `AuditEvent(event_type="system_prompt_budget_overflow")`.
-4. **Grounded Fact Precedence Tests (Decision 17):**
-   - Confirmed commercial facts from `FactService` override conflicting persona prompt text.
-   - Persona instructions attempting to invent discounts or guarantees are rejected or superseded.
-5. **Structured Escalation & AI Silence Tests (Decision 19):**
-   - Customer human request transitions conversation to `escalated`.
-   - Transactional outbox enqueues `notify_owner_escalation`.
-   - Inbound customer messages while `conversation.status == 'escalated'` produce **zero automated LLM responses**.
-6. **Enterprise RBAC & Overrides Governance Tests (Decision 9, 16):**
-   - Tenant User cannot modify persona bindings (HTTP 403).
-   - Tenant Admin can modify whitelisted `persona_overrides`.
-   - Unwhitelisted override keys raise HTTP 422 Unprocessable Entity.
-   - Superadmin cannot access tenant conversations or channel secrets.
-7. **Three-Tier Rollback & Downgrade Tests (Decision 13):**
-   - Soft rollback: setting `persona_id = NULL` immediately restores Phase 4D legacy prompt generation.
-   - System kill-switch: setting `ENABLE_PHASE5_PERSONAS = False` bypasses Phase 5 personas globally.
-   - Database migration downgrade (`alembic downgrade -1`) runs cleanly without errors or data corruption.
+### L.1 Explicit Core Test Cases (Mandatory Verification Criteria)
+1. **Case 1 — Unbound Channel Routing (Fail-Closed):**
+   - Channel has `channel.agent_id = None`.
+   - Customer sends inbound message via webhook.
+   - *Expected Assertion:* Message is stored; zero calls made to AIProvider; zero reply emitted to customer; trace records `skip_reason="unbound_channel_fail_closed"`; outbox alert `notify_owner_unbound_channel` is enqueued for owner.
+2. **Case 2 — Paused Digital Employee (Silent Ingestion):**
+   - Assigned digital employee has `agent.status = 'paused'`.
+   - Customer sends inbound message.
+   - *Expected Assertion:* Message is persisted in conversation history; AIProvider is NOT invoked (zero tokens consumed); zero automated reply is sent; trace records `status="skipped"`, `skip_reason="agent_paused_silent_ingestion"`; human operator is able to reply manually to the conversation.
+3. **Case 3 — Disabled Digital Employee (Strict Halt):**
+   - Assigned digital employee has `agent.status = 'disabled'`.
+   - Customer sends inbound message.
+   - *Expected Assertion:* Processing is strictly halted; interaction is prevented; trace records `status="failed"`, `skip_reason="agent_disabled_halt"`; zero AI generation occurs.
+4. **Case 4 — Escalated Conversation (Hard AI Silence at Engine Entry):**
+   - Conversation has `conversation.status = 'escalated'`.
+   - Customer sends follow-up inbound message that does NOT contain human escalation keywords.
+   - *Expected Assertion:* `process_incoming_message` intercepts the message at entry line 260; message is stored; AIProvider is NOT called; zero automated reply is dispatched; trace records `status="skipped"`, `skip_reason="conversation_escalated_ai_silence"`.
+5. **Case 5 — Multiple Digital Employees per Tenant (Complete Routing & Isolation):**
+   - Tenant A provisions Employee 1 (Support, Telegram Channel) and Employee 2 (Sales, WhatsApp Channel).
+   - Inbound message sent on Telegram Channel -> verifies execution strictly routed to Employee 1, using Employee 1's persona, tools, and recorded under `Conversation.agent_id = Employee 1`.
+   - Inbound message sent on WhatsApp Channel -> verifies execution strictly routed to Employee 2, using Employee 2's persona, tools, and recorded under `Conversation.agent_id = Employee 2`.
+   - *Expected Assertion:* 100% routing accuracy; zero cross-agent context leakage; zero permission elevation between employees.
+
+### L.2 Pre-Invocation Tool Policy Guard Tests
+- Support Agent (assigned `system_customer_support`) is allowed `catalog_search` and `product_details`.
+- Support Agent attempting `product_add_or_update` is blocked at `DecisionEngine.decide` with `PersonaToolPolicyViolationError` before reaching tool handler.
+- Sales Agent (assigned `system_sales_consultant`) is allowed `customer_create_or_update`.
+- Non-owner caller without verified identity fails closed immediately.
+
+### L.3 Token Budget & Prompt Envelope Tests
+- Merged persona envelopes for all system templates compile <= 250 tokens across Gemini and approved model tokenizers.
+- Overrides exceeding 50 tokens or merged prompt exceeding 1,500 tokens raise validation errors and emit `AuditEvent(event_type="system_prompt_budget_overflow")`.
+
+### L.4 Three-Tier Rollback & Downgrade Tests
+- Soft rollback: setting `agent.persona_id = NULL` cleanly restores fallback prompt.
+- Kill-switch: setting `ENABLE_PHASE5_PERSONAS = False` bypasses Layer 6 globally.
+- Downgrade: `alembic downgrade -1` runs cleanly without schema corruption.
 
 ---
 
@@ -572,25 +710,25 @@ Automated test suites will be placed in `tests/test_phase5_personas_and_policy_g
 ### M.1 Acceptance Testing Sandbox Isolation (Decision 12)
 Manual verification is conducted in a strictly isolated sandbox environment:
 - **Dedicated Test Tenant:** `test_tenant_phase5_sandbox` provisioned with isolated catalog and facts.
-- **Dedicated Test Telegram Bot:** Bound exclusively to the test tenant.
+- **Dedicated Test Telegram Bot:** Bound exclusively to the test Support Agent (`Channel.agent_id = support_agent.id`).
 - **Pre-Bound Test Owner:** Dedicated test user verified as tenant owner.
 - **Synthetic Test Data:** Non-production products, prices, and sample orders.
 
 ### M.2 Test Protocol & Live Scenarios
 
-#### Scenario TG-01: System Persona Support Boundary & Saudi Tone
-- **Setup:** Assign `system_customer_support` with `tone_profile = {"dialect": "saudi_corporate", "formality": "high"}`.
+#### Scenario TG-01: Support Agent Role Boundary & Saudi Tone
+- **Setup:** Telegram bot bound to Support Agent with `system_customer_support` and Saudi Corporate tone.
 - **Input:** "أهلاً بك، ما هي ساعات العمل لديكم؟ وهل يتوفر المنتج الفلاني؟"
 - **Expected Output:** Professional response in formal Saudi tone providing confirmed store hours and product info from `FactService`.
 - **Identity Invariant:** If asked "هل أنت ذكاء اصطناعي؟", responds truthfully that it is an AI digital employee.
 
-#### Scenario TG-02: Policy Guard In-Scope Action Execution
-- **Setup:** Assign `system_sales_consultant` with permitted `SAFE_WRITE_MUTATION` for customer registration.
-- **Input:** Customer provides name and contact details to request a quote.
+#### Scenario TG-02: Sales Agent In-Scope Action Execution
+- **Setup:** Webhook/WhatsApp bound to Sales Agent with `system_sales_consultant`.
+- **Input:** Customer provides name and contact details to request a quotation.
 - **Expected Result:** `customer_create_or_update` executes successfully, recording lead details in database.
 
 #### Scenario TG-03: Policy Guard Out-of-Scope Tool Denial & Polite Refusal
-- **Setup:** `system_customer_support` receives a request: "عدّل سعر المنتج رقم 10 إلى 50 ريال واعمل لي خصم خاص".
+- **Setup:** Support Agent receives a request: "عدّل سعر المنتج رقم 10 إلى 50 ريال واعمل لي خصم خاص".
 - **Expected Result:**
   - `DecisionEngine.decide` immediately denies `product_add_or_update` (Layer 6 block).
   - ZERO tool handler invoked.
@@ -604,20 +742,26 @@ Manual verification is conducted in a strictly isolated sandbox environment:
   - Database verification: **ZERO records inserted into `outbox_events`** for tool execution.
   - Truthful message displayed: execution blocked pending CR-05-01.
 
+#### Scenario TG-05: Paused Agent Silent Ingestion & Unbound Channel Verification
+- **Setup A (Paused):** Set Support Agent `status = 'paused'`. Send customer message via Telegram.
+  - *Expected Result:* Message appears in conversation; zero bot reply emitted; owner can reply manually.
+- **Setup B (Unbound):** Create new channel without `agent_id`. Send customer message.
+  - *Expected Result:* Zero bot reply emitted; owner alert visible on dashboard.
+
 ---
 
 ## 16. Section N: Explicit Go / No-Go Acceptance Criteria
 
 Phase 5 will be approved for production merge **only** if all 10 criteria pass:
 
-1. **Schema Integrity:** Alembic migration runs forwards and backwards cleanly on PostgreSQL 17 without data loss.
+1. **Schema Integrity:** Alembic migration runs forwards and backwards cleanly on PostgreSQL 17 without data loss, creating `employee_personas`, `Channel.agent_id`, `Conversation.agent_id`, and `Agent.persona_id`.
 2. **Partial Unique Indexes:** Partial indexes verified; duplicate slugs blocked for system templates and per tenant.
-3. **Tenant Isolation:** Zero cross-tenant persona leakage or assignment proven across automated tests.
-4. **Policy Guard Efficacy:** 100% of unpermitted tool calls blocked at `DecisionEngine.decide` before `ToolExecutor` reaches handlers.
-5. **Fail-Closed Enforcement:** Execution requests without verified identity or with unknown tool categories fail closed.
-6. **Token Budget Verification:** Fully merged persona envelope verified <= 250 tokens across all approved models independently.
-7. **Grounded Fact Precedence:** Confirmed facts from `FactService` strictly override conflicting persona instructions; zero price/policy hallucination.
-8. **AI Silence Invariant:** Escalated conversations produce zero automated LLM responses until human intervention.
+3. **Multi-Agent Isolation:** Complete conversational and lifecycle isolation between digital employees in the same tenant proven across automated tests.
+4. **Unbound Channel Fail-Closed:** 100% of messages on channels without `agent_id` fail closed with zero AI generation and owner alert.
+5. **Lifecycle State Enforcement:** Paused agents execute silent ingestion (zero LLM calls); disabled agents strictly halt.
+6. **Hard AI Silence Invariant:** 100% of messages arriving on escalated conversations produce zero automated LLM responses.
+7. **Policy Guard Efficacy:** 100% of unpermitted tool calls blocked at `DecisionEngine.decide` before `ToolExecutor` reaches handlers.
+8. **Token Budget Verification:** Fully merged persona envelope verified <= 250 tokens across all approved models independently.
 9. **CR-05-01 Gating Strictness:** Track B workflows remain strictly quarantined; zero broken outbox events inserted.
 10. **Zero Regression:** 100% of existing Phase 4 regression test suites (including Phase 4D campaigns) pass without failure.
 
@@ -629,39 +773,37 @@ Phase 5 establishes a **Granular Three-Tier Rollback Strategy** (Decision 13):
 
 ```mermaid
 flowchart TD
-    FAIL["Operational Incident / Persona Misbehavior"] --> EVAL{"Severity & Blast Radius"}
+    FAIL["Operational Incident / Employee Misbehavior"] --> EVAL{"Severity & Blast Radius"}
 
-    EVAL -->|Single Tenant Issue| TIER1["Tier 1: Tenant-Scoped Soft Rollback"]
-    TIER1 --> T1_ACT["Set agent.persona_id = NULL for Tenant"]
+    EVAL -->|Single Employee Issue| TIER1["Tier 1: Agent-Scoped Soft Rollback"]
+    TIER1 --> T1_ACT["Set agent.persona_id = NULL or agent.status = 'paused'"]
     T1_ACT --> T1_INV["Invalidate Local In-Memory Cache"]
     T1_ACT --> T1_AUD["Record Audit Event (actor, time, reason)"]
-    T1_ACT --> T1_RES["Tenant Reverts to Phase 4D Prompt (Other Tenants Unaffected)"]
+    T1_ACT --> T1_RES["Employee Falls Back or Pauses (Other Employees Unaffected)"]
 
     EVAL -->|System-Wide Runtime Bug| TIER2["Tier 2: System Kill-Switch"]
     TIER2 --> T2_ACT["Set ENABLE_PHASE5_PERSONAS = False"]
-    T2_ACT --> T2_RES["DecisionEngine & Prompts Globally Fallback to Phase 4D Verbatim"]
+    T2_ACT --> T2_RES["DecisionEngine Globally Bypasses Layer 6 & Multi-Agent Logic"]
     T2_ACT --> T2_ZERO["Zero Container Restart / Zero Database Mutation Required"]
 
     EVAL -->|Schema Corruption / Catastrophic| TIER3["Tier 3: Full Schema Migration Downgrade"]
     TIER3 --> T3_ACT[".venv/Scripts/alembic downgrade -1"]
-    T3_ACT --> T3_RES["Drops employee_personas & added columns; Data Restored to Phase 4D"]
+    T3_ACT --> T3_RES["Drops employee_personas, Channel.agent_id, Conversation.agent_id"]
 ```
 
-### O.1 Tier 1: Tenant-Scoped Soft Rollback (Atomic & Granular)
-- **Scope:** Affects only the single misbehaving or misconfigured tenant.
+### O.1 Tier 1: Agent-Scoped Soft Rollback (Atomic & Granular)
+- **Scope:** Affects only the single misbehaving digital employee.
 - **Execution:**
   ```sql
-  UPDATE agents SET persona_id = NULL, persona_overrides = '{}' WHERE tenant_id = :affected_tenant_id;
-  UPDATE channels SET persona_id = NULL, persona_overrides = '{}' WHERE tenant_id = :affected_tenant_id;
+  UPDATE agents SET persona_id = NULL, persona_overrides = '{}' WHERE id = :target_agent_id AND tenant_id = :tenant_id;
   ```
-- **Atomicity & Cache Invalidation:** The tenant's in-memory cache is immediately invalidated. If cache reload fails, the engine falls back directly to the database.
-- **Audit Logging:** An `AuditEvent(event_type="tenant_persona_soft_rollback", actor_id=..., metadata={"reason": "..."})` is permanently recorded.
-- **Blast Radius:** Completely isolated to the target tenant; all other tenants continue operating normally.
+- **Atomicity & Cache Invalidation:** The local worker cache is immediately invalidated.
+- **Blast Radius:** Completely isolated to the specific employee; other digital employees of the tenant continue operating normally.
 
 ### O.2 Tier 2: System Kill-Switch (`ENABLE_PHASE5_PERSONAS`)
 - **Scope:** Platform-wide immediate mitigation.
-- **Mechanism:** Environment or configuration flag `ENABLE_PHASE5_PERSONAS: bool = True` checked at the top of `DecisionEngine.decide()` and `ConversationalAgentEngine._build_system_prompt()`.
-- **Behavior:** When toggled to `False`, the system immediately bypasses all Phase 5 persona loading and policy guard evaluations, running the exact Phase 4D prompt generator and permission flow verbatim.
+- **Mechanism:** Environment or configuration flag `ENABLE_PHASE5_PERSONAS: bool = True` checked at the top of `DecisionEngine.decide()` and `ConversationalAgentEngine.process_incoming_message()`.
+- **Behavior:** When toggled to `False`, the system immediately bypasses Phase 5 persona and routing evaluations.
 - **Downtime:** Zero downtime, zero database schema alteration, zero container redeployment required.
 
 ### O.3 Tier 3: Complete Schema Migration Downgrade
@@ -670,36 +812,53 @@ flowchart TD
   ```powershell
   .venv\Scripts\alembic downgrade -1
   ```
-- **Outcome:** Cleanly drops `agents.persona_id`, `channels.persona_id`, and table `employee_personas`. All conversations, messages, channels, and outbox records remain intact.
+- **Outcome:** Cleanly drops `agents.persona_id`, `channels.agent_id`, `conversations.agent_id`, and table `employee_personas`. All core platform data remains intact.
 
 ---
 
-## 18. Section P: Formal Record of Approved Architectural Decisions (Decisions 1–20)
+## 18. Section P: Formal Record of Approved Architectural Decisions (Decisions 1–20) & Settled Governance
 
-Between 2026-10-31 and 2026-11-01, an exhaustive, evidence-based architectural decision-making session was conducted with the project owner. The table below represents the authoritative, legally binding record of all **20 Approved Architectural Decisions**:
+### P.1 The 20 Realigned Architectural Decisions Matrix
 
-| # | Architectural Decision Title | Approved Choice | Core Operational Invariant & Grounded Rule |
+| # | Architectural Decision Title | Approved Choice | Realignment / Core Operational Invariant |
 | :--- | :--- | :--- | :--- |
-| **01** | Legacy Agents Migration Strategy | **Choice C** | Channel- & Owner-Aware Migration. Heuristic mapping based on channel type; ambiguous agents fallback to `system_customer_support` with custom instructions preserved in `persona_overrides["custom_instructions"]` and audit logged. |
+| **01** | Legacy Migration & Workforce Provisioning | **Choice C (Realigned)** | **Realigned:** Complex migration heuristics dropped (zero real clients). Test tenants and new tenants are provisioned with clean digital employees on-demand without hardcoded names or ceilings. |
 | **02** | Track A Permitted Tools Scope | **Choice B** | 10 read tools + 3 calibrated write tools (`customer_create_or_update`, `task_create`, `generate_document`). `product_add_or_update` strictly locked to Owner/Admin only. |
 | **03** | Owner Identity Verification | **Choice A** | Cryptographic verification via JWT in REST API; pre-bound channel owner record in chat connectors (`owner_user.id`). ZERO auto-inference or guessing the first owner (`Owner.first()`). Unverified requests fail closed. |
 | **04** | CR-05-01 & Track B Decoupling | **Choice A + C** | Full approval challenge lifecycle displayed and audited. On approval, transition status to `approved_execution_blocked` with truthful message. ZERO outbox events inserted while OutboxWorker is broken. Track B strictly BLOCKED pending dedicated CR-05-01 milestone. |
-| **05** | Persona Binding Hierarchy | **Choice B** | Dual binding hierarchy: `Channel Override` > `Agent Base` > Tenant Default. Add `persona_id` to both `Agent` and `Channel` models. |
-| **06** | Canonical Tool Category Taxonomy | **Choice A** | First-class `category: ToolCategory` in `ToolContract` (`READ_ONLY_INQUIRY`, `SAFE_WRITE_MUTATION`, `SENSITIVE_WRITE_MUTATION`, `FINANCIAL_TRANSACTION`, `SYSTEM_ADMINISTRATION`). Fail-closed registration in `ToolRegistry`. |
+| **05** | Multi-Employee Routing Hierarchy | **Choice B (Realigned)** | **Realigned:** Clean separation of concerns: `Channel.agent_id -> Agent -> Agent.persona_id -> EmployeePersona`. Unbound channels fail closed immediately. Channels route to Digital Employees; Digital Employees possess Personas. |
+| **06** | Canonical Tool Category Taxonomy | **Choice A** | First-class `category: ToolCategory` in `ToolContract` (`READ_ONLY_INQUIRY`, `SAFE_WRITE_MUTATION`, `SENSITIVE_WRITE_MUTATION`, `FINANCIAL_TRANSACTION`, `SYSTEM_ADMINISTRATION`). Fail-closed registration in `ToolRegistry`. Future roles (Accounting) require explicit tool categorization. |
 | **07** | Token Budget Measurement Mechanism | **Choice A (Mod)** | Model-Aware Design-Time token measurement: base template <= 200 tokens, overrides <= 50 tokens, merged envelope <= 250 tokens across every approved model independently. System prompt budget <= 1,500 tokens. Safe halt on overflow. |
 | **08** | Multi-Worker Cache Synchronization | **Choice B** | Configurable 60s in-memory TTL (`PERSONA_CACHE_TTL_SECONDS = 60`). No direct Redis read-path coupling. Immediate local cache invalidation on update; fail-closed DB reload on miss/error. |
 | **09** | Persona Overrides Governance & Whitelist | **Choice B (Mod)** | Strict whitelist: `display_name`, `greeting_message`, structured `tone_profile`, and `custom_instructions` (capped at 50 tokens). Merged envelope <= 250 tokens. Unwhitelisted keys reject with HTTP 422. |
-| **10** | New Tenant Provisioning Defaults | **Choice B (Mod)** | Sensible default `system_customer_support` for new tenants/agents. System templates in DB are immutable for tenants. HTTP 422 / 404 on invalid slug. |
-| **11** | Custom Personas Scope in Track A | **Choice A** | Track A delivers 3 system templates + whitelisted overrides only. Tenant-facing custom persona CRUD APIs deferred to Phase 6+. Schema retains `tenant_id` for forward compatibility. |
-| **12** | Acceptance Testing Sandbox & Go/No-Go | **Choice A** | Strictly isolated sandbox environment: dedicated test tenant (`test_tenant_phase5_sandbox`), test bot, bound test owner, synthetic data. TG-04 before/after DB checks. 10 mandatory Go/No-Go criteria. |
-| **13** | Granular Three-Tier Rollback Strategy | **Choice A** | Granular 3-tier rollback: Tier 1 tenant-scoped soft rollback with cache invalidation and audit log; Tier 2 system kill-switch `ENABLE_PHASE5_PERSONAS = False`; Tier 3 tested migration downgrade script. |
-| **14** | Arabic Dialect & Observability | **Choice A** | `tone_profile` structured schema: `saudi_corporate`, `gcc_friendly`, `modern_standard_arabic`. Prohibits unconfirmed commercial promises. Execution trace logs: `persona_slug`, `persona_version`, `persona_source`, `effective_dialect`, `envelope_tokens`. |
+| **10** | Digital Workforce Provisioning Defaults | **Choice B (Realigned)** | **Realigned:** Template-driven on-demand creation. No hardcoded names or employee count ceilings. Standard system persona templates available in DB for tenant selection. |
+| **11** | Custom Personas Scope in Track A | **Choice A** | Track A delivers standard system templates + whitelisted overrides only. Tenant-facing custom persona CRUD APIs deferred to Phase 6+. Schema retains `tenant_id` for forward compatibility. |
+| **12** | Acceptance Testing Sandbox & Go/No-Go | **Choice A** | Strictly isolated sandbox environment: dedicated test tenant (`test_tenant_phase5_sandbox`), test bot, bound test owner, synthetic data. TG-01 to TG-05 acceptance scenarios. 10 mandatory Go/No-Go criteria. |
+| **13** | Granular Three-Tier Rollback Strategy | **Choice A** | Granular 3-tier rollback: Tier 1 employee-scoped soft rollback; Tier 2 system kill-switch `ENABLE_PHASE5_PERSONAS = False`; Tier 3 tested migration downgrade script. |
+| **14** | Arabic Dialect & Observability | **Choice A** | `tone_profile` structured schema: `saudi_corporate`, `gcc_friendly`, `modern_standard_arabic`. Prohibits unconfirmed commercial promises. Execution trace logs: `agent_id`, `persona_slug`, `persona_version`, `effective_dialect`, `envelope_tokens`. |
 | **15** | Micro-Stages Delivery & Per-Stage Gating | **Choice A** | Strict sequential Micro-Stages 5.1 to 5.5. Independent commit per stage (Conventional Commits), 100% test pass, Phase 4D regression verification, evidence report, and explicit owner sign-off before proceeding to next stage. |
-| **16** | Enterprise RBAC & Isolated Governance | **Choice A** | Tenant owner/admin manage bindings and permitted overrides; tenant user read-only; neither role can alter tool categories or security rules. Superadmin manages system templates only. `tenant_id` strictly from JWT. |
+| **16** | Enterprise RBAC & Isolated Governance | **Choice A** | Tenant owner/admin manage digital employees and permitted overrides; tenant user read-only; neither role can alter tool categories or security rules. Superadmin manages system templates only. `tenant_id` strictly from JWT. |
 | **17** | Strict Grounded Fact Precedence Invariant | **Choice A** | Hierarchy: 1. Security / Refusal / Tool Boundaries -> 2. Confirmed Commercial Facts from `FactService` / `BusinessBrain` SSOT -> 3. Persona tone & custom instructions. Conflicts resolved by discarding conflicting prompt instructions. Anti-hallucination. |
 | **18** | Explicit Persona Versioning & Safety | **Choice A** | Add `version: int` to `EmployeePersona`. Incremented on system template updates. Logged in `ExecutionTrace`. Automated re-validation of all active tenant overrides before template upgrades to ensure merged envelope <= 250 tokens. |
-| **19** | Structured Escalation & AI Silence Invariant | **Choice A** | Explicit triggers (human request, out-of-scope actions like refunds, critical frustration). Enqueue `notify_owner_escalation` via Outbox. **AI Silence Invariant:** Complete silence (zero LLM replies) while `conversation.status == 'escalated'`. |
-| **20** | Planning Closure & Implementation Gate | **Choice A** | Proposal updated to `APPROVED ARCHITECTURAL SPECIFICATION — IMPLEMENTATION REQUIRES SEPARATE EXPLICIT AUTHORIZATION`. Branch `checkpoint/phase-12-knowledge-base`. Execution requires separate explicit prompt: "ابدأ تنفيذ Stage 5.1". |
+| **19** | Structured Escalation & Hard AI Silence | **Choice A (Hardened)** | **Hardened:** Explicit escalation triggers; outbox event `notify_owner_escalation`. **Hard Programmatic AI Silence:** Engine intercepts incoming messages at line 260 when `conversation.status == 'escalated'` and skips AIProvider completely. |
+| **20** | Planning Closure & Implementation Gate | **Choice A** | Specification realigned and submitted for owner sign-off. Branch `checkpoint/phase-12-knowledge-base`. Execution requires separate explicit prompt: "ابدأ تنفيذ Stage 5.1". |
+
+---
+
+### P.2 Resolution of Previous Open Decisions (100% Settled)
+The three open architectural questions previously identified have been formally settled by the project owner:
+
+1. **Resolution of Open Decision 1 (Unbound Channels):**
+   - **Approved Directive:** **Strict Fail-Closed.**
+   - If `channel.agent_id IS NULL`, the platform makes zero AI calls, sends zero customer replies, logs an explicit trace error (`unbound_channel_fail_closed`), and enqueues an alert for the owner.
+2. **Resolution of Open Decision 2 (Paused Digital Employee):**
+   - **Approved Directive:** **Silent Ingestion.**
+   - When `agent.status == 'paused'`, incoming customer messages are saved in the conversation, the model is NOT invoked, zero automated replies are sent, and human operator manual replies remain enabled.
+3. **Resolution of Open Decision 3 (Agent Handoff):**
+   - **Approved Directive:** **Phase 6+ Deferral.**
+   - Dynamic automatic transfer between agents on a shared channel is deferred to Phase 6+. In Phase 5 Track A, `Conversation.agent_id` guarantees consistent, uncorrupted employee ownership.
+
+**Status:** **ZERO OPEN ARCHITECTURAL DECISIONS REMAIN.** All architectural principles, schema extensions, routing policies, and safety invariants for Phase 5 Track A are 100% resolved and closed.
 
 ---
 
@@ -707,10 +866,10 @@ Between 2026-10-31 and 2026-11-01, an exhaustive, evidence-based architectural d
 - **Active Branch:** `checkpoint/phase-12-knowledge-base`
 - **Architectural Status:** **APPROVED ARCHITECTURAL SPECIFICATION**
 - **Implementation Authorization:** **SEPARATE EXPLICIT PROMPT REQUIRED**
-- **Next Permitted Action:** Track A implementation (starting with Micro-Stage 5.1: Database Schema, Versioning, Partial Indexes & Models) remains strictly frozen until the project owner provides the explicit instruction:
+- **Next Permitted Action:** Track A implementation (starting with Micro-Stage 5.1) remains strictly frozen until the project owner explicitly provides the instruction:
   ```text
   ابدأ تنفيذ Stage 5.1
   ```
 
 ---
-*End of Phase 5 Approved Architectural Specification (Track A Delivery & Guardrails).*
+*End of Phase 5 Realigned Architectural Specification (Multi-Employee Platform Architecture).*

@@ -48,6 +48,9 @@ class Tenant(Base):
         server_default=text("80.0"),
     )
 
+    # DEPRECATED (Phase 5 Stage 5.1): Replaced by multi-agent architecture where
+    # agents.name is the authoritative source of digital employee names.
+    # Kept temporarily for read compatibility during migration; will be dropped post-Phase 5.
     employee_name: Mapped[str | None] = mapped_column(
         String(100),
         nullable=True,
