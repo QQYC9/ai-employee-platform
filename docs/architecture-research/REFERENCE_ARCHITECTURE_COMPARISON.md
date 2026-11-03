@@ -65,14 +65,24 @@ By conducting deep, source-level teardowns across 7 industry-leading platforms, 
 
 ## 4. Legal & Commercial Licensing Analysis
 
-A critical discovery of this research is that two popular tools cannot be legally used for a commercial multi-tenant SaaS offering without negotiated enterprise contracts:
+Previous research documents broadly stated that Dify and n8n are "prohibited for SaaS". A legally precise engineering assessment requires disaggregating software usage across six distinct operational scenarios:
 
+| Operational Scenario | Memento (Apache 2.0) | LangGraph (MIT) | MS Agent (MIT) | RagLeap (MIT) | OpenAI SDK (MIT) | Dify (Mod-Apache 2.0) | n8n (SUL 1.0) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Scenario 1: Forking / Copying Code** | Allowed | Allowed | Allowed | Allowed | Allowed | Restricted (Mod-Apache) | Restricted (SUL) |
+| **Scenario 2: Importing as Library / Dependency** | Allowed | Allowed | Allowed | Allowed | Allowed | Allowed (Non-multi-tenant) | Infectious (SUL attaches) |
+| **Scenario 3: Internal Single-Company Tooling** | Allowed | Allowed | Allowed | Allowed | Allowed | **Allowed** | **Allowed** |
+| **Scenario 4: Multi-Tenant SaaS Hosting** | Allowed | Allowed | Allowed | Allowed | Allowed | **PROHIBITED** (Clause 1.a) | **PROHIBITED** (Non-commercial) |
+| **Scenario 5: Customer-Facing Workflow Builder** | Allowed | Allowed | Allowed | Allowed | Allowed | **PROHIBITED** (Clause 1.a) | **PROHIBITED** (Clause 3.2) |
+| **Scenario 6: Commercial Backend / White-Label** | Allowed | Allowed | Allowed | Allowed | Allowed | Restricted (Logo Clause 1.b)| **PROHIBITED** |
+
+### Key Legal Distinctions:
 1. **Dify (Modified Apache License 2.0):**  
-   Clause 1.a explicitly forbids operating a multi-tenant environment (where 1 workspace = 1 tenant) from the source code without written permission.
+   Clause 1.a explicitly forbids operating a multi-tenant environment (where 1 workspace = 1 tenant) from the source code without written permission. Running Dify internally for a single company is permitted, but hosting multi-tenant workspaces for commercial clients violates Clause 1.a.
 2. **n8n (Sustainable Use License 1.0):**  
-   Explicitly restricts usage to internal business or non-commercial use. Selling or hosting n8n as a commercial service is strictly forbidden.
+   Clause 3.2 explicitly restricts usage to internal business or non-commercial use. Distributing workflows or offering workflow automation as a commercial SaaS service to third-party clients is prohibited under SUL. All `.ee` enterprise components require an Enterprise License.
 3. **The Permissive Leaders (MIT & Apache 2.0):**  
-   **LangGraph** (MIT), **Microsoft Agent Framework** (MIT), **RagLeap Core** (MIT), **OpenAI Agents SDK** (MIT), and **Memento-Skills** (Apache 2.0) are fully permissive open-source licenses allowing royalty-free commercial SaaS platforms.
+   **LangGraph** (MIT), **Microsoft Agent Framework** (MIT), **RagLeap Core** (MIT), **OpenAI Agents SDK** (MIT), and **Memento-Skills** (Apache 2.0) are fully permissive open-source licenses allowing royalty-free commercial SaaS platforms across all scenarios.
 
 **Strategic Rule for AI-Employee-Platform:**  
 We will write 100% clean, native Python/FastAPI implementations of the architectural patterns pioneered by Dify and n8n (such as DB connection release and `WaitTracker` suspension) without copying proprietary source code or assets.
@@ -85,16 +95,18 @@ We will write 100% clean, native Python/FastAPI implementations of the architect
 - **LangGraph Pregel Loops:** Best for deterministic, cyclic business workflows where states must be saved at exact node boundaries and rolled back or branched.
 - **OpenAI Agents Handoffs:** Best for natural conversational delegation where The Godfather decides which specialist handles a user query, sanitizing context across boundaries using `input_filter`.
 - **Selected Hybrid:** We will construct a **Pregel-driven supervisor loop** (The Godfather) that uses **declarative Handoff contracts** to activate specialized digital employees.
+- **Guardrails:** Impose a strict ceiling (`MAX_HANDOFF_HOPS = 5`) to prevent circular delegation ping-pong.
 
 ### B. Skill Evolution vs Static Tooling
 - Standard frameworks (LangGraph, OpenAI SDK, Dify) treat tools as static Python functions registered at startup.
 - **Memento-Skills** introduces continuous empirical evolution: an agent generates new tool code, tests it through a 6-gate validation pipeline, runs it in an isolated UV sandbox, and tracks utility in `utility.json`.
-- **Selected Adoption:** Adopt Memento-Skills' 6-gate verification pipeline for background skill generation, ensuring runtime stability before dynamic tools are exposed to business tenants.
+- **Selected Adoption:** Adopt Memento-Skills' 6-gate verification pipeline for background skill generation.
+- **Operational Boundary:** **STRICTLY PROHIBITED IN REAL-TIME CONVERSATIONS.** Compiling and executing 6 test gates takes 10–60 seconds; this process is quarantined exclusively to offline background daemons (Dream Daemon), with final activation requiring supervisor and owner approval.
 
 ### C. Safety: Static Prompts vs Tripwire Guardrails & Autonomy Tiers
 - Naive engines attempt to enforce safety through long system prompt instructions.
 - **RagLeap Core + OpenAI SDK** enforce safety structurally:
-  1. Input/Output Tripwires that abort execution *before* tokens are consumed.
+  1. Input/Output Tripwires that abort execution *before* tokens are consumed (`tripwire_triggered`).
   2. 3-tier autonomy gating (`off`, `semi`, `full`).
   3. Sensitive-domain auto-downgrade (financial, legal, health actions forced to require human approval).
   4. Untrusted customer messages hard-isolated to `INTENT_SAFE_ROLES`.
@@ -131,9 +143,9 @@ Based on verified empirical evidence, the new platform architecture will be stru
 |  2. Suspension/Resumption: WaitTracker pattern for long-running approvals         |
 |  3. DB Pool Preservation: session.commit() / session.close() before LLM streams  |
 |  4. Secret Security:      Immutable Scope + SecretStr redaction pipeline          |
-|  5. Audit Log:            Cryptographic SHA-256 HMAC hash chain                   |
+|  5. Audit Log:            Tamper-Evident SHA-256 HMAC hash chain (externally anchored) |
 |  6. Channel Formatting:   4096-char chunking & clean markdown for Telegram        |
-|  7. Skill Evolution:      6-Gate Transactional Pipeline + UV Sandboxing           |
+|  7. Skill Evolution:      6-Gate Transactional Pipeline (Offline Dream Daemon)    |
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -142,21 +154,22 @@ Based on verified empirical evidence, the new platform architecture will be stru
 | Engine Component | Selected Pattern Origin | Exact Implementation Blueprint |
 | :--- | :--- | :--- |
 | **Supervisor Runtime** | LangGraph + RagLeap Core | Pregel state loop with untrusted channel scoping (`INTENT_SAFE_ROLES`). |
-| **Multi-Agent Handoffs** | OpenAI Agents SDK | Explicit `Handoff` instances with `input_filter` context sanitization. |
+| **Multi-Agent Handoffs** | OpenAI Agents SDK | Explicit `Handoff` instances with `input_filter` context sanitization (max 5 hops). |
 | **Database Pool Safety** | Dify (`fc_agent_runner.py`) | Explicit `session.commit()` and `session.close()` immediately prior to provider LLM streams. |
 | **Human-in-the-Loop** | RagLeap Core + n8n | 3-tier autonomy (`off`, `semi`, `full`) + `WaitTracker` execution suspension. |
 | **Secret Management** | RagLeap Core (`secrets.py`) | `SecretStr` preventing string conversion/leakage; constant-time comparison. |
 | **Tenant Isolation** | RagLeap Core (`scope.py`) | Type-safe immutable `Scope(tenant, subject, agent, session)`. |
-| **Audit Compliance** | RagLeap Core (`audit.py`) | Append-only SHA-256 HMAC tamper-evident hash chain. |
+| **Audit Compliance** | RagLeap Core (`audit.py`) | Append-only SHA-256 HMAC **tamper-evident** hash chain with external root digest anchoring. |
 | **Channel Rendering** | Microsoft Agent Framework | 4096-char smart message chunking and markdown normalization for Telegram. |
-| **Dynamic Skill Evolution**| Memento-Skills | 6-gate validation pipeline (Syntax, Contract, Security, Test, Integration, Smoke) + UV. |
+| **Dynamic Skill Evolution**| Memento-Skills | 6-gate validation pipeline + UV sandboxing (quarantined to offline background daemons). |
 | **Memory Adaptation** | RagLeap Core (`learning.py`)| Closed-loop outcome-weighted memory reinforcement based on approval outcomes. |
 
 ---
 
-## 7. Next Engineering Phase
+## 7. Acceptance Review Status & Next Engineering Phase
 
-With the research and teardown of all 7 reference platforms completed, audited, and codified, the research phase is officially **COMPLETE**.
+This comparative synthesis and all seven underlying reference reports were independently audited in [`RESEARCH_ACCEPTANCE_REVIEW.md`](./RESEARCH_ACCEPTANCE_REVIEW.md) and officially designated as:  
+**STATUS: ACCEPTED WITH CORRECTIONS (`مقبول مع تصحيحات محددة`)**.
 
-The project is now primed to enter:
+The platform research phase is officially closed. The engineering team is cleared to proceed to:  
 **Phase 1: Architecture Blueprint & Domain Model Specification (`MASTER_ARCHITECTURE_BLUEPRINT.md`)**, where the core domain models, state schemas, and database migrations will be formally drafted.

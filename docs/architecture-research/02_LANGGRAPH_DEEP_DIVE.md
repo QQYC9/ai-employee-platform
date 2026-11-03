@@ -41,7 +41,7 @@ graph TD
         NodeC --> END([END Node])
     end
 
-    subgraph PregelLoop ["2. محرك الحلقة الدائرية (Pregel Engine - loop.py)"]
+    subgraph PregelLoop ["2. محرك الحلقة الدائرية (Pregel Engine - _loop.py)"]
         Tick[Tick / Step Execution] --> PullActive[سحب العقد النشطة بناءً على القنوات]
         PullActive --> ExecTask[تشغيل مهام العقد بالتوازي / التتابع]
         ExecTask --> CheckInterrupt{هل رُفعت GraphInterrupt؟}
@@ -62,7 +62,7 @@ graph TD
 ```
 
 ### 2.1 بنية المحرك (Pregel Execution Loop)
-- يقع قلب التنفيذ في [`libs/langgraph/langgraph/pregel/loop.py`](file:///D:/AI-Employee-Platform-Research/langgraph/libs/langgraph/langgraph/pregel/loop.py).
+- يقع قلب التنفيذ في [`libs/langgraph/langgraph/pregel/_loop.py`](file:///D:/AI-Employee-Platform-Research/langgraph/libs/langgraph/langgraph/pregel/_loop.py) (2,166 سطراً).
 - يدير المحرك الحالات وفق نموذج **Pregel** (معالجة متزامنة متدرجة بالحواف والحالات الموجهة):
   - كل خطوة (Tick) تقرأ من قنوات البيانات (Channels).
   - تُنفذ دوال العقد (Node Functions) كدوال نقية نسبياً تستقبل الحالة وترجع تحديثات جزئية.
