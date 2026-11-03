@@ -1,6 +1,6 @@
 # Architecture Research Phase Progress & Index
 
-**Phase Status:** **ACCEPTED WITH CORRECTIONS**  
+**Phase Status:** **ACCEPTED WITH CORRECTIONS & EXPLICIT BOUNDARIES**  
 **Directory:** `docs/architecture-research/`  
 **Acceptance Review:** [`RESEARCH_ACCEPTANCE_REVIEW.md`](./RESEARCH_ACCEPTANCE_REVIEW.md)  
 **Completion Date:** 2026-11-03  
@@ -20,7 +20,7 @@
 | [`06_RAGLEAP_CORE_DEEP_DIVE.md`](./06_RAGLEAP_CORE_DEEP_DIVE.md) | RagLeap Core (3-Tier Autonomy, Hash-Chained Audit, Scope, SecretStr) | `b9bb6fc` | **Verified & Audited** |
 | [`07_OPENAI_AGENTS_SDK_DEEP_DIVE.md`](./07_OPENAI_AGENTS_SDK_DEEP_DIVE.md) | OpenAI Agents SDK (Handoffs, Tripwire Guardrails, SQLAlchemySession) | `0dc4cf1` | **Verified & Audited** |
 | [`REFERENCE_ARCHITECTURE_COMPARISON.md`](./REFERENCE_ARCHITECTURE_COMPARISON.md) | 23-Criteria Master Comparison Matrix & Definitive Pattern Blueprint | Multi | **Verified & Audited** |
-| [`RESEARCH_ACCEPTANCE_REVIEW.md`](./RESEARCH_ACCEPTANCE_REVIEW.md) | Independent Acceptance Review (Evidence, Accuracy & Boundaries) | `d8d5f33` | **OFFICIAL ACCEPTANCE** |
+| [`RESEARCH_ACCEPTANCE_REVIEW.md`](./RESEARCH_ACCEPTANCE_REVIEW.md) | Independent Acceptance Review (Evidence, Accuracy & Boundaries) | `bd85c2d` | **OFFICIAL ACCEPTANCE** |
 
 ---
 

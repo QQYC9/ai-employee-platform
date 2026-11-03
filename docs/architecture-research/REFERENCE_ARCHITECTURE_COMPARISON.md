@@ -151,25 +151,25 @@ Based on verified empirical evidence, the new platform architecture will be stru
 
 ### Pattern Selection Synthesis Table
 
-| Engine Component | Selected Pattern Origin | Exact Implementation Blueprint |
-| :--- | :--- | :--- |
-| **Supervisor Runtime** | LangGraph + RagLeap Core | Pregel state loop with untrusted channel scoping (`INTENT_SAFE_ROLES`). |
-| **Multi-Agent Handoffs** | OpenAI Agents SDK | Explicit `Handoff` instances with `input_filter` context sanitization (max 5 hops). |
-| **Database Pool Safety** | Dify (`fc_agent_runner.py`) | Explicit `session.commit()` and `session.close()` immediately prior to provider LLM streams. |
-| **Human-in-the-Loop** | RagLeap Core + n8n | 3-tier autonomy (`off`, `semi`, `full`) + `WaitTracker` execution suspension. |
-| **Secret Management** | RagLeap Core (`secrets.py`) | `SecretStr` preventing string conversion/leakage; constant-time comparison. |
-| **Tenant Isolation** | RagLeap Core (`scope.py`) | Type-safe immutable `Scope(tenant, subject, agent, session)`. |
-| **Audit Compliance** | RagLeap Core (`audit.py`) | Append-only SHA-256 HMAC **tamper-evident** hash chain with external root digest anchoring. |
-| **Channel Rendering** | Microsoft Agent Framework | 4096-char smart message chunking and markdown normalization for Telegram. |
-| **Dynamic Skill Evolution**| Memento-Skills | 6-gate validation pipeline + UV sandboxing (quarantined to offline background daemons). |
-| **Memory Adaptation** | RagLeap Core (`learning.py`)| Closed-loop outcome-weighted memory reinforcement based on approval outcomes. |
+| Engine Component | Selected Pattern Origin | Exact Implementation Blueprint | Methodological Status |
+| :--- | :--- | :--- | :---: |
+| **Supervisor Runtime** | LangGraph + RagLeap Core | Pregel state loop with untrusted channel scoping (`INTENT_SAFE_ROLES`). | **ARCHITECTURAL DECISION** |
+| **Multi-Agent Handoffs** | OpenAI Agents SDK | Explicit `Handoff` instances with `input_filter` context sanitization. Cycle limit `MAX_HANDOFF_HOPS` needs empirical calibration. | **HYPOTHESIS** |
+| **Database Pool Safety** | Dify (`fc_agent_runner.py`) | Explicit `session.commit()` and `session.close()` immediately prior to provider LLM streams. | **ARCHITECTURAL DECISION** |
+| **Human-in-the-Loop** | RagLeap Core + n8n | 3-tier autonomy (`off`, `semi`, `full`) + `WaitTracker` execution suspension. | **ARCHITECTURAL DECISION** |
+| **Secret Management** | RagLeap Core (`secrets.py`) | `SecretStr` preventing string conversion/leakage; constant-time comparison. | **ARCHITECTURAL DECISION** |
+| **Tenant Isolation** | RagLeap Core (`scope.py`) | Type-safe immutable `Scope(tenant, subject, agent, session)`. | **ARCHITECTURAL DECISION** |
+| **Audit Compliance** | RagLeap Core (`audit.py`) | Append-only SHA-256 HMAC **tamper-evident** hash chain with external root digest anchoring. | **ARCHITECTURAL DECISION** |
+| **Channel Rendering** | Microsoft Agent Framework | 4096-char smart message chunking and markdown normalization for Telegram. | **ARCHITECTURAL DECISION** |
+| **Dynamic Skill Evolution**| Memento-Skills | 6-gate validation pipeline + UV sandboxing (quarantined to offline background daemons). | **HYPOTHESIS (Staging Test)** |
+| **Memory Adaptation** | RagLeap Core (`learning.py`)| Closed-loop outcome-weighted memory reinforcement based on approval outcomes. Weight delta requires empirical calibration. | **HYPOTHESIS (Calibration)** |
 
 ---
 
 ## 7. Acceptance Review Status & Next Engineering Phase
 
 This comparative synthesis and all seven underlying reference reports were independently audited in [`RESEARCH_ACCEPTANCE_REVIEW.md`](./RESEARCH_ACCEPTANCE_REVIEW.md) and officially designated as:  
-**STATUS: ACCEPTED WITH CORRECTIONS (`مقبول مع تصحيحات محددة`)**.
+**STATUS: ACCEPTED WITH CORRECTIONS & EXPLICIT BOUNDARIES (`مقبول مع تصحيحات وحدود صريحة`)**.
 
 The platform research phase is officially closed. The engineering team is cleared to proceed to:  
 **Phase 1: Architecture Blueprint & Domain Model Specification (`MASTER_ARCHITECTURE_BLUEPRINT.md`)**, where the core domain models, state schemas, and database migrations will be formally drafted.

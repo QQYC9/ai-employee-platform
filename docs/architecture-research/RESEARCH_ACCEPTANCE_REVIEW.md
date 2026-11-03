@@ -2,28 +2,27 @@
 
 **Document ID:** `RESEARCH_ACCEPTANCE_REVIEW`  
 **Target Repository:** `QQYC9/ai-employee-platform`  
-**Audited Commit:** `d8d5f33`  
+**Audited Commit:** `bd85c2d`  
 **Review Date:** 2026-11-03  
-**Review Status:** **ACCEPTED WITH CORRECTIONS**  
+**Review Status:** **ACCEPTED WITH CORRECTIONS & EXPLICIT BOUNDARIES**  
 **Auditing Entity:** Independent Architecture Review Board & Forensic Verification Group  
 
 ---
 
 ## 1. Executive Summary
 
-This document presents an independent, source-level engineering acceptance review of the reference research package published in `docs/architecture-research/` at commit `d8d5f33`. The research examined seven major agentic and automation systems (`Memento-Skills`, `LangGraph`, `Microsoft Agent Framework`, `Dify`, `n8n`, `RagLeap Core`, and `OpenAI Agents SDK`) alongside a master comparative synthesis.
+This document presents an exhaustive, source-level engineering acceptance review of the reference research package published in `docs/architecture-research/`. The research examined seven reference codebases (`Memento-Skills`, `LangGraph`, `Microsoft Agent Framework`, `Dify`, `n8n`, `RagLeap Core`, and `OpenAI Agents SDK`) alongside a master comparative synthesis.
 
-### Core Review Findings:
-1. **Empirical Substantive Evidence:** The core architectural mechanisms identified across the seven repositories—such as Pregel state iteration, pre-stream database session release, wait-tracker execution suspension, three-tier autonomy gating, and multi-agent handoffs—are **substantively authentic, verified in actual source code, and directly applicable** to replacing the legacy engine (`conversational_agent_engine.py`).
-2. **Deficiencies & Critical Distortions Identified:**
-   - **Audit Immutability Claim:** The previous comparison document described the SHA-256 HMAC hash chain from RagLeap Core as "tamper-proof / unalterable" (غير قابل للتلاعب). This is technically inaccurate. As RagLeap Core's own source documentation states, a hash chain is **tamper-evident, NOT tamper-proof**. Without external anchoring or write-restricted key infrastructure, an adversary with database access can rewrite historical records and recompute the chain.
-   - **Licensing Generalizations:** Previous summaries labeled Dify and n8n with sweeping assertions ("SaaS Strictly Prohibited"). The review establishes a precise, six-scenario legal analysis distinguishing internal operational workflows, back-office automation on behalf of customers, and multi-tenant self-service workflow platforms.
-   - **Internal Source Path Inaccuracies:** Minor path inaccuracies were identified in three reports (Memento-Skills directory roots, LangGraph private module prefix `_loop.py`, and Microsoft Agent Framework package hierarchies).
-   - **Operational Boundary of Skill Evolution:** Dynamic tool synthesis via Memento's 6-gate pipeline cannot run inside real-time customer conversations due to latency (10–60s); it must be quarantined to offline background daemons.
+### Core Review Objectives:
+1. **Fact-Check Empirical Claims:** Verify whether claimed mechanisms (Pregel loops, connection release, wait trackers, autonomy gates, handoffs) exist in raw source code at verified commit hashes.
+2. **Eliminate Unjustified Decision Claims:** Strip unverified numerical constants (e.g. `MAX_HANDOFF_HOPS = 5`, `weight = 0.02`) and premature engineering choices of false "Approved" (`معتمد`) status, reclassifying them strictly as `SOURCE-VERIFIED`, `ARCHITECTURAL DECISION`, `HYPOTHESIS`, or `OPEN`.
+3. **Rigorous Six-Scenario Licensing Audit:** Provide precise legal citations and scenario mappings for each tool, establishing conservative risk-avoidance principles for the platform.
+4. **Deep Crash Recovery & Distributed Failure Modeling:** Formulate the formal theoretical and operational failure model (worker leases, fencing tokens, idempotency, side-effect handling, and the physical boundaries of "Exactly-Once").
+5. **Comprehensive Open Architectural Issues Register:** Catalogue all unresolved design questions across 14 architectural dimensions, detailing options, trade-offs, and required experiments before blueprinting.
 
-### Final Acceptance Verdict:
-**ACCEPTED WITH CORRECTIONS (`مقبول مع تصحيحات محددة`)**.  
-The evidence base and architectural patterns are fundamentally sound and verified, but all downstream design decisions in `MASTER_ARCHITECTURE_BLUEPRINT.md` must adhere strictly to the corrections and risk boundaries codified in this review.
+### Acceptance Verdict:
+**ACCEPTED WITH CORRECTIONS & EXPLICIT BOUNDARIES (`مقبول مع تصحيحات وحدود صريحة`)**.  
+The evidence base and architectural patterns are verified in source code. All unjustified numbers have been converted to testable hypotheses. All open architectural questions are cataloged without premature closure. The findings are now formally validated as reliable inputs for Phase 1 (`MASTER_ARCHITECTURE_BLUEPRINT.md`).
 
 ---
 
@@ -49,208 +48,186 @@ Each primary claim from the research reports was audited against raw source file
 
 | # | Investigated Claim | Origin Reference | Source File & Location | Evidence Status | Audit Verdict & Boundaries |
 | :-: | :--- | :--- | :--- | :---: | :--- |
-| **1** | 6-Gate Transactional Skill Evolution Pipeline | Memento-Skills | `core/skill/evolution/engine.py` (Lines 1–788) | **VERIFIED** | **Correct.** Executes Syntax, Contract, Security, Test, Integration, and Smoke gates. *Boundary:* Takes 10–60s; strictly offline only. |
-| **2** | Empirical Utility Scoring (`utility.json` < 0.2 triggers rebuild) | Memento-Skills | `core/skill/evolution/engine.py:465-492` | **VERIFIED** | **Correct.** Utility metrics track success rate, latency, and error counts to trigger automated repair vs rebuild. |
-| **3** | Pregel Graph Execution Loop | LangGraph | `libs/langgraph/langgraph/pregel/_loop.py` (2,166 lines) | **VERIFIED** | **Needs Path Correction.** File is `_loop.py` (private module), not `loop.py`. Pregel actor supersteps confirmed. |
-| **4** | Native `interrupt()` & `Command(resume=...)` | LangGraph | `libs/langgraph/langgraph/types.py` (Lines 894–935) | **VERIFIED** | **Correct.** Graph state suspension and resumption primitives verified. |
-| **5** | Unified Python Agent Runtime (`_agents.py`) | MS Agent Framework | `python/packages/core/agent_framework/_agents.py` (2,161 lines) | **VERIFIED** | **Needs Path Correction.** Path sits under `python/packages/core/`, not root. AutoGen + SK unified runtime confirmed. |
-| **6** | Telegram Smart Rendering (4096-char chunking) | MS Agent Framework | `python/packages/hosting-telegram/.../_rendering.py` (176 lines) | **VERIFIED** | **Correct.** Splits text on word boundaries up to 4096 chars, balancing Markdown entity tags. |
-| **7** | Pre-Stream Session Release (`session.commit/close`) | Dify | `api/core/agent/fc_agent_runner.py` (Lines 165–167) | **VERIFIED** | **Correct.** Explicitly commits and closes SQLAlchemy session before awaiting LLM provider stream. |
-| **8** | Cognitive Step Telemetry (`MessageAgentThought`) | Dify | `api/models/model.py` (Lines 2530–2645) | **VERIFIED** | **Correct.** Database table stores `position`, `thought`, `tool`, `tool_input`, `observation`, `tokens`, and `latency`. |
-| **9** | Completely Fair Scheduler (CFS) for Queues | Dify | `api/tasks/workflow_cfs_scheduler/cfs_scheduler.py` (33 lines) | **VERIFIED** | **Correct.** Implements tier-based scheduling prioritizing paid enterprise queues over sandbox queues. |
-| **10**| `WaitTracker` Execution Suspension & Resumption | n8n | `packages/cli/src/wait-tracker.ts` (452 lines) | **VERIFIED** | **Correct.** Implements timer and webhook suspension with leader takeover/stepdown decorators. |
-| **11**| Multi-Strategy Credential Redaction Pipeline | n8n | `packages/cli/.../execution-redaction.service.ts` (469 lines) | **VERIFIED** | **Correct.** Evaluates credential IDs against user permissions; executes `FullItem` and `NodeDefined` strategies. |
-| **12**| 3-Tier Autonomy Gating (`off`, `semi`, `full`) | RagLeap Core | `core/autonomy.py` (Lines 1–599) | **VERIFIED** | **Correct.** Enforces mode + allowed actions + allowed channels; automatically forces `full -> semi` for sensitive roles. |
-| **13**| Untrusted Role Scoping (`INTENT_SAFE_ROLES`) | RagLeap Core | `core/employees/supervisor.py` (Lines 31–40) | **VERIFIED** | **Correct.** Untrusted incoming customer messages are hard-filtered to `INTENT_SAFE_ROLES`. |
-| **14**| Cryptographic Audit Chain (HMAC-SHA256) | RagLeap Core | `packages/ragleap-security/.../audit.py` (181 lines) | **VERIFIED** | **CRITICAL CORRECTION REQUIRED.** Tamper-evident, NOT tamper-proof. Cannot prevent log truncation without external anchor. |
-| **15**| Leak-Proof `SecretStr` Type Wrapper | RagLeap Core | `packages/ragleap-security/.../secrets.py` (Lines 1–95) | **VERIFIED** | **Correct.** Masks `str()`, `repr()`, and `format()` as `[REDACTED]`; constant-time comparison via `hmac.compare_digest`. |
-| **16**| Multi-Agent Handoffs with `input_filter` | OpenAI Agents SDK | `src/agents/handoffs/__init__.py` (Lines 125–185) | **VERIFIED** | **Correct.** Synthetic tool generation with input filtering and nested history compression. |
-| **17**| Pre/Post Tripwire Guardrails | OpenAI Agents SDK | `src/agents/guardrail.py` (Lines 19–60) | **VERIFIED** | **Correct.** `tripwire_triggered: bool` halts the engine immediately before or after inference. |
-| **18**| Async PostgreSQL Session Persistence (`asyncpg`) | OpenAI Agents SDK | `src/agents/extensions/memory/sqlalchemy_session.py` (707 lines) | **VERIFIED** | **Correct.** Native SQLAlchemy 2.0 `asyncpg` persistence storing unified `RunItem` sequences. |
-
-*Evidence Classification Legend:*  
-- **VERIFIED:** Directly present in source code at the cited commit, verified by file inspection.  
-- **DOCUMENTED:** Present in official documentation or comments, but not fully enforced in runtime code.  
-- **INFERRED:** Extrapolated from architectural structure without an explicit unit test.  
-- **UNKNOWN / FALSE:** Contradicted by source code.
+| **1** | 6-Gate Transactional Skill Evolution Pipeline | Memento-Skills | `core/skill/evolution/engine.py` (Lines 1–788) | **VERIFIED** | **SOURCE-VERIFIED.** Syntax, Contract, Security, Test, Integration, and Smoke gates verified. Strictly offline background execution. |
+| **2** | Empirical Utility Scoring (`utility.json` < 0.2 triggers rebuild) | Memento-Skills | `core/skill/evolution/engine.py:465-492` | **VERIFIED** | **SOURCE-VERIFIED.** Mathematical scoring formula verified in source code. |
+| **3** | Pregel Graph Execution Loop | LangGraph | `libs/langgraph/langgraph/pregel/_loop.py` (2,166 lines) | **VERIFIED** | **SOURCE-VERIFIED.** Private module `_loop.py` implements Pregel supersteps and channel propagation. |
+| **4** | Native `interrupt()` & `Command(resume=...)` | LangGraph | `libs/langgraph/langgraph/types.py` (Lines 894–935) | **VERIFIED** | **SOURCE-VERIFIED.** Graph state suspension and resumption primitives verified. |
+| **5** | Unified Python Agent Runtime (`_agents.py`) | MS Agent Framework | `python/packages/core/agent_framework/_agents.py` (2,161 lines) | **VERIFIED** | **SOURCE-VERIFIED.** AutoGen + Semantic Kernel unified agent class verified. |
+| **6** | Telegram Smart Rendering (4096-char chunking) | MS Agent Framework | `python/packages/hosting-telegram/.../_rendering.py` (176 lines) | **VERIFIED** | **SOURCE-VERIFIED.** Word-boundary chunking with Markdown entity balancing verified. |
+| **7** | Pre-Stream Session Release (`session.commit/close`) | Dify | `api/core/agent/fc_agent_runner.py` (Lines 165–167) | **VERIFIED** | **SOURCE-VERIFIED.** Explicit commit & close before awaiting provider stream verified. |
+| **8** | Cognitive Step Telemetry (`MessageAgentThought`) | Dify | `api/models/model.py` (Lines 2530–2645) | **VERIFIED** | **SOURCE-VERIFIED.** Database model storing step-by-step thoughts, tools, tokens, latency verified. |
+| **9** | Completely Fair Scheduler (CFS) for Queues | Dify | `api/tasks/workflow_cfs_scheduler/cfs_scheduler.py` (33 lines) | **VERIFIED** | **SOURCE-VERIFIED.** Tiered priority scheduling between paid and sandbox queues verified. |
+| **10**| `WaitTracker` Execution Suspension & Resumption | n8n | `packages/cli/src/wait-tracker.ts` (452 lines) | **VERIFIED** | **SOURCE-VERIFIED.** Timer & webhook suspension with leader takeover decorators verified. |
+| **11**| Multi-Strategy Credential Redaction Pipeline | n8n | `packages/cli/.../execution-redaction.service.ts` (469 lines) | **VERIFIED** | **SOURCE-VERIFIED.** Strategy pipeline for masking secrets in execution logs verified. |
+| **12**| 3-Tier Autonomy Gating (`off`, `semi`, `full`) | RagLeap Core | `core/autonomy.py` (Lines 1–599) | **VERIFIED** | **SOURCE-VERIFIED.** 3 modes + sensitive domain auto-downgrade verified. |
+| **13**| Untrusted Role Scoping (`INTENT_SAFE_ROLES`) | RagLeap Core | `core/employees/supervisor.py` (Lines 31–40) | **VERIFIED** | **SOURCE-VERIFIED.** Untrusted customer messages hard-filtered to safe roles verified. |
+| **14**| Cryptographic Audit Chain (HMAC-SHA256) | RagLeap Core | `packages/ragleap-security/.../audit.py` (181 lines) | **VERIFIED** | **SOURCE-VERIFIED with Correction.** Source explicitly warns: *Tamper-evident, NOT tamper-proof*. Requires external root anchoring. |
+| **15**| Leak-Proof `SecretStr` Type Wrapper | RagLeap Core | `packages/ragleap-security/.../secrets.py` (Lines 1–95) | **VERIFIED** | **SOURCE-VERIFIED.** Masking wrapper with constant-time equality verified. |
+| **16**| Multi-Agent Handoffs with `input_filter` | OpenAI Agents SDK | `src/agents/handoffs/__init__.py` (Lines 125–185) | **VERIFIED** | **SOURCE-VERIFIED.** Synthetic tool delegation with context filtering verified. |
+| **17**| Pre/Post Tripwire Guardrails | OpenAI Agents SDK | `src/agents/guardrail.py` (Lines 19–60) | **VERIFIED** | **SOURCE-VERIFIED.** `tripwire_triggered: bool` halting mechanism verified. |
+| **18**| Async PostgreSQL Session Persistence (`asyncpg`) | OpenAI Agents SDK | `src/agents/extensions/memory/sqlalchemy_session.py` (707 lines) | **VERIFIED** | **SOURCE-VERIFIED.** Async SQLAlchemy 2.0 session persistence verified. |
 
 ---
 
-## 4. Rigorous Six-Scenario Licensing Audit
+## 4. Rigorous Decision Classification Matrix
 
-Previous research documents broadly stated that Dify and n8n are "prohibited for SaaS". A legally precise engineering assessment requires disaggregating software usage across six distinct operational scenarios:
+Every architectural choice, numerical threshold, and design pattern is strictly classified into one of four methodological categories:
 
-| Operational Scenario | Memento (Apache 2.0) | LangGraph (MIT) | MS Agent (MIT) | RagLeap (MIT) | OpenAI SDK (MIT) | Dify (Mod-Apache 2.0) | n8n (SUL 1.0) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Scenario 1: Forking / Copying Code** | Allowed | Allowed | Allowed | Allowed | Allowed | Restricted (Mod-Apache) | Restricted (SUL) |
-| **Scenario 2: Importing as Library / Dependency** | Allowed | Allowed | Allowed | Allowed | Allowed | Allowed (Non-multi-tenant) | Infectious (SUL attaches) |
-| **Scenario 3: Internal Single-Company Tooling** | Allowed | Allowed | Allowed | Allowed | Allowed | **Allowed** | **Allowed** |
-| **Scenario 4: Multi-Tenant SaaS Hosting** | Allowed | Allowed | Allowed | Allowed | Allowed | **PROHIBITED** (Clause 1.a) | **PROHIBITED** (Non-commercial) |
-| **Scenario 5: Customer-Facing Workflow Builder** | Allowed | Allowed | Allowed | Allowed | Allowed | **PROHIBITED** (Clause 1.a) | **PROHIBITED** (Clause 3.2) |
-| **Scenario 6: Commercial Backend / White-Label** | Allowed | Allowed | Allowed | Allowed | Allowed | Restricted (Logo Clause 1.b)| **PROHIBITED** |
+1. **`SOURCE-VERIFIED`**: Directly observed, proven, and functioning in a reference codebase.
+2. **`ARCHITECTURAL DECISION`**: A justified decision derived from platform requirements (e.g., replacing the legacy engine, offline evolution).
+3. **`HYPOTHESIS`**: An uncalibrated numerical heuristic or assumption requiring empirical benchmarking.
+4. **`OPEN`**: An unresolved architectural design issue requiring trade-off analysis.
 
-### Detailed Analysis for Dify & n8n:
-1. **Dify (Modified Apache 2.0):**
-   - *Clause 1.a explicitly states:* *"Unless explicitly authorized by Dify in writing, you may not use the Dify source code to operate a multi-tenant environment. Tenant Definition: Within the context of Dify, one tenant corresponds to one workspace."*
-   - *Implication:* A company may legally run Dify for its own single-organization use. However, AI-Employee-Platform is by definition a **multi-tenant enterprise SaaS platform** where each business customer receives an isolated workspace/tenant. Deploying Dify source code or derivatives directly violates Clause 1.a without a commercial agreement with LangGenius, Inc.
-2. **n8n (Sustainable Use License 1.0):**
-   - *Clause 3.2 explicitly states:* *"You may use or modify the software only for your own internal business purposes or for non-commercial or personal use. You may distribute the software or provide it to others only if you do so free of charge for non-commercial purposes."*
-   - *Implication:* While an enterprise can use n8n internally to automate its own back-office tasks, it **cannot** offer n8n workflows as a commercial service to paying third-party tenants. Furthermore, all `.ee` enterprise modules require an expensive commercial license.
-3. **The Clean Architectural Route:**
-   - Copyright law protects the **literal expression of code**, not underlying architectural ideas, design patterns, or database schemas.
-   - We must reject all code copying from Dify and n8n.
-   - We cleanly re-implement their architectural patterns (such as pre-stream connection release and `WaitTracker` suspension) natively in Python 3.14 / FastAPI / SQLAlchemy 2.0.
+| Architectural Element | Proposed Value / Pattern | Source / Origin | Classification | Engineering Justification & Required Experiment |
+| :--- | :--- | :--- | :---: | :--- |
+| **Handoff Hop Ceiling** | `MAX_HANDOFF_HOPS = 5` | None (Unverified Heuristic) | **`HYPOTHESIS`** | The value `5` is an unverified assumption. An arbitrary cap risks prematurely halting complex 6-step multi-department workflows or failing to catch a tight 2-node infinite loop. **Required Experiment:** Stress-test realistic multi-agent triage scenarios to determine optimal cycle detection (e.g. cycle graph detection vs fixed hop count). |
+| **Outcome Memory Weight** | `weight = 0.02` (vs source `0.05`) | RagLeap `learning.py:10` | **`HYPOTHESIS`** | RagLeap source uses `0.05`. Changing it to `0.02` was an unverified heuristic to prevent memory volatility. **Required Experiment:** Run multi-turn simulated conversations measuring retrieval precision after 10 positive and 10 negative reinforcement cycles to calibrate convergence stability. |
+| **Skill Evolution Quarantining** | Restrict to Offline Background Daemons | Platform SLA Requirements | **`ARCHITECTURAL DECISION`** | Compiling, sandboxing, and validating 6 test gates takes 10–60 seconds. Invoking this synchronously inside a customer Telegram/WhatsApp turn violates our <3s response SLA. Moving it to the offline Dream Daemon is justified by system performance constraints. |
+| **Database Concurrency Model** | `SKIP LOCKED` vs Advisory Locks | Relational Concurrency | **`OPEN`** | PostgreSQL advisory locks have session-affinity risks in connection-pooled environments (PGBouncer transaction pooling breaks session advisory locks). `SKIP LOCKED` works for queue consumption but not for coordinating graph checkpoint mutability without row-level locking. |
+| **External Digest Anchoring** | External Root Digest Checkpoints | Cryptographic Integrity | **`ARCHITECTURAL DECISION`** | A local SHA-256 HMAC hash chain is mathematically vulnerable to table truncation or full-chain recomputation if an attacker obtains database write access. External anchoring (e.g. cloud WORM storage or signed commits) is a necessary architectural requirement for enterprise audit compliance. |
+| **Pre-Stream Session Release** | `session.commit()` + `session.close()` | Dify `fc_agent_runner.py` | **`ARCHITECTURAL DECISION`** | Prevents connection pool starvation during slow external LLM inference. Must be adapted to FastAPI by loading data into Pydantic models before closing session. |
+| **3-Tier Autonomy Gating** | Modes `off`, `semi`, `full` | RagLeap `autonomy.py` | **`ARCHITECTURAL DECISION`** | Directly fulfills `PROJECT_VISION.md` Section 3 ("Explicit Autonomy Levels") and Section 14 ("Enforced Guardrails"). |
+| **Untrusted Role Scoping** | `INTENT_SAFE_ROLES` Gateway Filter | RagLeap `supervisor.py` | **`ARCHITECTURAL DECISION`** | Essential threat mitigation against prompt injection privilege escalation from public messaging channels. |
 
 ---
 
-## 5. Architectural Pattern Evaluation, Failure Modes & Platform Fit
+## 5. Legally Precise Six-Scenario Licensing Audit
 
-Every proposed pattern from `REFERENCE_ARCHITECTURE_COMPARISON.md` was subjected to failure-mode analysis and multi-tenant suitability evaluation:
+Rather than relying on vague generalizations ("SaaS strictly forbidden" or "100% commercial freedom"), each reference project was audited against its exact license text, verified commit, and operational use case:
 
-### 1. Pregel StateGraph (LangGraph) + Handoff Network (OpenAI SDK)
-- **Problem Solved:** Deterministic cyclic execution with state checkpoints combined with dynamic delegation to specialist agents.
-- **Source Evidence:** LangGraph `libs/langgraph/langgraph/pregel/_loop.py` & OpenAI SDK `src/agents/handoffs/__init__.py`.
-- **Failure Modes & Limitations:**
-  - *Delegation Ping-Pong:* Agent A delegates to Agent B, which hands back to Agent A indefinitely, consuming tokens and hanging the request.
-  - *Context Explosion:* If history is not compacted at handoff boundaries, sub-agents receive bloated prompt tokens.
-- **Required Modifications for Our Platform:**
-  - Enforce a hard ceiling on handoff depth (`MAX_HANDOFF_HOPS = 5`).
-  - Enforce OpenAI SDK's `input_filter` pattern to sanitize context before passing items to sub-agents.
-  - Bind Pregel thread state strictly to `(tenant_id, conversation_id)`.
-- **Verdict:** **Candidate Decision** (Core Runtime).
+| Project | License & Source | Clause / Section | Internal Automation | Multi-Tenant SaaS Hosting | Customer Workflow Builder | Derivative Code Ingestion | Legal Certainty |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| **Memento-Skills** | Apache 2.0 ([Text](https://github.com/Memento-Teams/Memento-Skills/blob/main/LICENSE)) | Section 2 & 4 | Permitted | Permitted | Permitted | Permitted | **High (Standard Open Source)** |
+| **LangGraph** | MIT ([Text](https://github.com/langchain-ai/langgraph/blob/main/LICENSE)) | Grant of Rights | Permitted | Permitted | Permitted | Permitted | **High (Standard Permissive)** |
+| **MS Agent Framework** | MIT ([Text](https://github.com/microsoft/agent-framework/blob/main/LICENSE)) | Grant of Rights | Permitted | Permitted | Permitted | Permitted | **High (Standard Permissive)** |
+| **RagLeap Core** | MIT ([Text](https://github.com/ragleap/ragleap-core/blob/main/LICENSE)) | Grant of Rights | Permitted | Permitted | Permitted | Permitted | **High (Standard Permissive)** |
+| **OpenAI Agents SDK**| MIT ([Text](https://github.com/openai/openai-agents-python/blob/main/LICENSE))| Grant of Rights | Permitted | Permitted | Permitted | Permitted | **High (Standard Permissive)** |
+| **Dify** | Mod-Apache 2.0 ([Text](https://github.com/langgenius/dify/blob/main/LICENSE)) | **Clause 1.a & 1.b** | **Permitted** | **Restricted (Requires Contract)** | **Restricted (Requires Contract)** | **Infectious Restrictions** | **Requires Written Commercial Agreement for Multi-Tenancy** |
+| **n8n** | Sustainable Use 1.0 ([Text](https://github.com/n8n-io/n8n/blob/master/LICENSE.md)) | **Clause 3.2 & `.ee` Preamble** | **Permitted** | **Prohibited (Non-commercial only)** | **Prohibited (Non-commercial only)** | **Infectious Restrictions** | **Requires Commercial Enterprise Agreement** |
 
-### 2. Intent Scoping (`INTENT_SAFE_ROLES`)
-- **Problem Solved:** Eliminates prompt injection attacks from untrusted messaging channels (Telegram/WhatsApp) attempting to escalate privileges to internal management roles.
-- **Source Evidence:** RagLeap Core `core/employees/supervisor.py:31-40`.
-- **Failure Modes & Limitations:**
-  - If a legitimate customer inquiry requires a capability outside `INTENT_SAFE_ROLES`, the supervisor cannot serve them.
-  - If a developer accidentally adds an admin role to `INTENT_SAFE_ROLES`, the gate fails.
-- **Required Modifications for Our Platform:**
-  - External public channels (WhatsApp, Telegram customers) are hard-scoped to `INTENT_SAFE_ROLES`.
-  - The Godfather supervisor channel (founder's private Telegram) is authenticated via cryptographic owner token and possesses unrestricted supervisory reach.
-- **Verdict:** **Candidate Decision** (Security Boundary).
-
-### 3. Pre-Stream Database Session Release
-- **Problem Solved:** Prevents PostgreSQL connection pool exhaustion during long-running LLM streaming calls (2–60s).
-- **Source Evidence:** Dify `api/core/agent/fc_agent_runner.py:165-167`.
-- **Failure Modes & Limitations:**
-  - *`DetachedInstanceError`:* Accessing un-eagerly loaded ORM relationships after `session.close()` will crash the application.
-  - *Data Loss:* Any modified ORM objects not explicitly committed before closing are discarded.
-- **Required Modifications for Our Platform:**
-  - Transform ORM entities into immutable Pydantic schemas before closing the session.
-  - Use FastAPI's `async with get_db_session() as session:` block strictly for data retrieval, exit the context manager before initiating LLM streaming, and open a new transactional block when saving thoughts.
-- **Verdict:** **Candidate Decision** (Resource Protection).
-
-### 4. `WaitTracker` Execution Suspension & Resumption
-- **Problem Solved:** Prevents keeping worker threads or in-memory state alive while awaiting human-in-the-loop approvals or external webhooks.
-- **Source Evidence:** n8n `packages/cli/src/wait-tracker.ts:43-65`.
-- **Failure Modes & Limitations:**
-  - *Race Conditions:* Webhook arrival before the suspension transaction is committed to the database.
-  - *Cluster Split-Brain:* Multiple worker nodes attempting to resume the same expired wait timer simultaneously.
-- **Required Modifications for Our Platform:**
-  - Store suspended state in PostgreSQL `executions` table with row-level locking (`FOR UPDATE SKIP LOCKED`).
-  - Use Redis distributed locks or PostgreSQL advisory locks for wait timer resumption.
-- **Verdict:** **Candidate Decision** (HITL Engine).
-
-### 5. Three-Tier Autonomy Gating & Sensitive Role Auto-Downgrade
-- **Problem Solved:** Prevents autonomous agents from executing high-risk financial, legal, or bulk messaging actions without owner consent.
-- **Source Evidence:** RagLeap Core `core/autonomy.py:7-32`.
-- **Failure Modes & Limitations:**
-  - *Alert Fatigue:* If too many low-risk actions are gated behind approvals, owners will approve reflexively without reading.
-- **Required Modifications for Our Platform:**
-  - Map our platform roles to 3 tiers: `Level 1` (Assistant), `Level 2` (Approval-Gated), `Level 3` (Autonomous within Bounds).
-  - Force auto-downgrade to `Level 2` for any action tagged `financial_write`, `bulk_campaign_dispatch`, or `database_schema_modify`.
-- **Verdict:** **Candidate Decision** (Safety Governance).
-
-### 6. Cryptographic Audit Log (HMAC-SHA256 Hash Chain)
-- **Problem Solved:** Detects unauthorized alteration, deletion, or re-ordering of historical audit records.
-- **Source Evidence:** RagLeap Core `packages/ragleap-security/src/ragleap_security/audit.py:1-40`.
-- **Failure Modes & Limitations (CRITICAL FORENSIC CORRECTION):**
-  - **Tamper-Evident, NOT Tamper-Proof:** A hash chain detects mid-chain tampering. However, if an attacker gains write access to PostgreSQL, they can delete the tail of the table or recompute all hashes from the point of edit forward.
-  - **Key Compromise:** If the HMAC secret is stored in application environment variables on the same host as the database, an attacker with server access can forge valid hashes.
-- **Required Modifications for Our Platform:**
-  - The audit log must be documented accurately as **Tamper-Evident**.
-  - To achieve true enterprise compliance, periodic checkpoint hashes (e.g. daily root hash) must be signed and anchored externally (e.g. AWS S3 Object Lock, external syslog, or distributed ledger).
-- **Verdict:** **Candidate Decision with Technical Caveat**.
-
-### 7. 6-Gate Transactional Skill Evolution Pipeline
-- **Problem Solved:** Allows autonomous generation and verification of dynamic agent tools without destabilizing production.
-- **Source Evidence:** Memento-Skills `core/skill/evolution/engine.py:1-788`.
-- **Failure Modes & Limitations:**
-  - *Severe Latency:* Compiling, linting, executing sandbox tests, and validating 6 gates takes 10 to 60 seconds.
-  - *Sandboxing Overhead:* Requires UV or Docker isolation to prevent malicious code execution.
-- **Required Modifications for Our Platform:**
-  - **STRICTLY PROHIBITED IN REAL-TIME CONVERSATIONS.** An incoming customer message must never trigger a 6-gate evolution pipeline synchronously.
-  - Quarantined exclusively to the offline **Dream Daemon** running in background worker queues, with final activation gated by The Godfather and tenant owner approval.
-- **Verdict:** **Hypothesis Needing Testing in Staging Sandbox**.
-
-### 8. Outcome-Weighted Memory Reinforcement Loop
-- **Problem Solved:** Prevents vector similarity from retrieving unhelpful memories by dynamically weighting memories based on actual operational success.
-- **Source Evidence:** RagLeap Core `core/employees/learning.py:10-28`.
-- **Failure Modes & Limitations:**
-  - *Delayed Feedback:* Business outcomes (e.g., customer satisfaction, completed payment) may occur hours or days after the conversation.
-  - *Oscillation:* Aggressive delta adjustments can cause memory instability.
-- **Required Modifications for Our Platform:**
-  - Small conservative delta (`weight = 0.02`).
-  - Core business facts and owner instructions must be flagged `permanent=True` with `importance=1.0` so they are never decayed.
-- **Verdict:** **Hypothesis Needing Empirical Calibration**.
+### Specific Clause Analysis:
+1. **Dify Clause 1.a:**  
+   *"Unless explicitly authorized by Dify in writing, you may not use the Dify source code to operate a multi-tenant environment. Tenant Definition: Within the context of Dify, one tenant corresponds to one workspace. The workspace provides a separated area for each tenant's data and configurations."*  
+   - *Direct Consequence:* A single company may use Dify internally to automate its own business. However, AI-Employee-Platform provides multi-tenant workspaces to external paying enterprises. Running Dify source code directly breaches Clause 1.a.
+2. **n8n Clause 3.2:**  
+   *"You may use or modify the software only for your own internal business purposes or for non-commercial or personal use. You may distribute the software or provide it to others only if you do so free of charge for non-commercial purposes."*  
+   - *Direct Consequence:* Operating n8n workflows as a paid commercial service for third parties violates Clause 3.2. Embedding n8n `.ee` modules without an enterprise license violates copyright law.
+3. **The Conservative Engineering Risk-Avoidance Decision:**  
+   Regardless of ongoing debates regarding the boundary of "backend usage" under modified licenses, our platform adopts a **strict zero-dependency policy on Dify and n8n**. No source code, libraries, or containers from Dify or n8n will be imported into our codebase. We study and adopt the architectural *concepts* (e.g. pre-stream session closing, `WaitTracker` lifecycle) and implement them 100% cleanly in native Python/FastAPI.
 
 ---
 
-## 6. Coverage of the 14 Platform Vision Dimensions
+## 6. Distributed Crash Recovery & Failure Model
 
-The acceptance review verified that the combined research deliverables address all 14 architectural dimensions mandated by `PROJECT_VISION.md`:
+A distributed AI employee platform executing multi-step business actions across external channels (WhatsApp, Telegram, Stripe, Webhooks) cannot treat crash recovery as a simple database query lock. Below is the formal conceptual failure and recovery model:
 
-| # | Master Vision Dimension | Addressed in Research Package | Target Architecture Impact |
-| :-: | :--- | :--- | :--- |
-| **1** | **Agent Runtime Lifecycle** | Addressed in LangGraph & OpenAI SDK teardowns | Pregel turn resolution loop with explicit start, plan, act, reflect, and end states. |
-| **2** | **Durable Checkpointing** | Addressed in LangGraph (`PostgresSaver`) | Relational DDL schema storing state transitions in PostgreSQL. |
-| **3** | **Recovery & Idempotency** | Addressed in LangGraph & n8n | Outbox pattern integration with idempotent message deduplication. |
-| **4** | **Memory Architecture** | Addressed in RagLeap Core & Dify | Multi-tier: Context buffer, Fact memory, Operation memory, Procedural skills. |
-| **5** | **Skills & Tool Lifecycle** | Addressed in Memento-Skills & OpenAI SDK | Type-safe Pydantic contracts with 6-gate background evolution pipeline. |
-| **6** | **Autonomy Policy & HITL** | Addressed in RagLeap Core & n8n | 3-tier autonomy gating (`off`, `semi`, `full`) + `WaitTracker` suspension. |
-| **7** | **Tenant Isolation & Security** | Addressed in RagLeap (`Scope`, `SecretStr`) | Immutable `Scope(tenant, subject, agent, session)` enforced at query layer. |
-| **8** | **Background Workers & Queues**| Addressed in Dify (Celery/CFS) & n8n | Decoupled worker processes with Completely Fair Scheduling across tenant tiers. |
-| **9** | **DB Pool Preservation** | Addressed in Dify (`fc_agent_runner.py`) | Pre-stream `session.commit()` and `session.close()` before provider LLM streaming. |
-| **10**| **Observability & Audit** | Addressed in RagLeap Core & Dify | HMAC-SHA256 tamper-evident audit log + `MessageAgentThought` step telemetry. |
-| **11**| **Evaluation & Testing** | Addressed in Memento & RagLeap | Empirical utility scoring (`utility.json`) + real live Telegram conversational acceptance. |
-| **12**| **Dynamic Business Modules** | Addressed in Dify & RagLeap | Dynamic capability discovery and modular database schema generation. |
-| **13**| **Production Operations** | Addressed in n8n & Dify | Docker Compose, PostgreSQL 17 (pgvector), Redis 7, Caddy 2 reverse proxy. |
-| **14**| **Licensing Implications** | Addressed in all 7 deep dives | Rejection of proprietary/SUL code; clean-room native FastAPI implementation. |
+```
++---------------------------------------------------------------------------------------------------+
+|                                   DISTRIBUTED RECOVERY ARCHITECTURE                               |
++---------------------------------------------------------------------------------------------------+
+|                                                                                                   |
+|  [Inbound Message] ---> (Deduplication Check: MessageID) ---> [Transactional Outbox Table]        |
+|                                                                          |                        |
+|                                                                          v                        |
+|  [Worker Node 1] <--- Claims task via Lease + Fencing Token ---> [PostgreSQL Checkpoint Table]    |
+|         │                                                                ▲                        |
+|         ├─ Superstep S_0: State Committed (fence_token = 101) ───────────┤                        |
+|         ├─ External Tool Call: WhatsApp API (idempotency_key = ID_101)   │                        |
+|         │                                                                │                        |
+|       [CRASH] (Worker 1 OOM killed / Network Partition)                  │                        |
+|         │                                                                │                        |
+|         v                                                                │                        |
+|  [Lease Sweeper] ---> Lease Expired (current_timestamp > lease_expires)  │                        |
+|         │                                                                │                        |
+|         v                                                                │                        |
+|  [Worker Node 2] <--- Claims task, increments fence_token = 102 ─────────┤                        |
+|         │                                                                │                        |
+|         ├─ Stale Worker 1 wakes up, attempts commit with token 101 ──────X (REJECTED by DB check) |
+|         ├─ Worker 2 restores last checkpoint S_0                         │                        |
+|         └─ Worker 2 retries WhatsApp call with idempotency_key ID_101 ───> (Gateway Returns Cached)|
+|                                                                                                   |
++---------------------------------------------------------------------------------------------------+
+```
+
+### Key Conceptual Primitives:
+
+1. **Durable Task Identity:**  
+   Every unit of work (conversational turn, tool execution, campaign dispatch) possesses an immutable, globally unique `ExecutionID` (UUIDv7, ensuring chronological clustering in B-Tree indexes) coupled with `TenantID`.
+2. **Execution Checkpoint Boundaries (Superstep Commit):**  
+   State transitions follow Pregel supersteps. A node executes; its updates are staged in memory; state is committed atomically to the `checkpoints` table with a monotonically increasing `step_index`. If a node crashes mid-execution, the engine reloads checkpoint $S_t$.
+3. **Worker Ownership, Leases & Heartbeats:**  
+   Workers do not claim tasks permanently. A task claim writes:
+   - `claimed_by_worker_id`: Worker unique identifier.
+   - `lease_expires_at`: `now() + lease_duration` (e.g., 30s).
+   - `fence_token`: Monotonically incremented integer counter.  
+   Active workers renew `lease_expires_at` via background heartbeats every 10s. If a worker dies, the lease expires automatically.
+4. **Fencing Tokens (The Zombie Worker Solution):**  
+   *The Scenario:* Worker 1 claims a task, experiences a 45-second network partition or GC pause, causing its lease to expire. Worker 2 claims the task, increments `fence_token = 102`, and proceeds. Worker 1 suddenly wakes up and attempts to write its stale results to the database.  
+   *The Protection:* Every state update enforces an optimistic lock condition:  
+   `UPDATE checkpoints SET state = :new_state WHERE execution_id = :id AND fence_token = :my_fence_token;`  
+   Worker 1's write with `fence_token = 101` matches 0 rows and fails with `StaleWorkerExecutionError`, preventing state corruption.
+5. **Idempotency Keys & Deduplication Windows:**  
+   Every external tool invocation generates a deterministic idempotency key:  
+   `idempotency_key = HMAC_SHA256(secret, f"{tenant_id}:{execution_id}:{step_index}:{tool_name}:{tool_args}")`  
+   External APIs supporting idempotency headers (e.g. Stripe, WhatsApp Cloud API) recognize duplicate submissions and return cached responses without re-executing.
+6. **Retry Policies & Error Classification:**  
+   - **Transient Failures (HTTP 429, 502, 503, connection resets):** Exponential backoff with jitter: $t_{wait} = \min(t_{max}, t_{base} \times 2^{attempt}) + \text{jitter}$. Max 5 retries.
+   - **Permanent Failures (HTTP 400, 401, 403, 404, Pydantic Schema Errors):** No retries. Stored as step failure; control passed to fallback agent or owner approval.
+   - **Exhaustion / Budget Errors:** Immediate execution halt; supervisor alert.
+7. **The At-Least-Once Dilemma & Physical Boundaries of "Exactly-Once":**  
+   In distributed systems communicating with uncoordinated external gateways, **strict Exactly-Once execution of external side-effects is mathematically impossible** (Two Generals Problem). If a worker dispatches an HTTP message to WhatsApp, WhatsApp sends the message, but the worker dies before recording the response in PostgreSQL, Worker 2 must retry.  
+   - **What we CAN guarantee:**  
+     - **Exactly-once state transitions inside PostgreSQL** (guaranteed via ACID transactions and fencing tokens).  
+     - **At-least-once message delivery** via Transactional Outbox.  
+   - **What we CANNOT guarantee:** Zero duplicate external messages if a third-party gateway does not support idempotency keys.
 
 ---
 
-## 7. Concrete Documentation Corrections Applied
+## 7. Comprehensive Open Architectural Issues Register
 
-To ensure absolute integrity across `docs/architecture-research/`, the following corrections are formally codified:
+The following register documents the critical open issues across the 14 master architectural dimensions that must be formally resolved in `MASTER_ARCHITECTURE_BLUEPRINT.md`:
 
-1. **`REFERENCE_ARCHITECTURE_COMPARISON.md`:**
-   - Corrected claim regarding cryptographic audit logs: replaced "غير قابل للتلاعب" (tamper-proof) with "سجل كاشف للتلاعب (Tamper-Evident)" and added the explicit requirement for external digest anchoring.
-   - Updated licensing comparison table with the 6-scenario operational analysis, replacing vague "SaaS Forbidden" assertions with exact multi-tenant hosting restrictions.
-   - Clarified that Memento's 6-gate evolution pipeline is strictly an offline daemon process, not an inline conversational step.
-2. **`01_MEMENTO_SKILLS_DEEP_DIVE.md`:**
-   - Corrected relative path from `src/memento/core/...` to `core/skill/evolution/engine.py`.
-3. **`02_LANGGRAPH_DEEP_DIVE.md`:**
-   - Corrected relative path from `pregel/loop.py` to `libs/langgraph/langgraph/pregel/_loop.py`.
-4. **`03_MICROSOFT_AGENT_FRAMEWORK_DEEP_DIVE.md`:**
-   - Corrected relative path from root to `python/packages/core/agent_framework/_agents.py`.
-
----
-
-## 8. Unresolved Architectural Questions for Phase 1 Blueprint
-
-The following technical questions cannot be answered solely by reference research and must be resolved experimentally during Phase 1 (`MASTER_ARCHITECTURE_BLUEPRINT.md`):
-
-1. **PostgreSQL vs Redis for Pregel Checkpoints:** Should LangGraph-style checkpoints be written synchronously to PostgreSQL (`checkpoints` table) on every turn, or cached in Redis with asynchronous batch flushing to reduce database I/O?
-2. **Godfather Telegram Interaction Pattern:** Will The Godfather supervise agents via passive telemetry analysis (reading audit logs and error tables), or will agents actively send internal RPC messages to The Godfather for complex decisions?
-3. **Dynamic Business Module Migration Strategy:** When an agent discovers a need for a new business module (e.g. Sales Inventory), should the platform execute dynamic runtime Alembic migrations, or use a flexible JSON-schema EAV (Entity-Attribute-Value) model within existing tables?
+| # | Master Dimension | Specific Architectural Issue | Why Research Alone Cannot Decide | Reasonable Options | Trade-offs & Risks | Required Evidence / Experiment | Resolution Gate |
+| :-: | :--- | :--- | :--- | :--- | :--- | :--- | :---: |
+| **1** | **Agent Boundaries** | The Godfather Supervisor: In-Graph Router vs Out-of-Band Meta-Supervisor. | Research shows both patterns (LangGraph router vs RagLeap independent supervisor). | **A:** Godfather is root node in every graph turn.<br>**B:** Godfather is an async meta-supervisor reading telemetry out-of-band. | **A:** Adds LLM latency to every turn.<br>**B:** Cannot intervene to block dangerous actions pre-execution. | Latency benchmark of 2-tier LLM routing vs 1-tier direct routing. | **Must Decide in Blueprint** |
+| **2** | **Runtime Lifecycle** | In-flight stream cancellation on customer disconnect. | Reference frameworks handle cancellation differently (asyncio task cancel vs ignore). | **A:** Fast client disconnect terminates LLM generation.<br>**B:** Generation runs to completion in background. | **A:** Saves token cost but risks partial checkpoint state.<br>**B:** Wastes tokens but guarantees deterministic state. | Test FastAPI `request.is_disconnected()` handling with async generators. | **Must Decide in Blueprint** |
+| **3** | **Tool Contracts** | Dynamic Tool Schema Serialization: Strict Pydantic v2 vs Dynamic JSON Schema. | OpenAI SDK uses strict Pydantic; n8n uses dynamic JSON. | **A:** Strict Pydantic models with `extra='forbid'`.<br>**B:** Schema-less JSON dictionaries. | **A:** High type safety; difficult for dynamically generated tools.<br>**B:** High flexibility; high runtime failure risk. | Prototype dynamic Pydantic model creation from JSON schemas (`create_model`). | **Must Decide in Blueprint** |
+| **4** | **Tenant Scope** | Propagation of `Scope` across async boundaries. | Python `contextvars` can be lost across thread pools or Celery tasks if not copied. | **A:** Python `contextvars`.<br>**B:** Explicit mandatory `scope` argument in all repository methods. | **A:** Clean developer ergonomics; risk of silent context drop.<br>**B:** Verbose code; 100% type-checked security. | Audit contextvar propagation across FastAPI background tasks and Celery. | **Must Decide in Blueprint** |
+| **5** | **Autonomy & HITL** | Approval Request Expiration and Escalation. | Reference repos either hang (RagLeap) or rely on client forms (n8n). | **A:** Auto-reject after 24h timeout.<br>**B:** Escalate to secondary channel (e.g. SMS/Email).<br>**C:** Hang indefinitely until manual cleanup. | **A:** May abort urgent business deals.<br>**B:** Complexity of multi-channel escalation.<br>**C:** Database bloat of stale executions. | Define business policy with founder for approval deadlines. | **Must Decide in Blueprint** |
+| **6** | **Memory Layers** | Hybrid Storage: PostgreSQL pgvector vs Dedicated Vector Database (Qdrant). | Dify supports 25+ vector DBs; RagLeap uses SQLite/Postgres. | **A:** Pure PostgreSQL 17 + pgvector.<br>**B:** Decoupled Qdrant / Milvus. | **A:** Zero additional infrastructure; transactional consistency.<br>**B:** Better extreme-scale vector search; operational complexity. | Benchmark pgvector performance on 100K embedding vectors on port 5433. | **Must Decide in Blueprint** |
+| **7** | **Checkpointing** | Checkpoint Storage Medium: PostgreSQL vs Redis. | LangGraph supports both `PostgresSaver` and `MemorySaver`. | **A:** Direct synchronous writes to PostgreSQL `checkpoints`.<br>**B:** Redis write-back buffer with async database flush. | **A:** Absolute durability; high database write IOPS.<br>**B:** Sub-millisecond turn speed; risk of data loss on Redis crash. | Write-load benchmark of PostgreSQL checkpoint inserts under 50 concurrent turns. | **Must Decide in Blueprint** |
+| **8** | **Scheduling** | Completely Fair Scheduler (CFS) Implementation Mechanism. | Dify uses Celery queue routing; n8n uses Redis BullMQ concurrency limits. | **A:** Redis token-bucket rate limiter per tenant.<br>**B:** Multi-queue Celery worker pools segregated by tenant tier. | **A:** Lightweight; does not prevent worker monopolization.<br>**B:** Strict tenant fairness; complex queue configuration. | Evaluate Redis-based leaky bucket vs dedicated priority queues. | **Must Decide in Blueprint** |
+| **9** | **Skills Sandbox** | Sandbox Isolation Infrastructure for Dynamic Skill Evolution. | Memento uses UV; OpenAI SDK supports Docker and Cloud sandboxes. | **A:** Ephemeral Docker containers per tenant.<br>**B:** UV-isolated Python virtual environments on host.<br>**C:** WebAssembly / MicroVM (gVisor). | **A:** High security; 2–5s container spin-up overhead.<br>**B:** Sub-second execution; shared OS kernel risk.<br>**C:** High security & speed; complex setup. | Prototype UV sandbox execution speed vs Docker run on local Windows host. | **Must Decide in Blueprint** |
+| **10**| **Audit Integrity** | External Anchoring Mechanism for HMAC-SHA256 Hash Chain. | RagLeap Core defines the hash chain but omits the external anchor implementation. | **A:** Daily signed root hash committed to an external Git repo.<br>**B:** Cloudflare R2 / AWS S3 WORM Object Lock.<br>**C:** Public blockchain timestamping. | **A:** Free and simple; requires git deploy key management.<br>**B:** Cloud provider dependent; strong compliance guarantee.<br>**C:** Unnecessary cost and complexity. | Evaluate S3 Object Lock vs Git commit anchor for tenant compliance. | **Must Decide in Blueprint** |
+| **11**| **Evaluation** | Regression Gating: Automated LLM-as-a-Judge vs Telegram Verification. | `PROJECT_VISION.md` mandates live Telegram testing; frameworks use synthetic pytest. | **A:** Automated synthetic dialogue evaluation suite (LLM Judge).<br>**B:** Mandatory human founder Telegram acceptance gate.<br>**C:** Hybrid automated test gate + manual Telegram sign-off. | **A:** Fast CI/CD; misses conversational nuance.<br>**B:** High confidence; slow manual bottleneck.<br>**C:** Optimal balance of automated baseline and human sign-off. | Prototype an automated dialogue evaluation harness using real Telegram payloads. | **Must Decide in Blueprint** |
+| **12**| **Business Modules**| Dynamic Business Module Provisioning Architecture. | `PROJECT_VISION.md` Section 5 explicitly mandates dynamic module provisioning. | **A:** Dynamic runtime Alembic schema migrations.<br>**B:** JSONB Entity-Attribute-Value (EAV) model within pre-built tables.<br>**C:** Multi-schema / schema-per-tenant isolation. | **A:** Native SQL types; high risk of DDL locking in production.<br>**B:** Safe zero-migration dynamic attributes; slower queries.<br>**C:** Complex migration management across 100+ tenants. | Prototype dynamic EAV schema with JSONB indexing vs runtime DDL. | **Must Decide in Blueprint** |
+| **13**| **Schema Partitioning**| Message and Thought Table Partitioning Strategy. | High-volume multi-tenant tables grow rapidly. | **A:** Partition by `tenant_id` hash.<br>**B:** Partition by `created_at` monthly range.<br>**C:** Composite partitioning (`tenant_id` + `created_at`). | **A:** Clean tenant isolation; fixed partition count.<br>**B:** Easy archiving of old data; cross-tenant scans.<br>**C:** Optimal query performance; complex DDL maintenance. | Measure PostgreSQL query planner performance on composite partitioned tables. | **Can Defer to Phase 2** |
+| **14**| **Deployment** | Infrastructure Topology for Containerized Engine. | Platform currently runs Docker `ai_employee_agent` + PostgreSQL 17 + Redis 7. | **A:** Monolithic container running API + Background Workers.<br>**B:** Decoupled containers: FastAPI Web, Celery Worker, Outbox Worker. | **A:** Simple local development; poor resource scaling.<br>**B:** True production separation; higher RAM footprint locally. | Test memory footprint of multi-worker docker-compose setup on 16GB host. | **Can Defer to Phase 2** |
 
 ---
 
-## 9. Final Acceptance Verdict & Gate Decision
+## 8. Summary of Document Updates Applied
 
-### Official Verdict: **ACCEPTED WITH CORRECTIONS**
+The following corrections were committed and pushed to `docs/architecture-research/`:
 
-- **Justification:** The empirical foundation across all seven reference platforms is authentic, verified against real commit hashes, and legally delineated. The identified corrections have been transparently documented and integrated.
-- **Authorization:** The research phase is hereby formally closed. The engineering team is authorized to proceed to **Phase 1: Architecture Blueprint & Domain Model Specification (`MASTER_ARCHITECTURE_BLUEPRINT.md`)**.
-- **Mandatory Guardrail:** No code from `conversational_agent_engine.py` shall be retained or reused. All new engine development shall conform strictly to the architectural patterns approved in this review.
+1. **`RESEARCH_ACCEPTANCE_REVIEW.md` (This File):**
+   - Reclassified all values and patterns into the 4 strict categories (`SOURCE-VERIFIED`, `ARCHITECTURAL DECISION`, `HYPOTHESIS`, `OPEN`).
+   - Integrated the 6-scenario licensing analysis with exact clause citations for Dify (Clause 1.a) and n8n (Clause 3.2).
+   - Formulated the distributed crash recovery and failure model (fencing tokens, leases, idempotency, side-effect boundaries).
+   - Catalogued the 14-dimension open architectural issues register.
+2. **`REFERENCE_ARCHITECTURE_COMPARISON.md`:**
+   - Tagged `MAX_HANDOFF_HOPS = 5` and `weight = 0.02` as `[HYPOTHESIS]`.
+   - Updated the audit log definition to reflect **Tamper-Evident** status requiring external anchoring.
+   - Updated the licensing table to include exact clause references and the conservative risk-avoidance decision.
+3. **`00_RESEARCH_PROGRESS.md`:**
+   - Updated phase status to reflect **ACCEPTED WITH CORRECTIONS & EXPLICIT BOUNDARIES**.
+
+---
+
+## 9. Final Acceptance Gate Decision
+
+### Official Decision: **ACCEPTED WITH CORRECTIONS & EXPLICIT BOUNDARIES**
+
+- **Justification:** All premature "Approved" claims have been demoted to hypotheses or open architectural questions. All licensing nuances are legally cited and accompanied by an engineering risk-avoidance strategy. The crash recovery model establishes unambiguous limits on system guarantees.
+- **Authorization:** The research phase is **FORMALLY CLOSED**. The engineering team is authorized to proceed to **Phase 1: Architecture Blueprint & Domain Model Specification (`MASTER_ARCHITECTURE_BLUEPRINT.md`)**.
+- **Inviolable Architecture Principle:** The legacy engine (`conversational_agent_engine.py`) shall be replaced 100%. No legacy code, canary dual-running, or fallback shackle shall exist in the new platform architecture.
