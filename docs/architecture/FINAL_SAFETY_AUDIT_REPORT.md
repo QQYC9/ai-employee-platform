@@ -3,252 +3,215 @@
 **Document ID:** `FINAL_SAFETY_AUDIT_REPORT`  
 **Target Repository:** `QQYC9/ai-employee-platform`  
 **Audited Blueprint:** `docs/architecture/MASTER_ARCHITECTURE_BLUEPRINT.md`  
-**Base Commit Audited:** `b4c6e66`  
-**Status:** **INDEPENDENT ARCHITECTURAL VERIFICATION COMPLETE**  
+**Base Commit Audited:** `0ceb8e969b5e955bb9e6dd1093ef1414a92b5419`  
+**Status:** **INDEPENDENT ARCHITECTURAL EVIDENCE VERIFICATION COMPLETE**  
 **Date:** 2026-11-03  
 **Review Target:** Platform Founder & Senior Technical Leadership  
+**Readiness Verdict:** **`READY FOR FOUNDER REVIEW`** (Not authorized for implementation)
 
 ---
 
-## 1. Executive Summary & Verification Context
+## 1. Executive Summary & Verification Scope
 
-Pursuant to the **Final Blueprint Safety Audit** directive, this document provides an exhaustive, evidence-driven verification of the architectural guarantees asserted in `docs/architecture/MASTER_ARCHITECTURE_BLUEPRINT.md`.
+This document provides a final, evidence-driven audit of the architectural guarantees in `docs/architecture/MASTER_ARCHITECTURE_BLUEPRINT.md`.
 
-This audit specifically addresses and resolves 7 critical distributed systems vulnerabilities and unwarranted claims identified in earlier revisions:
-1. **False Provider Idempotency Claims:** Corrected the erroneous assertion that Meta WhatsApp Cloud API supports native outbound `Idempotency-Key` headers.
-2. **Decoupling Checkpoint Deduplication from Side-Effect Deduplication:** Proved that `PRIMARY KEY (tenant_id, execution_id, step_index)` only guards checkpoint row insertion, not external side-effects or node execution. Established a 6-layer deduplication model.
-3. **PostgreSQL Lease Expiration Concurrency:** Detailed the exact row-level locking behavior, lock sequencing, `SET LOCAL lock_timeout`, and `fence_token` mechanics governing Worker W1 commit vs Worker W2 takeover.
-4. **Context-Bound Approvals:** Established RFC 8785 Canonical JSON Serialization (JCS) and out-of-database HMAC key management to bind approval requests to execution context, role, policy version, and prevent replay attacks.
-5. **Memory Lifecycle & GDPR Erasure:** De-mythologized "permanent" memory by introducing supersession, contradiction escalation, explicit purpose retention, and cryptographic erasure for PII.
-6. **JSONB & GIN Limits:** Enforced native SQL relational columns for financial precision (`DECIMAL(18, 4)`), currency codes (ISO 4217), and tenant foreign keys, documenting the physical query limits of `jsonb_path_ops`.
-7. **Systems Terminology & Legal Claims:** Replaced the misattributed "Two Generals Problem" label with the precise "Post-Dispatch Ambiguity Window under Unreliable Transports", and re-classified IP decisions as conservative engineering risk-avoidance rather than absolute legal guarantees.
+This audit rigorously verifies the mathematical, physical, and operational boundaries of the distributed systems guarantees asserted in the blueprint. It eliminates unverified claims regarding external API idempotency (refuting claims about Twilio and WhatsApp outbound native idempotency headers), models exact PostgreSQL row-level lock concurrency during worker lease expiration, defines the exact scope of database uniqueness constraints across six discrete layers, bounds tenant isolation and dynamic modules, and establishes a strict, auditable foundation for founder sign-off.
 
 ---
 
-## 2. Claim-by-Claim Verification Ledger
+## 2. Evidence Review & Claim Verification Ledger
 
-| # | Audited Topic | Previous Blueprint Claim (`b4c6e66`) | Forensic Verification Result | Corrected Blueprint Text | Authoritative Source / Evidence |
+| # | Topic & Section | Previous Blueprint Claim | Forensic Verification Result | Text in Master Blueprint | Assessment & Official Evidence |
 | :-: | :--- | :--- | :--- | :--- | :--- |
-| **1** | **WhatsApp Cloud API Idempotency** | Listed WhatsApp Cloud API in Tier 1 with Stripe, claiming support for `Idempotency-Key` or `X-Request-ID` headers to prevent duplicate sends. | **REFUTED & FALSE.** Official Meta Graph API documentation (`POST /v21.0/{phone-number-id}/messages`) does **not** support an `Idempotency-Key` header for outbound messages. Blindly retrying timed-out requests results in duplicate messages sent to the recipient's phone. | WhatsApp Outbound is re-classified as **Tier 2 (Queryable via Webhooks)**. Automatic retries upon timeout are strictly forbidden without prior status verification. Inbound message deduplication on `wamid` remains Tier 1. | Meta Graph API WhatsApp Cloud Documentation; `packages/connectors/whatsapp.py` source code. |
-| **2** | **Checkpoint vs Tool Deduplication** | Implied that `PRIMARY KEY (tenant_id, execution_id, step_index)` guarantees that steps and tools are not executed more than once. | **INCOMPLETE & MISLEADING.** The composite primary key only enforces uniqueness on the database checkpoint row. It cannot prevent a node from executing twice before commit, nor can it prevent duplicate HTTP calls to external APIs. | Decoupled guarantees across **Six Discrete Layers of Execution & Deduplication**, explicitly defining the scope, mechanism, and boundary of each layer. | Lamport / Bernstein Distributed Systems Principles; SQL Constraint Semantics. |
-| **3** | **Lease Expiration during Active Transaction** | Claimed worker lease check `lease_expires_at > CURRENT_TIMESTAMP` guarantees worker ownership during commit without explaining lock sequencing or takeover collision. | **UNVERIFIED CONCURRENCY EDGE-CASE.** If W1 checks the lease in SQL and experiences disk I/O delay, real time passes expiration. If W2 attempts takeover while W1 is in-flight, uncoordinated execution can occur without row locks. | Specified PostgreSQL row-level exclusive locking sequence: W1 locks the `execution_tasks` row first; W2's takeover blocks until W1 completes or times out via `SET LOCAL lock_timeout = '2s'`. W2 increments `fence_token` to neutralize stale commits. | PostgreSQL 17 Documentation: Row-Level Locks & Explicit Locking (`SELECT ... FOR UPDATE`, `UPDATE`); Jepsen Analysis. |
-| **4** | **Approval Request Contextual Binding** | Claimed `inputs_digest` binds arguments without defining canonical serialization, role binding, replay prevention, or key storage. | **INSUFFICIENT SECURITY BOUNDARY.** Non-canonical JSON serialization causes hash mismatches on whitespace/ordering. If approval status is not atomic or HMAC keys are in DB, replay and tampering are possible. | Formalized RFC 8785 Canonical JSON Serialization (JCS) and concatenated context (`approval_id`, `tenant_id`, `execution_id`, `step_index`, `tool_name`, `arguments`, `role`, `policy_version`, `expires_at`). Enforced atomic status transition `PENDING -> CONSUMED` and external KMS key storage. | RFC 8785 (JSON Canonicalization Scheme); NIST SP 800-107 HMAC Recommendations. |
-| **5** | **Permanent Memory Lifecycle** | Stated that permanent business facts "are never deleted and never decay", treating durability as absolute. | **REGULATORY & BUSINESS HAZARD.** Absolute permanence violates GDPR Article 17 (Right to Erasure), makes correcting superseded business facts impossible, and ignores contradictory fact accumulation. | Clarified that "Persistent" means surviving conversational sessions (Long-Lived), not undeletable. Added explicit policies for `SUPERSEDED` status, contradiction escalation, and GDPR PII erasure (`status = 'DELETED'`). | GDPR Art. 17; Memento-Skills Fact Service Contract; Enterprise Master Data Management. |
-| **6** | **JSONB & GIN Query Capabilities** | Claimed JSONB + GIN indexing provides complete relational queryability for dynamic business modules. | **ARCHITECTURAL OVERPROMISE.** `jsonb_path_ops` only indexes equality matches (`@>`). It cannot index range queries (`>`, `<`), sorting (`ORDER BY`), or enforce foreign key constraints. Financial calculations in JSON risk floating-point corruption. | Partitioned schema into mandatory native SQL columns (`DECIMAL(18, 4)` for amounts, ISO 4217 currency, foreign keys) and JSONB for non-queryable/extensible attributes. Defined migration thresholds (>10k rows) to relational tables. | PostgreSQL 17 Documentation: Chapter 8.14 JSON Types & Indexing; Martin Fowler EAV Anti-Patterns. |
-| **7** | **Systems Terminology & Legal Guarantees** | Labeled HTTP request timeouts as "The Two Generals Problem" and claimed zero-dependency rewrites provide "100% clean commercial IP guarantee". | **IMPRECISE TERMINOLOGY & UNWARRANTED LEGAL CLAIM.** Network timeouts are partial-failure ambiguity windows, not the formal uncoordinated consensus paradox. Engineering re-writes reduce legal exposure, but engineers cannot grant absolute legal indemnity. | Corrected terminology to "Post-Dispatch Ambiguity Window under Unreliable Transports". Softened IP claims to "conservative engineering risk-avoidance strategy" against SSPL / Modified Apache 2.0 restrictions. | distributed-systems-theory (Akkoyunlu et al., 1975); Legal Counsel Enterprise Guidelines. |
+| **1** | **Twilio SMS Idempotency**<br>`Section 5.5` | Listed Twilio SMS in Tier 1 with parameter `client_deduplication_id` and a 4-hour retention window. | **REFUTED & FALSE.** Official Twilio Messaging API documentation for `POST /2010-04-01/Accounts/{AccountSid}/Messages.json` confirms **no native idempotency parameter or header exists**. Every `POST` request creates a new message and bills the account. | Classified as **Tier 3 (Blind / Non-Idempotent)**. Automatic retries upon timeout are strictly forbidden; requests enter `RECONCILIATION_REQUIRED`. | **VERIFIED.** Official Twilio API Reference: [Twilio Message Resource Documentation](https://www.twilio.com/docs/messaging/api/message-resource). |
+| **2** | **WhatsApp Outbound Idempotency**<br>`Section 5.5` | Classified WhatsApp Outbound as Tier 1 with `Idempotency-Key`, then previously as Tier 2 "Queryable via Webhooks". | **PARTIALLY REFUTED.** Meta Graph API (`POST /v21.0/{phone-number-id}/messages`) **has no native Idempotency-Key header**. While it supports `biz_opaque_callback_data` (max 512 chars) echoed in status webhooks, Meta provides **no synchronous lookup endpoint**. If an HTTP timeout occurs before Meta's ingress, Meta never issues a webhook, leaving the status permanently ambiguous until a timeout window elapses. | Classified as **Tier 2B (Asynchronously Correlatable via Webhook Callback with Timeout Quarantine)**. Automated blind retry is strictly prohibited; tasks wait in a quarantine window before escalation. | **VERIFIED.** Official Meta Documentation: [WhatsApp Business Cloud API Messages Endpoint](https://developers.facebook.com/docs/whatsapp/cloud-api). |
+| **3** | **Stripe API Idempotency**<br>`Section 5.5` | Listed Stripe in Tier 1 using `Idempotency-Key` header with 24-hour retention. | **CONFIRMED ACCURATE.** Stripe API natively supports `Idempotency-Key` for $\ge$ 24 hours. Retrying with identical payload returns the cached response. Retrying with an altered payload returns `400 Bad Request`. Reusing a key after 24h treats it as a fresh request. | Formalized in Tier 1 with exact behavior and 24h expiration semantics. | **VERIFIED.** Official Stripe Documentation: [Stripe API Idempotent Requests](https://docs.stripe.com/api/idempotent_requests). |
+| **4** | **PostgreSQL Concurrency & Lease Expiration**<br>`Section 5.3` | Claimed SQL condition `lease_expires_at > CURRENT_TIMESTAMP` guarantees worker ownership during commit without modeling row locks or race conditions. | **INCOMPLETE CONCURRENCY MODEL.** If W1 checks the lease in SQL and experiences disk I/O delay, real time passes expiration. If W2 attempts takeover while W1's transaction is open, uncoordinated execution can occur without row locks. | Specified PostgreSQL row-level exclusive locking sequence: W1 locks the `execution_tasks` row first via `UPDATE`; W2's takeover blocks with `SET LOCAL lock_timeout = '2s'`. In `Read Committed`, W2 evaluates the WHERE clause against the committed tuple. If W1 extended the lease, W2 matches 0 rows. W1 is bound by `SET LOCAL statement_timeout = '5s'`. | **VERIFIED.** PostgreSQL 17 Documentation: Chapter 13 Concurrency Control & Explicit Locking. |
+| **5** | **Fencing Token Boundary**<br>`Section 5.3` | Implied that `fence_token` guarantees complete end-to-end distributed system protection. | **FALSE GENERALIZATION.** Fencing tokens in PostgreSQL **only protect database writes that explicitly check the token inside that atomic transaction**. They cannot protect against external HTTP side-effects dispatched prior to transaction opening, nor can they protect un-fenced DB writes. | Explicitly codified the boundary: `fence_token` strictly guards database transactional state. External side-effects must be decoupled via the transactional outbox pattern. | **VERIFIED.** Martin Kleppmann: "How to do distributed locking" (Fencing Tokens Principle). |
+| **6** | **Deduplication vs Execution across 6 Layers**<br>`Section 5.4` | Used the phrase "Strict Exactly-Once Checkpoint Row" and "Strict Exactly-Once Outbox Staging". | **IMPRECISE TERMINOLOGY.** Database uniqueness constraints enforce record cardinality, not operational execution counts. A unique key guarantees a single database tuple conditional on commit, but cannot prevent pre-commit execution or post-commit network drops. | Revised to formal systems definition: *يضمن القيد الفريد عدم وجود أكثر من سجل واحد بالمفتاح المحدد داخل قاعدة البيانات، بشرط نجاح المعاملة. ولا يضمن ذلك وحده تنفيذ الأداة الخارجية مرة واحدة.* | **VERIFIED.** Distributed Systems Consensus Limits (Lynch, 1996; Bernstein & Newcomer, 2009). |
+| **7** | **Context-Bound Approvals & Replay Protection**<br>`Section 6.2 & 6.3` | Claimed `inputs_digest` protects approvals, implying HMAC alone prevents replay attacks. | **INSUFFICIENT SECURITY BOUNDARY.** HMAC proves integrity and authenticity of parameters, but does NOT prevent replay. Replay protection requires atomic state transitions under exclusive lock. | Combined RFC 8785 Canonical JSON Serialization (JCS) and HMAC-SHA256 with an atomic state machine (`PENDING -> CONSUMED`) under `SELECT ... FOR UPDATE` lock, plus live entitlement re-validation upon resumption. | **VERIFIED.** RFC 8785 (JSON Canonicalization Scheme) & NIST SP 800-107. |
+| **8** | **Memory Durability & Data Privacy**<br>`Section 9.1` | Claimed permanent facts "are never deleted and never decay", assuming universal GDPR applicability. | **REGULATORY & BUSINESS HAZARD.** Absolute permanence prevents correcting superseded facts and violates data subject privacy. Assuming GDPR universally ignores contractual and jurisdictional variance. | Clarified that "Persistent" means surviving conversational sessions (long-lived), not undeletable. Codified `SUPERSEDED` status, contradiction escalation, and configurable retention/erasure policies. Separated immutable regulatory audit logs from conversational memory. | **VERIFIED.** Enterprise Master Data Management & Multi-Jurisdictional Privacy Principles. |
+| **9** | **JSONB vs Relational Modeling**<br>`Section 11.2` | Implied JSONB + GIN provides complete queryability for dynamic business modules. | **ARCHITECTURAL OVERPROMISE.** `jsonb_path_ops` only indexes equality (`@>`). It cannot index range queries (`>`, `<`), sorting (`ORDER BY`), or enforce foreign keys. Untyped currency risks floating-point corruption. | Partitioned schema into mandatory native SQL columns (`DECIMAL(18, 4)` for currency, ISO 4217, foreign keys) and JSONB for extensible attributes. Strictly prohibited runtime DDL (`CREATE TABLE`). Set migration thresholds (>10k rows) to relational tables. | **VERIFIED.** PostgreSQL 17 Manual: Chapter 8.14 (JSON Types & Indexing). |
+| **10** | **Systems Terminology & Legal Claims**<br>`Section 5.5 & ADR-08` | Labeled HTTP timeouts as "Two Generals Problem" and claimed zero-dependency rewrites provide "100% clean commercial IP guarantee". | **IMPRECISE TERMINOLOGY & UNWARRANTED LEGAL CLAIM.** Network timeouts are partial-failure ambiguity windows, not theoretical uncoordinated consensus paradoxes. Engineers cannot grant absolute legal warranties. | Corrected terminology to "Post-Dispatch Ambiguity Window under Unreliable Transports". Softened IP claims to "conservative engineering risk-avoidance strategy" against SSPL / Modified Apache 2.0 restrictions. | **VERIFIED.** Distributed systems literature (Akkoyunlu et al., 1975) & open-source licensing jurisprudence. |
 
 ---
 
-## 3. The Six Distinct Layers of Deduplication & Guarantees
+## 3. Rigorous PostgreSQL Concurrency & Lease Lock Mechanics
 
-A fundamental finding of this audit is that **distributed execution cannot be treated as a single monolithic guarantee**. Deduplication and failure semantics must be decoupled across the software stack:
-
-```
-[ LAYER 1: Node Execution ]            -> Ephemeral worker memory (May re-run from checkpoint)
-          │
-[ LAYER 2: Node Result Staging ]       -> Local worker memory buffer (Discarded on crash)
-          │
-[ LAYER 3: Checkpoint Persistence ]    -> DB Constraint: PRIMARY KEY (tenant_id, execution_id, step_index)
-          │                              Strict Guarantee: Exactly-Once Checkpoint Row
-[ LAYER 4: Outbox Event Creation ]     -> DB Constraint: UNIQUE (tenant_id, execution_id, step_index, event_type)
-          │                              Strict Guarantee: Exactly-Once Staged Event
-[ LAYER 5: External Action Dispatch ]  -> Post-Dispatch Ambiguity Window (Provider API)
-          │                              Strict Guarantee: At-Least-Once Dispatch (Side-effect risk)
-[ LAYER 6: Delivery Recording ]        -> DB Constraint: UNIQUE (tenant_id, external_message_id)
-                                         Strict Guarantee: Exactly-Once Inbound Acknowledgment
-```
-
-### Precise Layer Breakdown:
-1. **Layer 1 (Node Execution):** Computation in-memory. If the worker crashes mid-calculation, no state is persisted. Execution restarts from the prior checkpoint.
-2. **Layer 2 (Node Result Staging):** The output of LLM generation or local function evaluation. Kept in worker RAM until transaction boundary.
-3. **Layer 3 (Checkpoint Persistence):** Database atomic commit. The `PRIMARY KEY (tenant_id, execution_id, step_index)` guarantees that no two workers can insert a checkpoint for the same execution step.
-4. **Layer 4 (Outbox Event Creation):** Enqueued in the same database transaction as Layer 3. `UNIQUE (tenant_id, execution_id, step_index, event_type)` guarantees that exactly one outbound event is staged per logical step.
-5. **Layer 5 (External Action Dispatch):** Transmission over TCP/HTTP to an external provider (Meta, Stripe, Twilio). Subject to network unreliability. **No database constraint can prevent the external network from dropping a connection.** Guarantee is bounded by Provider Tier.
-6. **Layer 6 (Delivery Recording):** Processing incoming delivery webhooks (`messages.status`, `charge.succeeded`). `UNIQUE (tenant_id, external_message_id)` prevents double-crediting or duplicate customer receipts.
-
----
-
-## 4. Extensible Provider Idempotency Capability Matrix
-
-| Service / Provider | Operation | Idempotency Mechanism | Duplicate Request Behavior | Retention Window | Verified Capability Tier |
-| :--- | :--- | :--- | :--- | :---: | :---: |
-| **Stripe API** | Charges, Transfers, Refunds | HTTP Header `Idempotency-Key: <key>` | Returns identical original response body & HTTP status code without re-executing | 24 Hours | **Tier 1 (Native Idempotent)** |
-| **WhatsApp Cloud API** | Outbound Message Send | **NO native header supported by Graph API!** | **DUPLICATE MESSAGE TRANSMITTED TO PHONE!** | None | **Tier 2 (Queryable via Webhooks)** |
-| **WhatsApp Cloud API** | Inbound Webhooks | `wamid.<hash>` deduplication | Silently dropped by database primary key | Indefinite | **Tier 1 (Native Deduplication)** |
-| **Twilio SMS** | Outbound SMS Send | POST parameter `client_deduplication_id` | Prevents duplicate sends within active window | 4 Hours | **Tier 1 (Native Idempotent)** |
-| **Generic Webhooks** | Outbound HTTP POST | None | Server-dependent; frequently triggers duplicate side-effects | None | **Tier 3 (Blind / Non-Idempotent)** |
-| **SMTP Email** | Outbound Mail Delivery | None | Transmits duplicate emails to recipient inbox | None | **Tier 3 (Blind / Non-Idempotent)** |
-| **External CRM / ERP** | Contact / Deal Creation | Pre-execution search via `external_reference_id` | Adopts existing record if query succeeds | System-dependent | **Tier 2 (Queryable by Reference)** |
-
-### Strict Operational Policy per Tier:
-- **Tier 1:** Safe for immediate automated exponential backoff retry.
-- **Tier 2 (including WhatsApp Outbound):** Automatic blind retry is **FORBIDDEN**. The worker must first query inbound webhook state or channel status to confirm if the `wamid` exists before attempting dispatch.
-- **Tier 3:** Automatic retries are **FORBIDDEN**. Upon timeout in the ambiguity window, the task transitions to `RECONCILIATION_REQUIRED`, halting execution and notifying The Godfather / business owner via Telegram.
-
----
-
-## 5. PostgreSQL Concurrency, Lease Expiration & Locking Mechanics
-
-### Critical Collision Analysis:
+### Scenario Forensic Analysis (`Section 5.3`):
 Consider Worker W1 (current claim owner) and Worker W2 (sweeper attempting takeover):
 
 ```
-Time   Worker W1 (Claim Owner)                    Worker W2 (Takeover Sweeper)
-──────────────────────────────────────────────────────────────────────────────────
-T0     BEGIN TRANSACTION;
-T1     UPDATE execution_tasks
-       SET active_step_index = 1
-       WHERE execution_id = :id
-         AND fence_token = 101
-         AND lease_expires_at > now();
-       [Locks execution_tasks row via
-        Row-Level Exclusive Lock]
-T2     Disk I/O stall / network lag...
-T3     Wall-clock passes lease_expires_at!
-T4                                                BEGIN TRANSACTION;
-                                                  UPDATE execution_tasks
-                                                  SET claimed_by = W2,
-                                                      fence_token = 102
-                                                  WHERE execution_id = :id
-                                                    AND lease_expires_at < now();
-                                                  [W2 BLOCKS waiting for row lock!]
-T5a    [Branch A: W1 finishes stall]
-       INSERT INTO execution_checkpoints...;
-       COMMIT;
-       [Row lock released]
-       --> W2 unblocks in Read Committed mode.
-       --> W2 re-evaluates WHERE clause.
-       --> Because W1 committed updated lease / step,
-           W2 matches 0 rows! W2 exits cleanly.
-──────────────────────────────────────────────────────────────────────────────────
-T5b    [Branch B: W1 stalls indefinitely]
-       --> W2's query with SET LOCAL lock_timeout = '2s'
-           times out and raises LockNotAvailable.
-       --> W2 aborts takeover attempt safely.
-──────────────────────────────────────────────────────────────────────────────────
-T5c    [Branch C: W1 lease expired BEFORE transaction start]
-       --> W2 acquires row, increments fence_token = 102, COMMIT.
-       --> W1 later begins transaction with fence_token = 101.
-       --> W1's UPDATE matches 0 rows!
-       --> W1 raises StaleWorkerExecutionError and rolls back.
+Timeline: Worker W1 Commit vs Worker W2 Takeover Collision
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+T0:   W1 begins commit transaction (BEGIN; SET LOCAL statement_timeout = '5s';)
+T1:   W1 executes:
+      UPDATE execution_tasks
+      SET active_step_index = 2,
+          lease_expires_at = CURRENT_TIMESTAMP + INTERVAL '30 seconds',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE execution_id = :id AND claimed_by = W1 AND fence_token = 101 AND lease_expires_at > now();
+      ==> W1 ACQUIRES ROW-LEVEL EXCLUSIVE LOCK on execution_tasks row.
+T2:   W1 encounters disk I/O stall or network delay. Transaction Tx1 remains uncommitted.
+T3:   Wall-clock time passes lease_expires_at!
+T4:   W2 attempts takeover:
+      BEGIN; SET LOCAL lock_timeout = '2s';
+      UPDATE execution_tasks
+      SET claimed_by = W2, fence_token = fence_token + 1, lease_expires_at = now() + interval '30s'
+      WHERE execution_id = :id AND lease_expires_at < now();
+      ==> W2 ENCOUNTERS ROW LOCK HELD BY Tx1. W2 BLOCKS!
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Branch A (W1 recovers within lock timeout < 2s):
+T5a:  W1 executes INSERT INTO execution_checkpoints...;
+      W1 executes INSERT INTO outbox_events...;
+      W1 commits Tx1 (COMMIT).
+      ==> Row lock is released!
+      ==> In PostgreSQL Read Committed isolation level, W2 unblocks and RE-EVALUATES the WHERE clause
+          against the newly committed version of the row.
+      ==> In the committed row, lease_expires_at was refreshed and active_step_index was advanced.
+      ==> W2's WHERE condition (lease_expires_at < now()) evaluates to FALSE.
+      ==> W2's query matches 0 rows (rows_updated == 0). W2 exits safely with zero state mutation!
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Branch B (W1 stalls past statement timeout > 5s):
+T5b:  PostgreSQL's statement_timeout triggers on Tx1.
+      ==> PostgreSQL forcibly terminates W1's backend process and rolls back Tx1.
+      ==> Row lock is released! All uncommitted writes by W1 are discarded.
+      ==> W2 unblocks (or on W2's retry), acquires row lock, evaluates WHERE clause.
+      ==> Because W1 rolled back, lease_expires_at is still expired.
+      ==> W2 updates claimed_by = W2, increments fence_token = 102, and commits.
+      ==> W2 is now the official owner.
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Branch C (Stale Zombie Worker W1 attempts subsequent commit):
+T5c:  W1 wakes up from freeze and attempts to execute its commit with fence_token = 101:
+      UPDATE execution_tasks ... WHERE fence_token = 101;
+      ==> Database now contains fence_token = 102.
+      ==> UPDATE matches 0 rows.
+      ==> Application logic detects rows_updated == 0, executes ROLLBACK, and raises StaleWorkerExecutionError.
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ```
 
-### Formal Concurrency Rules:
-1. **Single-Row Lock Sequencing:** The first statement of any state-advancing transaction must be an `UPDATE execution_tasks` row, guaranteeing exclusive lock serialization.
-2. **Strict Statement Timeouts:** Every transaction executes under `SET LOCAL statement_timeout = '5s'`.
-3. **Takeover Lock Bounds:** Takeover queries execute under `SET LOCAL lock_timeout = '2s'` to prevent lock storms.
-4. **Fencing Token Monotonicity:** Every lease takeover increments `fence_token = fence_token + 1`. Any commit containing a stale token matches 0 rows and aborts.
+### Exact Concurrency Guarantees & Operational Conditions:
+1. **Lock Acquisition Invariant:** Any transaction advancing task state or attempting lease takeover must first execute an `UPDATE execution_tasks` row, guaranteeing row-level lock serialization.
+2. **Lock Timeout Protection:** Sweeper queries must use `SET LOCAL lock_timeout = '2s'` to prevent lock contention storms.
+3. **Transaction Timeout Protection:** Worker commit transactions must execute under `SET LOCAL statement_timeout = '5s'`.
+4. **Fencing Verification Scope:** Fencing tokens **strictly protect database transactions that verify the token**. They **cannot undo or protect against external HTTP side-effects** dispatched across the network prior to transaction commit.
 
 ---
 
-## 6. Context-Bound Approvals & Canonical RFC 8785 Hashing
+## 4. The Six Discrete Layers of Deduplication & Operational Boundaries
 
-### Canonical Payload Specification:
-To eliminate argument malleability, whitespace tampering, and parameter injection across suspended human approvals:
+To eliminate deceptive claims of "monolithic Exactly-Once", the platform defines exact operational invariants across six layers:
 
-$$\text{inputs\_digest} = \text{HMAC-SHA256}(K_{\text{approval\_hmac}}, \text{ContextPayload})$$
-
-Where `ContextPayload` is the concatenated string:
-```text
-approval_id | tenant_id | execution_id | checkpoint_step_index | target_tool_name | CanonicalJSON(target_tool_arguments) | required_role | tenant_policy_version | expires_at
+```
+[ LAYER 1: Node Execution ]            -> In-memory execution (Ephemeral; re-runs on failure)
+          │
+[ LAYER 2: Node Result Staging ]       -> Worker local RAM buffer (Discarded on crash)
+          │
+[ LAYER 3: Checkpoint Persistence ]    -> DB Constraint: PRIMARY KEY (tenant_id, execution_id, step_index)
+          │                              Invariant: Single database tuple per superstep conditional on commit
+[ LAYER 4: Outbox Event Creation ]     -> DB Constraint: UNIQUE (tenant_id, execution_id, step_index, event_type)
+          │                              Invariant: Single staged outbound event per superstep
+[ LAYER 5: External Action Dispatch ]  -> Post-Dispatch Ambiguity Window (Network Transport)
+          │                              Invariant: At-least-once dispatch attempt; side-effects depend on Provider Tier
+[ LAYER 6: Delivery Recording ]        -> DB Constraint: UNIQUE (tenant_id, external_message_id)
+                                         Invariant: Single delivery record; duplicate incoming webhooks dropped
 ```
 
-- **RFC 8785 (JSON Canonicalization Scheme - JCS):** Deterministic key sorting, elimination of non-significant whitespace (`separators=(',', ':')`), standard float representation, and UTF-8 encoding.
-- **Key Isolation:** $K_{\text{approval\_hmac}}$ is managed via external environment variables or KMS. It is **strictly prohibited from being stored in the PostgreSQL database**.
-- **Replay Protection:** The approval state table enforces a strict one-way state machine (`PENDING -> CONSUMED | EXPIRED | REVOKED`). Resolution acquires a `FOR UPDATE` lock. If status is not `PENDING`, the resumption request is immediately rejected.
-- **Dynamic Entitlement Re-Validation:** At resumption, the engine verifies the *current live subscription and permissions* of the tenant. An approval granted under an old permission tier is invalidated if entitlements were revoked while awaiting approval.
+### Detailed Layer Invariant Matrix:
+
+| Layer | System Entity | What is Prevented from Duplicating | Mechanism / Constraint | What May Still Duplicate (Residual Failure Risk) |
+| :---: | :--- | :--- | :--- | :--- |
+| **1** | **Node Execution** | Stale state accumulation in memory | In-memory execution per turn | Computation may re-execute from last checkpoint if worker crashes. |
+| **2** | **Result Staging** | Committing unverified outputs | Staged in RAM prior to atomic commit | Re-computation of outputs if worker crashes before opening DB transaction. |
+| **3** | **Checkpoint Persistence** | Duplicate step records in DB | `PRIMARY KEY (tenant_id, execution_id, step_index)` | Does NOT prevent external side-effects that were executed before the transaction opened. |
+| **4** | **Outbox Staging** | Duplicate event staging in queue | `UNIQUE (tenant_id, execution_id, step_index, event_type)` | Does NOT guarantee the outbox worker will transmit the event across the network exactly once. |
+| **5** | **External Dispatch** | Blind retry loops on known providers | Provider Idempotency Spectrum (Tier 1 / Tier 2 / Tier 3) | **Duplicate external side-effects** (e.g. duplicate SMS or message) if connection drops on Tier 3 provider. |
+| **6** | **Delivery Recording**| Duplicate processing of incoming webhooks | `UNIQUE (tenant_id, external_message_id)` | Out-of-order webhook delivery requires status sequence validation. |
+
+*Formal Architectural Definition:*
+> **يضمن القيد الفريد عدم وجود أكثر من سجل واحد بالمفتاح المحدد داخل قاعدة البيانات، بشرط نجاح المعاملة. ولا يضمن ذلك وحده تنفيذ الأداة الخارجية مرة واحدة.**
 
 ---
 
-## 7. Permanent Memory Lifecycle & Data Privacy Realities
+## 5. Extensible Provider Idempotency Matrix (Verified Capabilities)
 
-### Resolution of the "Permanence" Fallacy:
-"Persistent Fact Memory" represents **session-surviving knowledge**, not immutable data. Business and legal requirements mandate explicit lifecycles:
-
-1. **Supersession (`SUPERSEDED`):** When business parameters change (e.g., store hours shift from 9 PM to 10 PM), old facts are marked `status = 'SUPERSEDED'`, referencing `superseded_by_fact_id`. Stale facts are excluded from agent context retrieval while preserving audit lineage.
-2. **Contradiction Escalation:** Conflicting facts in the retrieval pipeline halt automatic inference. The conflict is packaged as an inquiry to The Godfather / business owner for authoritative clarification.
-3. **GDPR / Data Subject Erasure:** Personal customer information (PII) is tagged `is_pii = True`. Upon erasure requests under GDPR Art. 17 or CCPA, facts are cryptographically shredded (`status = 'DELETED'`), purging customer names, phone numbers, and addresses while retaining anonymized operational markers.
-4. **Purpose Expiration:** Facts carry optional `valid_until` timestamps for promotional campaigns or temporary rules, automatically archiving to cold storage upon expiration.
-
----
-
-## 8. Boundaries of JSONB & Dynamic Business Modules
-
-### Relational vs JSONB Partitioning Matrix:
-
-| Domain / Attribute | Storage Format | Justification & Architectural Constraint |
-| :--- | :--- | :--- |
-| **Monetary Amounts & Financial Totals** | Native SQL `DECIMAL(18, 4)` | JSON floating-point representations (`float64`) suffer precision loss. Currency math requires exact fixed-point arithmetic. |
-| **Currency Codes** | Native SQL `VARCHAR(3)` | ISO 4217 validation, joins, and exchange rate calculations. |
-| **Tenant Ownership (`tenant_id`)** | Native SQL `UUID NOT NULL REFERENCES tenants(id)` | Strict database-level foreign key constraint and tenant isolation partitioning. |
-| **Lifecycle Status & State** | Native SQL `VARCHAR(32)` | State machine indexing, sorting, and conditional transactions. |
-| **Timestamps (`created_at`, `updated_at`)** | Native SQL `TIMESTAMPTZ NOT NULL` | B-tree index support for time-range filtering and sorting. |
-| **Dynamic / Extensible Properties** | PostgreSQL `JSONB` | Tenant-defined custom fields (e.g., hair stylist chair preference, pet weight). Indexed via GIN `jsonb_path_ops`. |
-
-### Physical Limitations of `jsonb_path_ops`:
-- `jsonb_path_ops` only indexes JSON paths with equality matches (`@>`).
-- It **CANNOT** index range queries (`>`, `<`), prefix searches (`LIKE`), or sorting (`ORDER BY`).
-- It cannot enforce cross-record relational integrity or unique constraints on nested JSON keys.
-
-### Criteria for Relational Promotion:
-When a dynamic entity reaches either **10,000 records per tenant** or requires **multi-table relational joins, foreign key cascades, or double-entry accounting**, the platform must migrate it from dynamic JSONB storage to dedicated, typed relational tables via formal Alembic migrations.
+| Service / Provider | Operation | Idempotency Mechanism | Duplicate Request Behavior | Retention Window | Verified Capability Tier & Source |
+| :--- | :--- | :--- | :--- | :---: | :--- |
+| **Stripe API** | Charges / Refunds / Transfers (`POST /v1/charges`) | HTTP Header `Idempotency-Key: <key>` | Returns identical cached original response & HTTP status; parameter mismatch returns `400 Bad Request` | $\ge$ 24 Hours (Reused key after 24h treated as new request) | **Tier 1 (Native Idempotent within 24h)**<br>*Source:* [Stripe Docs: Idempotent Requests](https://docs.stripe.com/api/idempotent_requests) |
+| **WhatsApp Cloud API** | Outbound Messages (`POST /v21.0/{phone-number-id}/messages`) | **NO native Idempotency-Key header supported in Graph API!** Supports optional `biz_opaque_callback_data` (max 512 chars) echoed back in status webhooks. | **DUPLICATE MESSAGE TRANSMITTED TO USER PHONE!** Graph API has NO synchronous lookup endpoint by callback data. | N/A | **Tier 2B (Asynchronously Correlatable via Webhook Callback with Timeout Quarantine)**<br>*Source:* [Meta WhatsApp Business Platform Documentation](https://developers.facebook.com/docs/whatsapp/cloud-api) |
+| **WhatsApp Cloud API** | Inbound Webhooks (`messages[].id`) | Deduplication on unique message ID `wamid` | Duplicate webhook payload dropped by database unique constraint | Indefinite | **Tier 1 (Native Inbound Deduplication)**<br>*Source:* [Meta Webhook Specs](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks) |
+| **Twilio Programmable SMS** | Outbound SMS (`POST /2010-04-01/.../Messages.json`) | **NONE.** (Claim of `client_deduplication_id` is **REFUTED / NON-EXISTENT** on `Messages.json`). | **DUPLICATE SMS DISPATCHED AND BILLED!** Every POST creates a new message SID. | None | **Tier 3 (Blind / Non-Idempotent)**<br>*Source:* [Twilio API: Message Resource](https://www.twilio.com/docs/messaging/api/message-resource) |
+| **Generic Webhooks / SMTP**| Email / Raw Webhook POST | None | Dispatches duplicate emails / triggers remote endpoint repeatedly | None | **Tier 3 (Blind / Non-Idempotent)** |
+| **External CRM / ERP** | Record Creation | Pre-execution search via `external_reference_id` | Adopts existing record ID if found by search query | Varies | **Tier 2A (Synchronously Queryable by Reference)** |
 
 ---
 
-## 9. Systems Terminology & Clean IP Decision Boundaries
+## 6. Context-Bound Approvals, Replay Protection & Data Privacy
 
-1. **Unreliable Transport Window:** The ambiguity occurring when an HTTP connection drops after sending a request is properly designated as the **Post-Dispatch Ambiguity Window under Unreliable Transports**. Theoretical consensus paradoxes (such as the Two Generals Problem) are uncoordinated channel scenarios; the HTTP client-server timeout is resolved via status inquiries, webhooks, or human reconciliation.
-2. **Third-Party Dependency Policy (ADR-08):** Eliminating dependencies on Dify and n8n is an **architectural risk-avoidance decision** to protect the multi-tenant SaaS business model against restrictive licenses (Dify Modified Apache 2.0 multi-tenant SaaS restriction; n8n Sustainable Use License non-commercial clause). It is documented as a conservative engineering measure, not an absolute legal warranty.
-
----
-
-## 10. Ledger of Validated Guarantees & Operational Boundaries
-
-| System Capability | True Operational Guarantee | Strict Boundary / Prerequisite Condition |
-| :--- | :--- | :--- |
-| **Durable Execution** | The system will resume execution from the last persisted superstep upon worker failure. | Requires PostgreSQL checkpoint commit to have completed. Uncommitted in-flight step computation will re-execute. |
-| **Checkpoint Deduplication** | Exactly one checkpoint row per `(tenant_id, execution_id, step_index)` will exist. | Guaranteed by PostgreSQL composite primary key. Does not prevent pre-checkpoint external API execution. |
-| **Zombie Worker Fencing** | A stale worker cannot commit state or checkpoints after its lease has been taken over. | Guaranteed by monotonic `fence_token` matching on commit UPDATE. Stale commits match 0 rows. |
-| **Outbox Event Deduplication** | Exactly one outbox event will be created per logical step and event type. | Guaranteed by `UNIQUE (tenant_id, execution_id, step_index, event_type)` constraint within the same atomic transaction. |
-| **External Action Dispatch** | At-least-once external transmission attempt. | External side-effects cannot be guaranteed exactly-once if network drops during dispatch. Deduplication depends strictly on Provider Tier. |
-| **Approval Integrity** | Human approvals cannot be tampered with, forged, or replayed. | Guaranteed by RFC 8785 Canonical JSON, external HMAC-SHA256 digest, and atomic `PENDING -> CONSUMED` transition. |
-| **Tenant Isolation** | No tenant can read, modify, or execute another tenant's tasks or data. | Guaranteed by immutable `Scope(tenant_id=...)` propagation and composite `tenant_id` database keys across all tables. |
-| **Dynamic Skill Safety** | Generated skills cannot corrupt running chat turns or breach sandbox boundaries. | Guaranteed by offline Dream Daemon quarantine, 6-gate verification pipeline, and lack of live turn compilation. |
+1. **RFC 8785 Canonical Serialization & HMAC:**
+   - Canonical JSON eliminates whitespace variance and lexicographically sorts keys.
+   - Digest binds: `approval_id`, `tenant_id`, `execution_id`, `step_index`, `target_tool_name`, canonical arguments, `required_role`, `policy_version`, and `expires_at`.
+   - $K_{\text{approval\_hmac}}$ is isolated in external KMS/environment variables, **never in PostgreSQL**.
+2. **Replay Protection Guarantee:**
+   - HMAC proves data integrity, but **does not prevent replay**.
+   - Replay protection is enforced by the database transaction: `SELECT ... FOR UPDATE` acquires an exclusive row lock and verifies `status == 'PENDING'`. As part of the same transaction, status transitions atomically to `CONSUMED`. Subsequent submissions see `CONSUMED` and are rejected.
+3. **Dynamic Entitlement Re-Validation:**
+   - At resumption, the engine verifies the tenant's *current live subscription and permissions*. An approval granted under an old tier is revoked if privileges were altered during the waiting period.
+4. **Memory Lifecycle & Privacy Realities:**
+   - "Persistent" means surviving turn sessions, not undeletable.
+   - Superceded facts are marked `SUPERSEDED` referencing the newer fact ID.
+   - Conflicting facts halt automatic inference and escalate to the owner.
+   - Personal/sensitive data (PII) is subject to configurable retention and erasure policies.
+   - Immutable audit logs (`audit_events`) are kept in an independent audit store with statutory retention schedules (1–7 years) and cannot be deleted by conversational memory erasure requests.
 
 ---
 
-## 11. Open Architectural Questions Requiring Empirical Calibration
+## 7. Dynamic Business Modules & Multi-Layered Tenant Isolation
 
-The following 5 decisions represent trade-offs that cannot be dogmatically finalized in code without staging benchmarks or business requirements:
+1. **Relational Data Partitioning:**
+   - Financial values are strictly modeled using native SQL `DECIMAL(18, 4)` and ISO 4217 currency codes. Floating-point numbers in JSONB are strictly forbidden for currency math.
+   - Primary keys, foreign keys (`tenant_id`), status, and timestamps reside in native SQL columns.
+   - JSONB is restricted to non-queryable, flexible extension attributes.
+   - Dynamic entities exceeding 10,000 records per tenant or requiring relational joins/cascades must be migrated to dedicated relational tables via Alembic migrations.
+2. **Authority Gating:**
+   - Autonomous agents are **strictly prohibited from generating or executing dynamic DDL** (`CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`).
+   - Dynamic structures use pre-provisioned relational tables with declarative Pydantic schemas.
+3. **Tenant Isolation Boundaries:**
+   - Tenant isolation is not an unprovable mathematical absolute ("impenetrable"); it is an engineered boundary enforced across four layers:
+     1. Application layer: Immutable `Scope(tenant_id=...)` explicitly passed to all functions.
+     2. Query layer: Base repository enforces `WHERE tenant_id = scope.tenant_id`.
+     3. Database layer: Composite primary and foreign keys include `tenant_id`.
+     4. Tool sandboxing: Tool runner verifies `tool_context.scope.tenant_id` before execution.
+   - Continuous automated cross-tenant penetration test suites are mandatory to verify isolation.
 
-1. **The Godfather Operational Aspect:**
-   - *Options:* In-Band Deterministic Graph Node vs Out-of-Band Cognitive Daemon.
-   - *Initial Selection:* **Dual-Aspect** (Deterministic policy guard in-band; LLM cognitive reflection daemon out-of-band).
+---
+
+## 8. Remaining Architectural Open Issues (Calibration Matrix)
+
+The following 5 decisions represent explicit trade-offs requiring empirical calibration in staging rather than unverified dogmatic claims:
+
+1. **The Godfather Operational Aspect (`Section 4.2 & ADR-01`):**
+   - *Design:* Dual-Aspect (Deterministic in-band policy check without LLM; out-of-band cognitive reflection daemon).
    - *Calibration:* Measure turn latency impact on live Telegram chats.
-2. **Checkpoint Store Latency vs Throughput:**
-   - *Options:* Direct PostgreSQL synchronous commits vs Redis write-behind buffer.
-   - *Initial Selection:* **Direct PostgreSQL commit** for zero data loss durability.
-   - *Calibration:* Monitor DB write IOPS at 1,000 concurrent tenant tasks.
-3. **Context Scope Propagation Ergonomics:**
-   - *Options:* Python `contextvars` vs Explicit `scope: Scope` method parameters.
-   - *Initial Selection:* **Explicit parameter passing** on all domain and repository calls to prevent silent context leaks in async background threads.
-4. **Dynamic Business Modules Provisioning:**
-   - *Options:* JSONB extensible attributes vs automated dynamic DDL (`CREATE TABLE`).
-   - *Initial Selection:* **JSONB extensible attributes** in pre-provisioned relational tables to avoid runtime DDL locks.
-5. **Tamper-Evident Audit Chain Anchoring:**
-   - *Options:* Cloud S3 Object Lock (WORM) vs Signed Local Git Repositories.
-   - *Initial Selection:* **S3 Object Lock** for cloud infrastructure; signed Git commits for on-premise air-gapped deployments.
+2. **Checkpoint Store Latency vs Throughput (`Section 5.2`):**
+   - *Design:* Direct PostgreSQL synchronous commits for zero-data-loss durability.
+   - *Calibration:* Monitor DB write IOPS at 1,000 concurrent tenant tasks before introducing Redis write-behind buffers.
+3. **Context Scope Propagation Ergonomics (`Section 7.2`):**
+   - *Design:* Explicit parameter passing (`scope: Scope`) across all service and repository calls.
+   - *Calibration:* Verify zero context leaks across async worker boundaries.
+4. **Dynamic Business Modules Provisioning (`Section 11.2`):**
+   - *Design:* JSONB extensible attributes in pre-provisioned relational tables to prevent runtime DDL locks.
+   - *Calibration:* Benchmark query performance on 10,000+ attribute rows.
+5. **Tamper-Evident Audit Chain Anchoring (`Section 13.1`):**
+   - *Design:* Cloud S3 Object Lock (WORM) for cloud; signed Git commits for on-premise air-gapped deployments.
 
 ---
 
-## 12. Final Verdict & Next Steps
+## 9. Final Readiness Verdict
 
-### Verdict: **READY FOR FOUNDER REVIEW & SIGN-OFF**
+### Verdict: **`READY FOR FOUNDER REVIEW`**
 
-- **Documentation State:** `docs/architecture/MASTER_ARCHITECTURE_BLUEPRINT.md` and this audit report are internally consistent, mathematically and physically sound, and completely free of false claims.
-- **Constraints Maintained:**
-  - Zero application code modified.
-  - Zero DDL, Alembic migrations, or database models created.
-  - Zero implementation of the new engine attempted.
-  - Complete replacement strategy of legacy engine preserved.
-- **Next Step:** Await explicit founder review and formal sign-off before initiating Phase 2 (Domain Modeling & Implementation).
+- **Evidence Basis:** All provider capabilities, concurrency lock mechanics, memory lifecycles, and deduplication layers have been verified against official documentation and distributed systems theory.
+- **Zero Unjustified Claims:** False claims regarding WhatsApp and Twilio native idempotency headers have been eliminated and re-classified with precision.
+- **Strict Compliance:** Zero application code modified, zero DDL/migrations created, zero new engine implementation begun.
+- **Status:** Fully prepared for formal founder review and sign-off.
